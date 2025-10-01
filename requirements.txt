@@ -1,2 +1,6 @@
-python-telegram-bot
+kurigram
 pymongo
+python-dotenv>=1.0.0
+motor>=3.1.1
+fuzzywuzzy>=0.18.0
+python-levenshtein>=0.20.9  # optional but speeds up fuzzywuzzy

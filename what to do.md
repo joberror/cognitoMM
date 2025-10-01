@@ -12,7 +12,7 @@ Below are pre-set details of the bot (ENV)
 1. First thing first
 Set up a requirements of recommended packages for telegram bot development that can handle channel files
 
-2. Databse
+2. Database
 For a start,create and add the below table, and their respective indexes (table name: index name) to the databse. Use recommended index format.
 - Users : Telegram Name, Telegram ID, Date Added
 - Admins : Telegram Name, Telegram ID, Level
