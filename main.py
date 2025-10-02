@@ -1,33 +1,40 @@
 # main.py
 """
-Hybrid Telegram Movie Bot (full)
-- User session (Kurigram) monitors channels and indexes uploads
-- Bot session (Pyrogram) provides user commands, admin management, inline
+Telegram Movie Bot - User Session Only
+- Single user session (Kurigram) handles both monitoring and bot commands
 - MongoDB Atlas (motor) for async storage
 - Robust metadata parsing, exact + fuzzy search, channel management
+- Simplified architecture without hybrid session conflicts
 """
 
 import os
 import re
 import asyncio
+import sys
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
 from fuzzywuzzy import fuzz
 from motor.motor_asyncio import AsyncIOMotorClient
-from pyrogram import Client as UserClient
-from pyrogram import Client as BotClient, filters
+
+# Import Kurigram (maintained Pyrogram fork) - uses pyrogram import name
+from pyrogram import Client, filters
 from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent
+from pyrogram.handlers import MessageHandler, InlineQueryHandler
 
 load_dotenv()
+
+print(f"🐍 Python {sys.version}")
+print("🎬 MovieBot - User Session Only")
 
 # -------------------------
 # CONFIG / ENV
 # -------------------------
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
-SESSION_STRING = os.getenv("SESSION_STRING", "")   # Kurigram user session string
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")             # Bot token (recommended)
-BOT_ID = int(os.getenv("BOT_ID", "0"))             # optional
+SESSION_STRING = os.getenv("SESSION_STRING", "")   # User session string
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")             # Bot token (for bot-like features)
+BOT_ID = int(os.getenv("BOT_ID", "0"))             # Bot ID
 MONGO_URI = os.getenv("MONGO_URI", "")
 MONGO_DB = os.getenv("MONGO_DB", "moviebot")
 ADMINS = [int(x) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
@@ -38,7 +45,15 @@ AUTO_INDEX_DEFAULT = os.getenv("AUTO_INDEXING", "True").lower() in ("1", "true",
 # -------------------------
 # DB (motor async)
 # -------------------------
-mongo = AsyncIOMotorClient(MONGO_URI)
+# Configure MongoDB client with longer timeouts for better connectivity
+mongo = AsyncIOMotorClient(
+    MONGO_URI,
+    connectTimeoutMS=60000,  # 60 seconds
+    serverSelectionTimeoutMS=60000,  # 60 seconds
+    socketTimeoutMS=60000,  # 60 seconds
+    maxPoolSize=10,
+    retryWrites=True
+)
 db = mongo[MONGO_DB]
 movies_col = db["movies"]
 users_col = db["users"]
@@ -47,26 +62,45 @@ settings_col = db["settings"]
 logs_col = db["logs"]
 
 async def ensure_indexes():
-    # Called at startup
-    await movies_col.create_index([("title", 1)])
-    await movies_col.create_index([("year", 1)])
-    await movies_col.create_index([("quality", 1)])
-    await movies_col.create_index([("type", 1)])
-    await movies_col.create_index([("channel_id", 1), ("message_id", 1)], unique=False)
-    await users_col.create_index([("user_id", 1)], unique=True)
-    await channels_col.create_index([("channel_id", 1)], unique=True)
+    """Create database indexes with error handling"""
+    try:
+        print("🔧 Creating database indexes...")
+        
+        # Test connection first
+        await mongo.admin.command('ping')
+        print("✅ MongoDB connection successful")
+        
+        # Create indexes with error handling
+        indexes_to_create = [
+            (movies_col, [("title", 1)], "title index"),
+            (movies_col, [("year", 1)], "year index"),
+            (movies_col, [("quality", 1)], "quality index"),
+            (movies_col, [("type", 1)], "type index"),
+            (movies_col, [("channel_id", 1), ("message_id", 1)], "channel_message index"),
+            (users_col, [("user_id", 1)], "user_id index"),
+            (channels_col, [("channel_id", 1)], "channel_id index"),
+        ]
+        
+        for collection, index_spec, description in indexes_to_create:
+            try:
+                if description == "user_id index" or description == "channel_id index":
+                    await collection.create_index(index_spec, unique=True)
+                else:
+                    await collection.create_index(index_spec)
+                print(f"✅ Created {description}")
+            except Exception as e:
+                print(f"⚠️ Failed to create {description}: {e}")
+                
+    except Exception as e:
+        print(f"❌ Database connection failed: {e}")
+        print("⚠️ Continuing without database indexes - some features may be slower")
+        raise e
 
 # -------------------------
-# Clients
+# Single Client (User Session)
 # -------------------------
-user = None
-bot = None
-
-if SESSION_STRING:
-    user = UserClient(name="user_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
-
-if BOT_TOKEN:
-    bot = BotClient("bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Client will be initialized within async context
+client = None
 
 # -------------------------
 # Helpers: roles, logs
@@ -96,12 +130,28 @@ async def log_action(action: str, by: int = None, target: int = None, extra: dic
         await logs_col.insert_one(doc)
     except Exception:
         pass
-    if bot and LOG_CHANNEL:
+    if client and LOG_CHANNEL:
         try:
             msg = f"Log: {action}\nBy: {by}\nTarget: {target}\nExtra: {extra or {}}"
-            await bot.send_message(int(LOG_CHANNEL), msg)
+            await client.send_message(int(LOG_CHANNEL), msg)
         except Exception:
             pass
+
+async def check_banned(message: Message) -> bool:
+    """Check if user is banned and send message if they are"""
+    uid = message.from_user.id
+    if await is_banned(uid):
+        await message.reply_text("🚫 You are banned from using this bot.")
+        return True
+    return False
+
+def require_not_banned(func):
+    """Decorator to check if user is banned before executing command"""
+    async def wrapper(client, message: Message):
+        if await check_banned(message):
+            return
+        return await func(client, message)
+    return wrapper
 
 # -------------------------
 # Robust metadata parser
@@ -291,35 +341,96 @@ async def index_message(msg):
         print("Index error:", e)
 
 # -------------------------
-# user session monitoring
+# Auto-indexing handler
 # -------------------------
-if user:
-    @user.on_message()
-    async def _on_user_msg(client, message):
-        # auto-indexing controlled via settings_col
-        s = await settings_col.find_one({"k": "auto_indexing"})
-        auto_index = s["v"] if s and "v" in s else AUTO_INDEX_DEFAULT
-        if not auto_index:
-            return
+async def on_message(client, message):
+    # Handle bot commands first (if message starts with /)
+    if message.text and message.text.startswith('/'):
+        # This is a USER SESSION, not a bot session
+        # Process all commands regardless of chat type or mentions
+        await handle_command(client, message)
+        return
+
+    # Auto-indexing for channel messages
+    s = await settings_col.find_one({"k": "auto_indexing"})
+    auto_index = s["v"] if s and "v" in s else AUTO_INDEX_DEFAULT
+    if auto_index:
         await index_message(message)
 
 # -------------------------
-# Bot middleware: block banned users
+# Command Handler
 # -------------------------
-if bot:
-    @bot.on_message(filters.command("start"))
-    async def _block_banned(client, message: Message):
-        uid = message.from_user.id
-        if await is_banned(uid):
-            await message.reply_text("🚫 You are banned from using this bot.")
-            return
+async def handle_command(client, message: Message):
+    """Handle bot commands"""
+    if not message.text:
+        return
+
+    # Parse command
+    parts = message.text.split()
+    if not parts:
+        return
+
+    command = parts[0].lower()
+    # Remove bot username if present
+    if '@' in command:
+        command = command.split('@')[0]
+
+    # Remove leading slash
+    if command.startswith('/'):
+        command = command[1:]
+
+    # Check if user is banned (except for start command)
+    if command != 'start' and await check_banned(message):
+        return
+
+    # Route commands
+    if command == 'start':
+        await cmd_start(client, message)
+    elif command == 'help':
+        await cmd_help(client, message)
+    elif command == 'search':
+        await cmd_search(client, message)
+    elif command == 'search_year':
+        await cmd_search_year(client, message)
+    elif command == 'search_quality':
+        await cmd_search_quality(client, message)
+    elif command == 'file_info':
+        await cmd_file_info(client, message)
+    elif command == 'metadata':
+        await cmd_metadata(client, message)
+    elif command == 'my_history':
+        await cmd_my_history(client, message)
+    elif command == 'my_prefs':
+        await cmd_my_prefs(client, message)
+    # Admin commands
+    elif command == 'add_channel':
+        await cmd_add_channel(client, message)
+    elif command == 'remove_channel':
+        await cmd_remove_channel(client, message)
+    elif command == 'list_channels':
+        await cmd_list_channels(client, message)
+    elif command == 'channel_stats':
+        await cmd_channel_stats(client, message)
+    elif command == 'rescan_channel':
+        await cmd_rescan_channel(client, message)
+    elif command == 'toggle_indexing':
+        await cmd_toggle_indexing(client, message)
+    elif command == 'promote':
+        await cmd_promote(client, message)
+    elif command == 'demote':
+        await cmd_demote(client, message)
+    elif command == 'ban_user':
+        await cmd_ban_user(client, message)
+    elif command == 'unban_user':
+        await cmd_unban_user(client, message)
+    else:
+        # Unknown command
+        await message.reply_text("❓ Unknown command. Use /help to see available commands.")
 
 # -------------------------
-# Bot commands
+# Command Implementations
 # -------------------------
-if bot:
-    # help/start
-    USER_HELP = """
+USER_HELP = """
 🎬 Movie Bot Commands
 /search <title>           - Search (exact + fuzzy)
 /search_year <year>       - Search by year
@@ -331,9 +442,9 @@ if bot:
 /help                     - Show this message
 """
 
-    ADMIN_HELP = """
+ADMIN_HELP = """
 👑 Admin Commands
-/add_channel <link|id>     - Add a channel (user session must have access)
+/add_channel <link|id>     - Add a channel
 /remove_channel <link|id>  - Remove a channel
 /list_channels             - List channels
 /channel_stats             - Counts per channel
@@ -345,343 +456,433 @@ if bot:
 /unban_user <user_id>      - Unban a user
 """
 
-    @bot.on_message(filters.command("help"))
-    async def help_cmd(client, message: Message):
-        uid = message.from_user.id
-        text = USER_HELP
-        if await is_admin(uid):
-            text += "\n" + ADMIN_HELP
-        await message.reply_text(text)
+async def cmd_start(client, message: Message):
+    # Check if user is banned first
+    if await check_banned(message):
+        return
 
-    @bot.on_message(filters.command("start"))
-    async def start_cmd(client, message: Message):
-        await users_col.update_one({"user_id": message.from_user.id}, {"$set": {"last_seen": datetime.utcnow()}}, upsert=True)
-        await message.reply_text("👋 Welcome! Use /help to see commands.")
+    await users_col.update_one({"user_id": message.from_user.id}, {"$set": {"last_seen": datetime.utcnow()}}, upsert=True)
+    await message.reply_text("👋 Welcome! Use /help to see commands.")
 
-    # add_channel / remove / list
-    async def resolve_chat_ref(ref: str):
-        """Use user client to resolve a channel reference (id, t.me/slug, @username)."""
-        if not user:
-            raise RuntimeError("User session required to resolve channels")
-        r = ref.strip()
-        if r.startswith("t.me/"):
-            r = r.split("t.me/")[-1]
-        # try numeric
-        try:
-            cid = int(r)
-            return await user.get_chat(cid)
-        except Exception:
-            pass
-        # try username or slug
-        return await user.get_chat(r)
+async def cmd_help(client, message: Message):
+    uid = message.from_user.id
+    text = USER_HELP
+    if await is_admin(uid):
+        text += "\n" + ADMIN_HELP
+    await message.reply_text(text)
 
-    @bot.on_message(filters.command("add_channel"))
-    async def add_channel_cmd(client, message: Message):
-        uid = message.from_user.id
-        if not await is_admin(uid):
-            return await message.reply_text("🚫 Admins only.")
-        if len(message.command) < 2:
-            return await message.reply_text("Usage: /add_channel <link|id|@username>")
-        target = message.command[1]
-        try:
-            chat = await resolve_chat_ref(target)
-            doc = {"channel_id": chat.id, "channel_title": getattr(chat, "title", None), "added_by": uid, "added_at": datetime.utcnow(), "enabled": True}
-            await channels_col.update_one({"channel_id": chat.id}, {"$set": doc}, upsert=True)
-            await log_action("add_channel", by=uid, target=chat.id, extra={"title": doc["channel_title"]})
-            await message.reply_text(f"✅ Channel added: {doc['channel_title']} ({chat.id})")
-        except Exception as e:
-            await message.reply_text(f"❌ Could not resolve channel: {e}")
+async def cmd_search(client, message: Message):
+    uid = message.from_user.id
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /search <title>")
 
-    @bot.on_message(filters.command("remove_channel"))
-    async def remove_channel_cmd(client, message: Message):
-        uid = message.from_user.id
-        if not await is_admin(uid):
-            return await message.reply_text("🚫 Admins only.")
-        if len(message.command) < 2:
-            return await message.reply_text("Usage: /remove_channel <link|id|@username>")
-        target = message.command[1]
-        try:
-            chat = await resolve_chat_ref(target)
-            await channels_col.delete_one({"channel_id": chat.id})
-            await log_action("remove_channel", by=uid, target=chat.id)
-            await message.reply_text(f"✅ Channel removed: {getattr(chat,'title', chat.id)} ({chat.id})")
-        except Exception as e:
-            await message.reply_text(f"❌ Could not remove channel: {e}")
+    query = " ".join(parts[1:]).strip()
 
-    @bot.on_message(filters.command("list_channels"))
-    async def list_channels_cmd(client, message: Message):
-        uid = message.from_user.id
-        if not await is_admin(uid):
-            return await message.reply_text("🚫 Admins only.")
-        docs = channels_col.find({})
-        items = []
-        async for d in docs:
-            items.append(f"{d.get('channel_title','?')} — `{d.get('channel_id')}` — enabled={d.get('enabled', True)}")
-        await message.reply_text("\n".join(items) or "No channels configured.")
+    # record search history
+    await users_col.update_one({"user_id": uid}, {"$push": {"search_history": {"q": query, "ts": datetime.utcnow()}}}, upsert=True)
 
-    @bot.on_message(filters.command("channel_stats"))
-    async def channel_stats_cmd(client, message: Message):
-        uid = message.from_user.id
-        if not await is_admin(uid):
-            return await message.reply_text("🚫 Admins only.")
-        pipeline = [{"$group": {"_id": "$channel_id", "count": {"$sum": 1}}}, {"$sort": {"count": -1}}, {"$limit": 50}]
-        rows = await movies_col.aggregate(pipeline).to_list(length=50)
-        parts = []
-        for r in rows:
-            ch = await channels_col.find_one({"channel_id": r["_id"]})
-            title = ch.get("channel_title") if ch else str(r["_id"])
-            parts.append(f"{title} ({r['_id']}): {r['count']}")
-        await message.reply_text("\n".join(parts) or "No data.")
+    parts = []
 
-    @bot.on_message(filters.command("rescan_channel"))
-    async def rescan_channel_cmd(client, message: Message):
-        uid = message.from_user.id
-        if not await is_admin(uid):
-            return await message.reply_text("🚫 Admins only.")
-        if not user:
-            return await message.reply_text("User session required for rescanning.")
-        if len(message.command) < 2:
-            return await message.reply_text("Usage: /rescan_channel <link|id|@username> [limit]")
-        target = message.command[1]
-        limit = int(message.command[2]) if len(message.command) >= 3 else 200
-        try:
-            chat = await resolve_chat_ref(target)
-            count = 0
-            async for m in user.iter_history(chat.id, limit=limit):
-                await index_message(m)
-                count += 1
-            await message.reply_text(f"✅ Rescan complete. Scanned {count} messages from {getattr(chat,'title',chat.id)}")
-            await log_action("rescan_channel", by=uid, target=chat.id, extra={"scanned": count})
-        except Exception as e:
-            await message.reply_text(f"❌ Rescan failed: {e}")
+    exact = await movies_col.find({"title": {"$regex": query, "$options": "i"}}).to_list(length=10)
+    if exact:
+        parts.append("**🔍 Exact Matches:**\n\n" + "\n\n".join(
+            [f"🎬 {r.get('title')} ({r.get('year','N/A')}) [{r.get('quality','N/A')}] — `{r.get('channel_title')}` (msg {r.get('message_id')})" for r in exact]
+        ))
 
-    @bot.on_message(filters.command("toggle_indexing"))
-    async def toggle_indexing_cmd(client, message: Message):
-        uid = message.from_user.id
-        if not await is_admin(uid):
-            return await message.reply_text("🚫 Admins only.")
-        doc = await settings_col.find_one({"k": "auto_indexing"})
-        current = doc["v"] if doc else AUTO_INDEX_DEFAULT
-        new = not current
-        await settings_col.update_one({"k": "auto_indexing"}, {"$set": {"v": new}}, upsert=True)
-        await message.reply_text(f"Auto-indexing set to {new}")
-        await log_action("toggle_indexing", by=uid, extra={"new": new})
+    # fuzzy
+    candidates = []
+    cursor = movies_col.find({}, {"title": 1, "year": 1, "quality": 1, "channel_title": 1, "message_id": 1}).limit(800)
+    async for r in cursor:
+        title = r.get("title", "")
+        score = fuzz.partial_ratio(query.lower(), title.lower())
+        if score >= FUZZY_THRESHOLD:
+            candidates.append((score, r))
+    candidates = sorted(candidates, key=lambda x: x[0], reverse=True)[:10]
+    if candidates:
+        parts.append("**🤔 Similar (Fuzzy Matches):**\n\n" + "\n\n".join(
+            [f"🎬 {r[1].get('title')} ({r[1].get('year','N/A')}) [{r[1].get('quality','N/A')}] — {r[0]}% — `{r[1].get('channel_title')}` (msg {r[1].get('message_id')})" for r in candidates]
+        ))
 
-    # promote/demote/ban/unban
-    @bot.on_message(filters.command("promote"))
-    async def promote_cmd(client, message: Message):
-        uid = message.from_user.id
-        if not await is_admin(uid):
-            return await message.reply_text("🚫 Admins only.")
-        if len(message.command) < 2:
-            return await message.reply_text("Usage: /promote <user_id>")
-        try:
-            target = int(message.command[1])
-            await users_col.update_one({"user_id": target}, {"$set": {"role": "admin"}}, upsert=True)
-            await message.reply_text(f"✅ {target} promoted to admin.")
-            await log_action("promote", by=uid, target=target)
-        except Exception:
-            await message.reply_text("Invalid user id.")
+    if not parts:
+        return await message.reply_text("⚠️ No results found (exact or fuzzy).")
+    await message.reply_text("\n\n".join(parts), disable_web_page_preview=True)
 
-    @bot.on_message(filters.command("demote"))
-    async def demote_cmd(client, message: Message):
-        uid = message.from_user.id
-        if not await is_admin(uid):
-            return await message.reply_text("🚫 Admins only.")
-        if len(message.command) < 2:
-            return await message.reply_text("Usage: /demote <user_id>")
-        try:
-            target = int(message.command[1])
-            await users_col.update_one({"user_id": target}, {"$set": {"role": "user"}}, upsert=True)
-            await message.reply_text(f"✅ {target} demoted to user.")
-            await log_action("demote", by=uid, target=target)
-        except Exception:
-            await message.reply_text("Invalid user id.")
+async def cmd_search_year(client, message: Message):
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /search_year <year>")
 
-    @bot.on_message(filters.command("ban_user"))
-    async def ban_cmd(client, message: Message):
-        uid = message.from_user.id
-        if not await is_admin(uid):
-            return await message.reply_text("🚫 Admins only.")
-        if len(message.command) < 2:
-            return await message.reply_text("Usage: /ban_user <user_id>")
-        try:
-            target = int(message.command[1])
-            await users_col.update_one({"user_id": target}, {"$set": {"role": "banned"}}, upsert=True)
-            await message.reply_text(f"🚫 {target} has been banned.")
-            await log_action("ban_user", by=uid, target=target)
-        except Exception:
-            await message.reply_text("Invalid user id.")
+    try:
+        year = int(parts[1])
+    except ValueError:
+        return await message.reply_text("Year must be a number")
 
-    @bot.on_message(filters.command("unban_user"))
-    async def unban_cmd(client, message: Message):
-        uid = message.from_user.id
-        if not await is_admin(uid):
-            return await message.reply_text("🚫 Admins only.")
-        if len(message.command) < 2:
-            return await message.reply_text("Usage: /unban_user <user_id>")
-        try:
-            target = int(message.command[1])
-            await users_col.update_one({"user_id": target}, {"$set": {"role": "user"}}, upsert=True)
-            await message.reply_text(f"✅ {target} has been unbanned.")
-            await log_action("unban_user", by=uid, target=target)
-        except Exception:
-            await message.reply_text("Invalid user id.")
+    results = await movies_col.find({"year": year}).to_list(length=20)
+    if not results:
+        return await message.reply_text(f"⚠️ No movies found for year {year}")
 
-    # search hybrid (exact + fuzzy)
-    @bot.on_message(filters.command("search"))
-    async def search_hybrid_cmd(client, message: Message):
-        uid = message.from_user.id
-        query = " ".join(message.command[1:]).strip()
-        if not query:
-            return await message.reply_text("Usage: /search <title>")
+    text = f"**🗓️ Movies from {year}:**\n\n" + "\n\n".join(
+        [f"🎬 {r.get('title')} [{r.get('quality','N/A')}] — `{r.get('channel_title')}` (msg {r.get('message_id')})" for r in results]
+    )
+    await message.reply_text(text, disable_web_page_preview=True)
 
-        # record search history
-        await users_col.update_one({"user_id": uid}, {"$push": {"search_history": {"q": query, "ts": datetime.utcnow()}}}, upsert=True)
+async def cmd_search_quality(client, message: Message):
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /search_quality <quality>")
 
-        parts = []
+    quality = parts[1]
+    results = await movies_col.find({"quality": {"$regex": quality, "$options": "i"}}).to_list(length=20)
+    if not results:
+        return await message.reply_text(f"⚠️ No movies found with quality {quality}")
 
-        exact = await movies_col.find({"title": {"$regex": query, "$options": "i"}}).to_list(length=10)
-        if exact:
-            parts.append("**🔍 Exact Matches:**\n\n" + "\n\n".join(
-                [f"🎬 {r.get('title')} ({r.get('year','N/A')}) [{r.get('quality','N/A')}] — `{r.get('channel_title')}` (msg {r.get('message_id')})" for r in exact]
-            ))
+    text = f"**📺 Movies with quality {quality}:**\n\n" + "\n\n".join(
+        [f"🎬 {r.get('title')} ({r.get('year','N/A')}) — `{r.get('channel_title')}` (msg {r.get('message_id')})" for r in results]
+    )
+    await message.reply_text(text, disable_web_page_preview=True)
 
-        # fuzzy
-        candidates = []
-        cursor = movies_col.find({}, {"title": 1, "year": 1, "quality": 1, "channel_title": 1, "message_id": 1}).limit(800)
-        async for r in cursor:
-            title = r.get("title", "")
-            score = fuzz.partial_ratio(query.lower(), title.lower())
-            if score >= FUZZY_THRESHOLD:
-                candidates.append((score, r))
-        candidates = sorted(candidates, key=lambda x: x[0], reverse=True)[:10]
-        if candidates:
-            parts.append("**🤔 Similar (Fuzzy Matches):**\n\n" + "\n\n".join(
-                [f"🎬 {r[1].get('title')} ({r[1].get('year','N/A')}) [{r[1].get('quality','N/A')}] — {r[0]}% — `{r[1].get('channel_title')}` (msg {r[1].get('message_id')})" for r in candidates]
-            ))
+async def cmd_file_info(client, message: Message):
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /file_info <message_id>")
+    try:
+        msg_id = int(parts[1])
+    except Exception:
+        return await message.reply_text("message_id must be integer")
+    doc = await movies_col.find_one({"message_id": msg_id})
+    if not doc:
+        return await message.reply_text("No file indexed with that message_id.")
+    text = (
+        f"🎬 **{doc.get('title','Unknown')}**\n"
+        f"📅 Year: {doc.get('year','N/A')}\n"
+        f"📂 Size: {doc.get('file_size','N/A')} bytes\n"
+        f"🎚️ Quality: {doc.get('quality','N/A')}\n"
+        f"📁 Type: {doc.get('type','N/A')}\n"
+        f"🔗 Channel: {doc.get('channel_title','N/A')} (id {doc.get('channel_id')})\n"
+        f"🆔 Message ID: {doc.get('message_id')}\n"
+        f"📝 Caption: {doc.get('caption','')}\n"
+    )
+    await message.reply_text(text, disable_web_page_preview=True)
 
-        if not parts:
-            return await message.reply_text("⚠️ No results found (exact or fuzzy).")
-        await message.reply_text("\n\n".join(parts), disable_web_page_preview=True)
+async def cmd_metadata(client, message: Message):
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /metadata <title>")
+    query = " ".join(parts[1:]).strip()
+    doc = await movies_col.find_one({"title": {"$regex": query, "$options": "i"}})
+    if not doc:
+        return await message.reply_text("No metadata found for that title.")
+    text = (
+        f"🎬 **{doc.get('title','Unknown')}**\n"
+        f"📅 Year: {doc.get('year','N/A')}\n"
+        f"🧵 Rip: {doc.get('rip','N/A')}\n"
+        f"🌐 Source: {doc.get('source','N/A')}\n"
+        f"🎚️ Quality: {doc.get('quality','N/A')}\n"
+        f"📁 Extension: {doc.get('extension','N/A')}\n"
+        f"🖥️ Resolution: {doc.get('resolution','N/A')}\n"
+        f"🔊 Audio: {doc.get('audio','N/A')}\n"
+        f"📺 Type: {doc.get('type','N/A')}\n"
+        f"Season/Episode: {doc.get('season','N/A')}/{doc.get('episode','N/A')}\n"
+        f"📂 File size: {doc.get('file_size','N/A')}\n"
+        f"🔗 Channel: {doc.get('channel_title','N/A')}\n"
+        f"🆔 Message ID: {doc.get('message_id')}\n"
+        f"📝 Caption: {doc.get('caption','')}\n"
+    )
+    await message.reply_text(text, disable_web_page_preview=True)
 
-    # file_info & metadata
-    @bot.on_message(filters.command("file_info"))
-    async def file_info_cmd(client, message: Message):
-        if len(message.command) < 2:
-            return await message.reply_text("Usage: /file_info <message_id>")
-        try:
-            msg_id = int(message.command[1])
-        except Exception:
-            return await message.reply_text("message_id must be integer")
-        doc = await movies_col.find_one({"message_id": msg_id})
-        if not doc:
-            return await message.reply_text("No file indexed with that message_id.")
-        text = (
-            f"🎬 **{doc.get('title','Unknown')}**\n"
-            f"📅 Year: {doc.get('year','N/A')}\n"
-            f"📂 Size: {doc.get('file_size','N/A')} bytes\n"
-            f"🎚️ Quality: {doc.get('quality','N/A')}\n"
-            f"📁 Type: {doc.get('type','N/A')}\n"
-            f"🔗 Channel: {doc.get('channel_title','N/A')} (id {doc.get('channel_id')})\n"
-            f"🆔 Message ID: {doc.get('message_id')}\n"
-            f"📝 Caption: {doc.get('caption','')}\n"
-        )
-        await message.reply_text(text, disable_web_page_preview=True)
+async def cmd_my_history(client, message: Message):
+    uid = message.from_user.id
+    doc = await users_col.find_one({"user_id": uid})
+    history = doc.get("search_history", []) if doc else []
+    if not history:
+        return await message.reply_text("You have no search history.")
+    text = "\n".join([f"{h['ts'].isoformat()} — {h['q']}" for h in history[-20:]])
+    await message.reply_text(text)
 
-    @bot.on_message(filters.command("metadata"))
-    async def metadata_cmd(client, message: Message):
-        query = " ".join(message.command[1:]).strip()
-        if not query:
-            return await message.reply_text("Usage: /metadata <title>")
-        doc = await movies_col.find_one({"title": {"$regex": query, "$options": "i"}})
-        if not doc:
-            return await message.reply_text("No metadata found for that title.")
-        text = (
-            f"🎬 **{doc.get('title','Unknown')}**\n"
-            f"📅 Year: {doc.get('year','N/A')}\n"
-            f"🧵 Rip: {doc.get('rip','N/A')}\n"
-            f"🌐 Source: {doc.get('source','N/A')}\n"
-            f"🎚️ Quality: {doc.get('quality','N/A')}\n"
-            f"📁 Extension: {doc.get('extension','N/A')}\n"
-            f"🖥️ Resolution: {doc.get('resolution','N/A')}\n"
-            f"🔊 Audio: {doc.get('audio','N/A')}\n"
-            f"📺 Type: {doc.get('type','N/A')}\n"
-            f"Season/Episode: {doc.get('season','N/A')}/{doc.get('episode','N/A')}\n"
-            f"📂 File size: {doc.get('file_size','N/A')}\n"
-            f"🔗 Channel: {doc.get('channel_title','N/A')}\n"
-            f"🆔 Message ID: {doc.get('message_id')}\n"
-            f"📝 Caption: {doc.get('caption','')}\n"
-        )
-        await message.reply_text(text, disable_web_page_preview=True)
-
-    # my_history & prefs
-    @bot.on_message(filters.command("my_history"))
-    async def my_history_cmd(client, message: Message):
-        uid = message.from_user.id
+async def cmd_my_prefs(client, message: Message):
+    uid = message.from_user.id
+    parts = message.text.split()
+    if len(parts) == 1:
         doc = await users_col.find_one({"user_id": uid})
-        history = doc.get("search_history", []) if doc else []
-        if not history:
-            return await message.reply_text("You have no search history.")
-        text = "\n".join([f"{h['ts'].isoformat()} — {h['q']}" for h in history[-20:]])
-        await message.reply_text(text)
+        prefs = doc.get("preferences", {}) if doc else {}
+        await message.reply_text(f"Your preferences: {prefs}")
+    else:
+        if len(parts) < 3:
+            return await message.reply_text("Usage: /my_prefs <key> <value>")
+        key = parts[1]
+        value = " ".join(parts[2:])
+        await users_col.update_one({"user_id": uid}, {"$set": {f"preferences.{key}": value}}, upsert=True)
+        await message.reply_text(f"Set preference `{key}` = `{value}`")
 
-    @bot.on_message(filters.command("my_prefs"))
-    async def my_prefs_cmd(client, message: Message):
-        uid = message.from_user.id
-        if len(message.command) == 1:
-            doc = await users_col.find_one({"user_id": uid})
-            prefs = doc.get("preferences", {}) if doc else {}
-            await message.reply_text(f"Your preferences: {prefs}")
-        else:
-            if len(message.command) < 3:
-                return await message.reply_text("Usage: /my_prefs <key> <value>")
-            key = message.command[1]
-            value = " ".join(message.command[2:])
-            await users_col.update_one({"user_id": uid}, {"$set": {f"preferences.{key}": value}}, upsert=True)
-            await message.reply_text(f"Set preference `{key}` = `{value}`")
+# -------------------------
+# Admin Commands (simplified implementations)
+# -------------------------
+async def resolve_chat_ref(ref: str):
+    """Use client to resolve a channel reference (id, t.me/slug, @username)."""
+    r = ref.strip()
+    if r.startswith("t.me/"):
+        r = r.split("t.me/")[-1]
+    # try numeric
+    try:
+        cid = int(r)
+        return await client.get_chat(cid)
+    except Exception:
+        pass
+    # try username or slug
+    return await client.get_chat(r)
 
-    # inline query support
-    @bot.on_inline_query()
-    async def inline_handler(client, inline_query: InlineQuery):
-        q = inline_query.query.strip()
-        if not q:
-            return
-        exact = await movies_col.find({"title": {"$regex": q, "$options": "i"}}).to_list(length=20)
-        results = []
-        for i, r in enumerate(exact):
-            results.append(
-                InlineQueryResultArticle(
-                    id=str(i),
-                    title=r.get("title"),
-                    description=f"{r.get('year','N/A')} | {r.get('quality','N/A')}",
-                    input_message_content=InputTextMessageContent(
-                        f"🎬 {r.get('title')} ({r.get('year','N/A')}) [{r.get('quality','N/A')}] — {r.get('channel_title')} (msg {r.get('message_id')})"
-                    )
+async def cmd_add_channel(client, message: Message):
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /add_channel <link|id|@username>")
+    target = parts[1]
+    try:
+        chat = await resolve_chat_ref(target)
+        doc = {"channel_id": chat.id, "channel_title": getattr(chat, "title", None), "added_by": uid, "added_at": datetime.utcnow(), "enabled": True}
+        await channels_col.update_one({"channel_id": chat.id}, {"$set": doc}, upsert=True)
+        await log_action("add_channel", by=uid, target=chat.id, extra={"title": doc["channel_title"]})
+        await message.reply_text(f"✅ Channel added: {doc['channel_title']} ({chat.id})")
+    except Exception as e:
+        await message.reply_text(f"❌ Could not resolve channel: {e}")
+
+async def cmd_remove_channel(client, message: Message):
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /remove_channel <link|id|@username>")
+    target = parts[1]
+    try:
+        chat = await resolve_chat_ref(target)
+        await channels_col.delete_one({"channel_id": chat.id})
+        await log_action("remove_channel", by=uid, target=chat.id)
+        await message.reply_text(f"✅ Channel removed: {getattr(chat,'title', chat.id)} ({chat.id})")
+    except Exception as e:
+        await message.reply_text(f"❌ Could not remove channel: {e}")
+
+async def cmd_list_channels(client, message: Message):
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+    docs = channels_col.find({})
+    items = []
+    async for d in docs:
+        items.append(f"{d.get('channel_title','?')} — `{d.get('channel_id')}` — enabled={d.get('enabled', True)}")
+    await message.reply_text("\n".join(items) or "No channels configured.")
+
+async def cmd_channel_stats(client, message: Message):
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+    pipeline = [{"$group": {"_id": "$channel_id", "count": {"$sum": 1}}}, {"$sort": {"count": -1}}, {"$limit": 50}]
+    rows = await movies_col.aggregate(pipeline).to_list(length=50)
+    parts = []
+    for r in rows:
+        ch = await channels_col.find_one({"channel_id": r["_id"]})
+        title = ch.get("channel_title") if ch else str(r["_id"])
+        parts.append(f"{title} ({r['_id']}): {r['count']}")
+    await message.reply_text("\n".join(parts) or "No data.")
+
+async def cmd_rescan_channel(client, message: Message):
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /rescan_channel <link|id|@username> [limit]")
+    target = parts[1]
+    limit = int(parts[2]) if len(parts) >= 3 else 200
+    try:
+        chat = await resolve_chat_ref(target)
+        count = 0
+        async for m in client.get_chat_history(chat.id, limit=limit):
+            await index_message(m)
+            count += 1
+        await message.reply_text(f"✅ Rescan complete. Scanned {count} messages from {getattr(chat,'title',chat.id)}")
+        await log_action("rescan_channel", by=uid, target=chat.id, extra={"scanned": count})
+    except Exception as e:
+        await message.reply_text(f"❌ Rescan failed: {e}")
+
+async def cmd_toggle_indexing(client, message: Message):
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+    doc = await settings_col.find_one({"k": "auto_indexing"})
+    current = doc["v"] if doc else AUTO_INDEX_DEFAULT
+    new = not current
+    await settings_col.update_one({"k": "auto_indexing"}, {"$set": {"v": new}}, upsert=True)
+    await message.reply_text(f"Auto-indexing set to {new}")
+    await log_action("toggle_indexing", by=uid, extra={"new": new})
+
+async def cmd_promote(client, message: Message):
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /promote <user_id>")
+    try:
+        target = int(parts[1])
+        await users_col.update_one({"user_id": target}, {"$set": {"role": "admin"}}, upsert=True)
+        await message.reply_text(f"✅ {target} promoted to admin.")
+        await log_action("promote", by=uid, target=target)
+    except Exception:
+        await message.reply_text("Invalid user id.")
+
+async def cmd_demote(client, message: Message):
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /demote <user_id>")
+    try:
+        target = int(parts[1])
+        await users_col.update_one({"user_id": target}, {"$set": {"role": "user"}}, upsert=True)
+        await message.reply_text(f"✅ {target} demoted to user.")
+        await log_action("demote", by=uid, target=target)
+    except Exception:
+        await message.reply_text("Invalid user id.")
+
+async def cmd_ban_user(client, message: Message):
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /ban_user <user_id>")
+    try:
+        target = int(parts[1])
+        await users_col.update_one({"user_id": target}, {"$set": {"role": "banned"}}, upsert=True)
+        await message.reply_text(f"🚫 {target} has been banned.")
+        await log_action("ban_user", by=uid, target=target)
+    except Exception:
+        await message.reply_text("Invalid user id.")
+
+async def cmd_unban_user(client, message: Message):
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /unban_user <user_id>")
+    try:
+        target = int(parts[1])
+        await users_col.update_one({"user_id": target}, {"$set": {"role": "user"}}, upsert=True)
+        await message.reply_text(f"✅ {target} has been unbanned.")
+        await log_action("unban_user", by=uid, target=target)
+    except Exception:
+        await message.reply_text("Invalid user id.")
+
+# -------------------------
+# Inline Query Support
+# -------------------------
+async def inline_handler(client, inline_query: InlineQuery):
+    q = inline_query.query.strip()
+    if not q:
+        return
+    exact = await movies_col.find({"title": {"$regex": q, "$options": "i"}}).to_list(length=20)
+    results = []
+    for i, r in enumerate(exact):
+        results.append(
+            InlineQueryResultArticle(
+                id=str(i),
+                title=r.get("title"),
+                description=f"{r.get('year','N/A')} | {r.get('quality','N/A')}",
+                input_message_content=InputTextMessageContent(
+                    f"🎬 {r.get('title')} ({r.get('year','N/A')}) [{r.get('quality','N/A')}] — {r.get('channel_title')} (msg {r.get('message_id')})"
                 )
             )
-        await inline_query.answer(results, cache_time=5)
+        )
+    await inline_query.answer(results, cache_time=5)
 
 # -------------------------
-# Startup
+# Main Function with Event Loop Handling
 # -------------------------
-async def main():
-    await ensure_indexes()
-    started = []
-    if user:
-        await user.start()
-        print("User session started.")
-        started.append(user)
-    if bot:
-        await bot.start()
-        print("Bot session started.")
-        started.append(bot)
-    print("✅ MovieBot hybrid running.")
+def run_bot():
+    """Run the bot with Kurigram - simplified approach"""
     try:
-        await asyncio.Event().wait()
-    finally:
-        for c in started:
-            await c.stop()
+        print("🔄 Starting bot with Kurigram...")
+        # Use asyncio.run for cleaner event loop management
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Bot stopped by user")
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
+
+async def main():
+    print("🔧 Setting up database indexes...")
+    await ensure_indexes()
+    print("✅ Database indexes ready")
+
+    # Create client configuration
+    try:
+        # Validate required environment variables
+        if not API_ID or not API_HASH:
+            print("❌ API_ID and API_HASH are required")
+            sys.exit(1)
+
+        if not SESSION_STRING:
+            print("❌ SESSION_STRING is required for user session")
+            sys.exit(1)
+
+        print("🔄 Starting user session with proper async context...")
+
+        # Use async with Client() pattern as recommended by Kurigram docs
+        async with Client(
+            name="movie_bot_session",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=SESSION_STRING,
+            workdir=".",
+            sleep_threshold=60,  # Sleep threshold for flood wait
+        ) as app:
+            # Set global client reference for handlers
+            global client
+            client = app
+
+            # Register handlers manually since decorators can't be used with async context
+            app.add_handler(MessageHandler(on_message))
+            app.add_handler(InlineQueryHandler(inline_handler))
+
+            print("✅ User session started successfully")
+            print("✅ MovieBot running with single user session!")
+            print("📱 Bot is ready to receive commands and monitor channels!")
+            print("🛑 Press Ctrl+C to stop")
+
+            # Keep the program running
+            stop_event = asyncio.Event()
+
+            # Handle shutdown gracefully
+            def signal_handler():
+                print("\n🛑 Received shutdown signal...")
+                stop_event.set()
+
+            # Wait for stop signal
+            try:
+                await stop_event.wait()
+            except KeyboardInterrupt:
+                signal_handler()
+
+    except Exception as e:
+        print(f"❌ Error during startup: {e}")
+        import traceback
+        traceback.print_exc()
+        raise e
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Check Python version and warn about compatibility
+    if sys.version_info >= (3, 13):
+        print("⚠️  WARNING: Python 3.13+ detected!")
+        print("⚠️  This version may have compatibility issues with Pyrogram.")
+        print("⚠️  Recommended: Use Python 3.12.x for best compatibility.")
+        print("⚠️  Attempting to run with compatibility patches...")
+
+    run_bot()
