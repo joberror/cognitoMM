@@ -145,6 +145,42 @@ async def check_banned(message: Message) -> bool:
         return True
     return False
 
+async def should_process_command(message: Message) -> bool:
+    """
+    Determine if a command should be processed based on access control rules.
+
+    Commands are processed if:
+    1. Message is from a private chat (direct message)
+    2. Message is from a monitored channel (in channels_col database)
+    3. User is an admin (in ADMINS list or has admin role in database)
+
+    This prevents the user account from responding to commands in random groups.
+    """
+    # Always process private messages
+    if message.chat.type == "private":
+        return True
+
+    # Check if user is an admin - admins can use commands anywhere
+    user_id = message.from_user.id
+    if await is_admin(user_id):
+        return True
+
+    # Check if this is a monitored channel
+    if message.chat.type == "channel":
+        channel_doc = await channels_col.find_one({"channel_id": message.chat.id})
+        if channel_doc and channel_doc.get("enabled", True):
+            return True
+
+    # Check if this is a monitored group/supergroup
+    if message.chat.type in ["group", "supergroup"]:
+        # Only process if the group is explicitly added as a monitored channel
+        channel_doc = await channels_col.find_one({"channel_id": message.chat.id})
+        if channel_doc and channel_doc.get("enabled", True):
+            return True
+
+    # Default: Don't process commands from unauthorized sources
+    return False
+
 def require_not_banned(func):
     """Decorator to check if user is banned before executing command"""
     async def wrapper(client, message: Message):
@@ -346,9 +382,11 @@ async def index_message(msg):
 async def on_message(client, message):
     # Handle bot commands first (if message starts with /)
     if message.text and message.text.startswith('/'):
-        # This is a USER SESSION, not a bot session
-        # Process all commands regardless of chat type or mentions
-        await handle_command(client, message)
+        # ACCESS CONTROL: Only process commands from authorized sources
+        should_process = await should_process_command(message)
+
+        if should_process:
+            await handle_command(client, message)
         return
 
     # Auto-indexing for channel messages
