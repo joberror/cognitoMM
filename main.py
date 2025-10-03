@@ -12,7 +12,7 @@ import re
 import asyncio
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from fuzzywuzzy import fuzz
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -124,7 +124,7 @@ async def log_action(action: str, by: int = None, target: int = None, extra: dic
         "by": by,
         "target": target,
         "extra": extra or {},
-        "ts": datetime.utcnow()
+        "ts": datetime.now(timezone.utc)
     }
     try:
         await logs_col.insert_one(doc)
@@ -313,10 +313,17 @@ def parse_metadata(caption: str = None, filename: str = None) -> dict:
 # -------------------------
 async def index_message(msg):
     try:
-        # must be channel post
+        # Debug logging (remove this in production)
+        # print(f"🔍 Index attempt: Chat={getattr(msg.chat, 'type', 'None')} ID={getattr(msg.chat, 'id', 'None')} HasVideo={getattr(msg, 'video', None) is not None} HasDoc={getattr(msg, 'document', None) is not None}")
+
+        # must be channel, supergroup, or forum post
         if getattr(msg, "chat", None) is None:
             return
-        if getattr(msg.chat, "type", None) != "channel":
+
+        chat_type = getattr(msg.chat, "type", None)
+        # Handle both string and enum values
+        chat_type_str = str(chat_type).lower() if chat_type else ""
+        if not any(supported in chat_type_str for supported in ["channel", "supergroup", "forum"]):
             return
 
         # Only index channels that exist in channels_col and enabled True
@@ -361,12 +368,12 @@ async def index_message(msg):
             "season": parsed.get("season"),
             "episode": parsed.get("episode"),
             "file_size": file_size,
-            "upload_date": datetime.utcfromtimestamp(msg.date.timestamp()) if getattr(msg, "date", None) else datetime.utcnow(),
+            "upload_date": datetime.utcfromtimestamp(msg.date.timestamp()) if getattr(msg, "date", None) else datetime.now(timezone.utc),
             "channel_id": msg.chat.id,
             "channel_title": getattr(msg.chat, "title", None),
             "message_id": msg.id,
             "caption": caption,
-            "indexed_at": datetime.utcnow()
+            "indexed_at": datetime.now(timezone.utc)
         }
 
         await movies_col.insert_one(entry)
@@ -392,6 +399,13 @@ async def on_message(client, message):
     # Auto-indexing for channel messages
     s = await settings_col.find_one({"k": "auto_indexing"})
     auto_index = s["v"] if s and "v" in s else AUTO_INDEX_DEFAULT
+
+    # Debug: Show all non-command messages from supported chat types (remove in production)
+    # if message.chat:
+    #     chat_type_str = str(message.chat.type).lower() if message.chat.type else ""
+    #     if any(supported in chat_type_str for supported in ["channel", "supergroup", "forum"]):
+    #         print(f"📺 {message.chat.type} message: {getattr(message.chat, 'title', 'Unknown')} ({message.chat.id}) - Auto-index: {auto_index}")
+
     if auto_index:
         await index_message(message)
 
@@ -499,7 +513,7 @@ async def cmd_start(client, message: Message):
     if await check_banned(message):
         return
 
-    await users_col.update_one({"user_id": message.from_user.id}, {"$set": {"last_seen": datetime.utcnow()}}, upsert=True)
+    await users_col.update_one({"user_id": message.from_user.id}, {"$set": {"last_seen": datetime.now(timezone.utc)}}, upsert=True)
     await message.reply_text("👋 Welcome! Use /help to see commands.")
 
 async def cmd_help(client, message: Message):
@@ -518,7 +532,7 @@ async def cmd_search(client, message: Message):
     query = " ".join(parts[1:]).strip()
 
     # record search history
-    await users_col.update_one({"user_id": uid}, {"$push": {"search_history": {"q": query, "ts": datetime.utcnow()}}}, upsert=True)
+    await users_col.update_one({"user_id": uid}, {"$push": {"search_history": {"q": query, "ts": datetime.now(timezone.utc)}}}, upsert=True)
 
     parts = []
 
@@ -680,7 +694,7 @@ async def cmd_add_channel(client, message: Message):
     target = parts[1]
     try:
         chat = await resolve_chat_ref(target)
-        doc = {"channel_id": chat.id, "channel_title": getattr(chat, "title", None), "added_by": uid, "added_at": datetime.utcnow(), "enabled": True}
+        doc = {"channel_id": chat.id, "channel_title": getattr(chat, "title", None), "added_by": uid, "added_at": datetime.now(timezone.utc), "enabled": True}
         await channels_col.update_one({"channel_id": chat.id}, {"$set": doc}, upsert=True)
         await log_action("add_channel", by=uid, target=chat.id, extra={"title": doc["channel_title"]})
         await message.reply_text(f"✅ Channel added: {doc['channel_title']} ({chat.id})")
@@ -734,17 +748,41 @@ async def cmd_rescan_channel(client, message: Message):
     if len(parts) < 2:
         return await message.reply_text("Usage: /rescan_channel <link|id|@username> [limit]")
     target = parts[1]
-    limit = int(parts[2]) if len(parts) >= 3 else 200
+    limit = int(parts[2]) if len(parts) >= 3 else 50  # Reduced default limit
+
     try:
         chat = await resolve_chat_ref(target)
+        await message.reply_text(f"🔄 Starting rescan of {getattr(chat,'title',chat.id)} (limit: {limit})...")
+
         count = 0
-        async for m in client.get_chat_history(chat.id, limit=limit):
-            await index_message(m)
-            count += 1
-        await message.reply_text(f"✅ Rescan complete. Scanned {count} messages from {getattr(chat,'title',chat.id)}")
-        await log_action("rescan_channel", by=uid, target=chat.id, extra={"scanned": count})
+        indexed = 0
+
+        # Process in smaller batches with timeout handling
+        try:
+            async for m in client.get_chat_history(chat.id, limit=limit):
+                count += 1
+                try:
+                    # Check if message has media before attempting to index
+                    if getattr(m, 'video', None) or (getattr(m, 'document', None) and getattr(m.document, 'mime_type', '').startswith('video')):
+                        await index_message(m)
+                        indexed += 1
+                except Exception as idx_error:
+                    print(f"❌ Error indexing message {m.id}: {idx_error}")
+                    continue
+
+                # Progress update every 10 messages
+                if count % 10 == 0:
+                    print(f"📊 Processed {count}/{limit} messages, indexed {indexed}")
+
+        except Exception as scan_error:
+            await message.reply_text(f"⚠️ Scan interrupted after {count} messages: {scan_error}")
+
+        await message.reply_text(f"✅ Rescan complete. Scanned {count} messages, indexed {indexed} media files from {getattr(chat,'title',chat.id)}")
+        await log_action("rescan_channel", by=uid, target=chat.id, extra={"scanned": count, "indexed": indexed})
+
     except Exception as e:
         await message.reply_text(f"❌ Rescan failed: {e}")
+        print(f"❌ Rescan error: {e}")
 
 async def cmd_toggle_indexing(client, message: Message):
     uid = message.from_user.id
