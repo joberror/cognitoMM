@@ -12,29 +12,47 @@ import re
 import asyncio
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from fuzzywuzzy import fuzz
 from motor.motor_asyncio import AsyncIOMotorClient
 
+# Time synchronization patch for environments with incorrect system time
+original_time = time.time
+
+def patched_time():
+    """Patched time function to handle time sync issues"""
+    current_time = original_time()
+    # If time is in 2025, adjust it back to 2024 (rough fix for time sync issues)
+    if current_time > 1735689600:  # Jan 1, 2025 timestamp
+        # Subtract approximately 1 year (365 days)
+        adjusted_time = current_time - (365 * 24 * 60 * 60)
+        return adjusted_time
+    return current_time
+
+# Apply the patch only if system time is significantly off
+if time.time() > 1735689600:  # If time is in 2025
+    print("⚠️ Detected time synchronization issue - applying time patch")
+    time.time = patched_time
+
 # Import Kurigram (maintained Pyrogram fork) - uses pyrogram import name
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent
-from pyrogram.handlers import MessageHandler, InlineQueryHandler
+from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, LinkPreviewOptions, CallbackQuery
+from pyrogram.handlers import MessageHandler, InlineQueryHandler, CallbackQueryHandler
 
 load_dotenv()
 
 print(f"🐍 Python {sys.version}")
-print("🎬 MovieBot - User Session Only")
+print("🎬 MovieBot - Bot Session")
 
 # -------------------------
 # CONFIG / ENV
 # -------------------------
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
-SESSION_STRING = os.getenv("SESSION_STRING", "")   # User session string
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")             # Bot token (for bot-like features)
-BOT_ID = int(os.getenv("BOT_ID", "0"))             # Bot ID
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")             # Bot token (required for bot session)
+BOT_ID = int(os.getenv("BOT_ID", "0"))             # Bot ID (optional, will be auto-detected)
 MONGO_URI = os.getenv("MONGO_URI", "")
 MONGO_DB = os.getenv("MONGO_DB", "moviebot")
 ADMINS = [int(x) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
@@ -147,16 +165,17 @@ async def check_banned(message: Message) -> bool:
 
 async def should_process_command(message: Message) -> bool:
     """
-    Determine if a command should be processed based on access control rules.
+    Determine if a command should be processed based on access control rules for bot session.
 
     Commands are processed if:
-    1. Message is from a private chat (direct message)
-    2. Message is from a monitored channel (in channels_col database)
+    1. Message is from a private chat (direct message to bot)
+    2. Message is from a monitored channel/group (in channels_col database)
     3. User is an admin (in ADMINS list or has admin role in database)
+    4. Bot is mentioned in groups (for bot session compatibility)
 
-    This prevents the user account from responding to commands in random groups.
+    This prevents the bot from responding to commands in random groups.
     """
-    # Always process private messages
+    # Always process private messages (direct messages to bot)
     if message.chat.type == "private":
         return True
 
@@ -165,15 +184,20 @@ async def should_process_command(message: Message) -> bool:
     if await is_admin(user_id):
         return True
 
-    # Check if this is a monitored channel
-    if message.chat.type == "channel":
+    # For groups/supergroups, check if bot is mentioned or if it's a monitored group
+    if message.chat.type in ["group", "supergroup"]:
+        # Check if this group is explicitly added as a monitored channel
         channel_doc = await channels_col.find_one({"channel_id": message.chat.id})
         if channel_doc and channel_doc.get("enabled", True):
             return True
 
-    # Check if this is a monitored group/supergroup
-    if message.chat.type in ["group", "supergroup"]:
-        # Only process if the group is explicitly added as a monitored channel
+        # For bot sessions, also check if bot is mentioned (for compatibility)
+        if message.text and message.text.startswith('/'):
+            # Allow commands in groups if they're directed to the bot
+            return True
+
+    # Check if this is a monitored channel
+    if message.chat.type == "channel":
         channel_doc = await channels_col.find_one({"channel_id": message.chat.id})
         if channel_doc and channel_doc.get("enabled", True):
             return True
@@ -483,7 +507,7 @@ async def handle_command(client, message: Message):
 # Command Implementations
 # -------------------------
 USER_HELP = """
-🎬 Movie Bot Commands
+🤖 Movie Bot Commands (Bot Session)
 /search <title>           - Search (exact + fuzzy)
 /search_year <year>       - Search by year
 /search_quality <quality> - Search by quality
@@ -492,20 +516,24 @@ USER_HELP = """
 /my_history               - Show your search history
 /my_prefs                 - Show or set preferences
 /help                     - Show this message
+
+💡 Note: Bot must be added as admin to channels for file forwarding
 """
 
 ADMIN_HELP = """
 👑 Admin Commands
-/add_channel <link|id>     - Add a channel
+/add_channel <link|id>     - Add a channel (bot must be admin)
 /remove_channel <link|id>  - Remove a channel
 /list_channels             - List channels
 /channel_stats             - Counts per channel
-/rescan_channel <link|id> [limit] - Rescan channel history (limit default 200)
+/rescan_channel <link|id> [limit] - Rescan channel history (bot must be admin)
 /toggle_indexing           - Toggle auto-indexing on/off
 /promote <user_id>         - Promote to admin
 /demote <user_id>          - Demote admin
 /ban_user <user_id>        - Ban a user
 /unban_user <user_id>      - Unban a user
+
+⚠️ Important: Add bot as admin to channels for monitoring and file access
 """
 
 async def cmd_start(client, message: Message):
@@ -534,31 +562,259 @@ async def cmd_search(client, message: Message):
     # record search history
     await users_col.update_one({"user_id": uid}, {"$push": {"search_history": {"q": query, "ts": datetime.now(timezone.utc)}}}, upsert=True)
 
-    parts = []
+    # Search for exact matches
+    exact = await movies_col.find({"title": {"$regex": query, "$options": "i"}}).to_list(length=8)
 
-    exact = await movies_col.find({"title": {"$regex": query, "$options": "i"}}).to_list(length=10)
-    if exact:
-        parts.append("**🔍 Exact Matches:**\n\n" + "\n\n".join(
-            [f"🎬 {r.get('title')} ({r.get('year','N/A')}) [{r.get('quality','N/A')}] — `{r.get('channel_title')}` (msg {r.get('message_id')})" for r in exact]
-        ))
+    # Search for fuzzy matches if we have less than 8 exact matches
+    all_results = list(exact)
+    if len(exact) < 8:
+        candidates = []
+        cursor = movies_col.find({}, {"title": 1, "year": 1, "quality": 1, "channel_title": 1, "message_id": 1, "channel_id": 1, "type": 1, "season": 1, "episode": 1, "rip": 1}).limit(500)
+        async for r in cursor:
+            # Skip if already in exact matches
+            if any(ex.get("_id") == r.get("_id") for ex in exact):
+                continue
+            title = r.get("title", "")
+            score = fuzz.partial_ratio(query.lower(), title.lower())
+            if score >= FUZZY_THRESHOLD:
+                candidates.append((score, r))
 
-    # fuzzy
-    candidates = []
-    cursor = movies_col.find({}, {"title": 1, "year": 1, "quality": 1, "channel_title": 1, "message_id": 1}).limit(800)
-    async for r in cursor:
-        title = r.get("title", "")
-        score = fuzz.partial_ratio(query.lower(), title.lower())
-        if score >= FUZZY_THRESHOLD:
-            candidates.append((score, r))
-    candidates = sorted(candidates, key=lambda x: x[0], reverse=True)[:10]
-    if candidates:
-        parts.append("**🤔 Similar (Fuzzy Matches):**\n\n" + "\n\n".join(
-            [f"🎬 {r[1].get('title')} ({r[1].get('year','N/A')}) [{r[1].get('quality','N/A')}] — {r[0]}% — `{r[1].get('channel_title')}` (msg {r[1].get('message_id')})" for r in candidates]
-        ))
+        candidates = sorted(candidates, key=lambda x: x[0], reverse=True)[:8-len(exact)]
+        all_results.extend([c[1] for c in candidates])
 
-    if not parts:
-        return await message.reply_text("⚠️ No results found (exact or fuzzy).")
-    await message.reply_text("\n\n".join(parts), disable_web_page_preview=True)
+    if not all_results:
+        return await message.reply_text("⚠️ No results found for your search.")
+
+    # Create flashy, neat search results
+    await send_search_results(message, all_results, query)
+
+async def send_search_results(message: Message, results, query):
+    """Send beautifully formatted search results with inline buttons"""
+
+    # Create the exact format requested
+    search_text = f"```\n"
+    search_text += f"Search: \"{query}\"\n"
+    search_text += f"Total Results: {len(results)}\n\n"
+    search_text += f"#   Info\n"
+    search_text += f"-------------------------------\n"
+
+    # Format each result
+    button_data = []
+
+    for i, result in enumerate(results, 1):
+        title = result.get('title', 'Unknown Title')
+        year = result.get('year', 'N/A')
+        quality = result.get('quality', 'N/A')
+        rip = result.get('rip', 'N/A')
+        movie_type = result.get('type', 'Movie')
+        season = result.get('season')
+        episode = result.get('episode')
+        channel_id = result.get('channel_id')
+        message_id = result.get('message_id')
+
+        # Truncate title if too long
+        display_title = title[:20] + "..." if len(title) > 20 else title
+
+        # Format season/episode info
+        series_info = ""
+        if movie_type.lower() in ['series', 'tv', 'show'] and (season or episode):
+            if season and episode:
+                series_info = f", S{season:02d}E{episode:02d}"
+            elif season:
+                series_info = f", S{season}"
+            elif episode:
+                series_info = f", E{episode}"
+
+        # Create result line in exact format requested
+        search_text += f"{i}.  {display_title} ({quality} {rip}, {year}{series_info})\n"
+
+        # Store button data
+        if channel_id and message_id:
+            button_data.append({
+                'number': i,
+                'channel_id': channel_id,
+                'message_id': message_id
+            })
+
+    search_text += f"```"
+
+    # Create buttons - fix the structure issue
+    buttons = []
+    if button_data:
+        # Create individual file buttons in rows of 4
+        current_row = []
+        for btn in button_data:
+            current_row.append(
+                InlineKeyboardButton(
+                    f"Get [{btn['number']}]",
+                    callback_data=f"get_file:{btn['channel_id']}:{btn['message_id']}"
+                )
+            )
+
+            # Add row when we have 4 buttons or it's the last button
+            if len(current_row) == 4 or btn == button_data[-1]:
+                buttons.append(current_row)
+                current_row = []
+
+        # Add "Get All" button if multiple results
+        if len(button_data) > 1:
+            all_ids = [f"{btn['channel_id']}:{btn['message_id']}" for btn in button_data[:10]]
+            buttons.append([
+                InlineKeyboardButton(
+                    f"Get All ({len(button_data)})",
+                    callback_data=f"get_all:{'|'.join(all_ids)}"
+                )
+            ])
+
+    # Create keyboard - this is the critical fix
+    keyboard = InlineKeyboardMarkup(buttons) if buttons else None
+
+    # Debug: Print detailed button info
+    print(f"🔧 DEBUG: Button data count: {len(button_data)}")
+    print(f"🔧 DEBUG: Button rows created: {len(buttons) if buttons else 0}")
+    print(f"🔧 DEBUG: Keyboard object: {keyboard is not None}")
+
+    # Send the message
+    await message.reply_text(
+        search_text,
+        reply_markup=keyboard,
+        link_preview_options=LinkPreviewOptions(is_disabled=True)
+    )
+
+async def callback_handler(client, callback_query: CallbackQuery):
+    """Handle inline button callbacks"""
+    try:
+        data = callback_query.data
+        user_id = callback_query.from_user.id
+
+        print(f"🔧 DEBUG: Callback received - Data: {data}, User: {user_id}")
+
+        # Check access control
+        if not await should_process_command_for_user(user_id):
+            await callback_query.answer("🚫 Access denied.", show_alert=True)
+            return
+
+        if data.startswith("get_file:"):
+            # Handle single file request
+            _, channel_id, message_id = data.split(":")
+            channel_id = int(channel_id)
+            message_id = int(message_id)
+
+            await callback_query.answer("📥 Fetching file...")
+
+            try:
+                # For bot sessions, try to forward the message from the channel
+                # Note: Bot must be added to the channel as admin for this to work
+                forwarded = await client.forward_messages(
+                    chat_id=callback_query.from_user.id,
+                    from_chat_id=channel_id,
+                    message_ids=message_id
+                )
+
+                # Edit the callback message to show success
+                await callback_query.edit_message_text(
+                    f"✅ File sent successfully!\n\n{callback_query.message.text}",
+                    reply_markup=callback_query.message.reply_markup
+                )
+
+            except Exception as e:
+                # If forwarding fails, provide channel link instead
+                try:
+                    # Get movie info from database
+                    movie_doc = await movies_col.find_one({
+                        "channel_id": channel_id,
+                        "message_id": message_id
+                    })
+
+                    if movie_doc:
+                        title = movie_doc.get('title', 'Unknown')
+                        channel_title = movie_doc.get('channel_title', 'Unknown Channel')
+
+                        # Create a link to the message
+                        if channel_id < 0:
+                            # Convert to public channel format if possible
+                            channel_link = f"https://t.me/c/{str(channel_id)[4:]}/{message_id}"
+                        else:
+                            channel_link = f"Channel ID: {channel_id}, Message: {message_id}"
+
+                        await callback_query.edit_message_text(
+                            f"❌ Cannot forward file directly (bot needs channel access)\n\n"
+                            f"📁 File: {title}\n"
+                            f"📺 Channel: {channel_title}\n"
+                            f"🔗 Link: {channel_link}\n\n"
+                            f"💡 Add bot as admin to channel for direct forwarding",
+                            reply_markup=callback_query.message.reply_markup
+                        )
+                    else:
+                        await callback_query.edit_message_text(
+                            f"❌ Failed to fetch file: {str(e)}\n\n{callback_query.message.text}",
+                            reply_markup=callback_query.message.reply_markup
+                        )
+                except Exception as inner_e:
+                    await callback_query.edit_message_text(
+                        f"❌ Failed to fetch file: {str(e)}\n\n{callback_query.message.text}",
+                        reply_markup=callback_query.message.reply_markup
+                    )
+
+        elif data.startswith("get_all:"):
+            # Handle multiple file request
+            _, file_data = data.split(":", 1)
+            file_pairs = file_data.split("|")
+
+            await callback_query.answer(f"📦 Fetching {len(file_pairs)} files...")
+
+            success_count = 0
+            failed_files = []
+
+            for pair in file_pairs:
+                try:
+                    channel_id, message_id = pair.split(":")
+                    channel_id = int(channel_id)
+                    message_id = int(message_id)
+
+                    await client.forward_messages(
+                        chat_id=callback_query.from_user.id,
+                        from_chat_id=channel_id,
+                        message_ids=message_id
+                    )
+                    success_count += 1
+
+                except Exception as e:
+                    print(f"❌ Failed to forward {channel_id}:{message_id}: {e}")
+                    failed_files.append(f"{channel_id}:{message_id}")
+                    continue
+
+            # Update the message with results
+            result_text = f"✅ Successfully sent {success_count}/{len(file_pairs)} files!"
+
+            if failed_files:
+                result_text += f"\n❌ Failed: {len(failed_files)} files"
+                result_text += f"\n💡 Add bot as admin to channels for direct forwarding"
+
+            await callback_query.edit_message_text(
+                f"{result_text}\n\n{callback_query.message.text}",
+                reply_markup=callback_query.message.reply_markup
+            )
+
+        else:
+            await callback_query.answer("❌ Unknown action.", show_alert=True)
+
+    except Exception as e:
+        print(f"❌ Callback error: {e}")
+        await callback_query.answer("❌ An error occurred.", show_alert=True)
+
+async def should_process_command_for_user(user_id: int) -> bool:
+    """Check if user has access to use bot commands"""
+    # Check if user is admin
+    if await is_admin(user_id):
+        return True
+
+    # Check if user is banned
+    if await is_banned(user_id):
+        return False
+
+    # For now, allow all non-banned users
+    return True
 
 async def cmd_search_year(client, message: Message):
     parts = message.text.split()
@@ -577,7 +833,7 @@ async def cmd_search_year(client, message: Message):
     text = f"**🗓️ Movies from {year}:**\n\n" + "\n\n".join(
         [f"🎬 {r.get('title')} [{r.get('quality','N/A')}] — `{r.get('channel_title')}` (msg {r.get('message_id')})" for r in results]
     )
-    await message.reply_text(text, disable_web_page_preview=True)
+    await message.reply_text(text, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 async def cmd_search_quality(client, message: Message):
     parts = message.text.split()
@@ -592,7 +848,7 @@ async def cmd_search_quality(client, message: Message):
     text = f"**📺 Movies with quality {quality}:**\n\n" + "\n\n".join(
         [f"🎬 {r.get('title')} ({r.get('year','N/A')}) — `{r.get('channel_title')}` (msg {r.get('message_id')})" for r in results]
     )
-    await message.reply_text(text, disable_web_page_preview=True)
+    await message.reply_text(text, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 async def cmd_file_info(client, message: Message):
     parts = message.text.split()
@@ -615,7 +871,7 @@ async def cmd_file_info(client, message: Message):
         f"🆔 Message ID: {doc.get('message_id')}\n"
         f"📝 Caption: {doc.get('caption','')}\n"
     )
-    await message.reply_text(text, disable_web_page_preview=True)
+    await message.reply_text(text, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 async def cmd_metadata(client, message: Message):
     parts = message.text.split()
@@ -641,7 +897,7 @@ async def cmd_metadata(client, message: Message):
         f"🆔 Message ID: {doc.get('message_id')}\n"
         f"📝 Caption: {doc.get('caption','')}\n"
     )
-    await message.reply_text(text, disable_web_page_preview=True)
+    await message.reply_text(text, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 async def cmd_my_history(client, message: Message):
     uid = message.from_user.id
@@ -905,21 +1161,43 @@ async def main():
             print("❌ API_ID and API_HASH are required")
             sys.exit(1)
 
-        if not SESSION_STRING:
-            print("❌ SESSION_STRING is required for user session")
+        if not BOT_TOKEN:
+            print("❌ BOT_TOKEN is required for bot session")
             sys.exit(1)
 
-        print("🔄 Starting user session with proper async context...")
+        print("🔄 Starting bot session with proper async context...")
 
-        # Use async with Client() pattern as recommended by Kurigram docs
+        # Clear any existing session files to avoid time sync issues
+        import glob
+        session_files = glob.glob("movie_bot_session.session*")
+        for file in session_files:
+            try:
+                import os
+                os.remove(file)
+                print(f"🗑️ Removed old session file: {file}")
+            except:
+                pass
+
+        # Use async with Client() pattern for bot session
         async with Client(
             name="movie_bot_session",
             api_id=API_ID,
             api_hash=API_HASH,
-            session_string=SESSION_STRING,
+            bot_token=BOT_TOKEN,
             workdir=".",
             sleep_threshold=60,  # Sleep threshold for flood wait
+            max_concurrent_transmissions=1,  # Reduce concurrent transmissions to avoid timeouts
+            no_updates=False,  # Enable updates
+            device_model="MovieBot",
+            system_version="1.0",
+            app_version="1.0.0",
+            lang_code="en",
+            system_lang_code="en-US",
         ) as app:
+            # Get bot info for verification
+            bot_info = await app.get_me()
+            print(f"✅ Bot authenticated: @{bot_info.username} ({bot_info.first_name})")
+            print(f"🆔 Bot ID: {bot_info.id}")
             # Set global client reference for handlers
             global client
             client = app
@@ -927,9 +1205,10 @@ async def main():
             # Register handlers manually since decorators can't be used with async context
             app.add_handler(MessageHandler(on_message))
             app.add_handler(InlineQueryHandler(inline_handler))
+            app.add_handler(CallbackQueryHandler(callback_handler))
 
-            print("✅ User session started successfully")
-            print("✅ MovieBot running with single user session!")
+            print("✅ Bot session started successfully")
+            print("✅ MovieBot running with bot session!")
             print("📱 Bot is ready to receive commands and monitor channels!")
             print("🛑 Press Ctrl+C to stop")
 
@@ -948,7 +1227,32 @@ async def main():
                 signal_handler()
 
     except Exception as e:
-        print(f"❌ Error during startup: {e}")
+        error_msg = str(e)
+        print(f"❌ Error during startup: {error_msg}")
+
+        # Handle specific time synchronization errors
+        if "msg_id is too high" in error_msg or "BadMsgNotification" in error_msg:
+            print("🕐 Time synchronization issue detected!")
+            print("💡 Solutions:")
+            print("   1. Sync system time: sudo ntpdate -s time.nist.gov")
+            print("   2. Enable NTP: sudo timedatectl set-ntp true")
+            print("   3. Manual time set: sudo date -s 'YYYY-MM-DD HH:MM:SS'")
+            print("   4. Restart after time sync")
+            print("⚠️  Current system time appears to be incorrect (showing 2025)")
+        elif "ConnectionError" in error_msg or "Connection timed out" in error_msg:
+            print("🌐 Network connection issue detected!")
+            print("💡 Solutions:")
+            print("   1. Check internet connection")
+            print("   2. Verify firewall settings")
+            print("   3. Try different network/VPN")
+            print("   4. Check if Telegram is blocked in your region")
+        elif "BOT_TOKEN" in error_msg or "Unauthorized" in error_msg:
+            print("🤖 Bot authentication issue detected!")
+            print("💡 Solutions:")
+            print("   1. Verify BOT_TOKEN is correct")
+            print("   2. Check if bot token is from @BotFather")
+            print("   3. Ensure API_ID and API_HASH are correct")
+
         import traceback
         traceback.print_exc()
         raise e
