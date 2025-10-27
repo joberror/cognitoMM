@@ -1,10 +1,11 @@
 # main.py
 """
-Telegram Movie Bot - User Session Only
-- Single user session (Kurigram) handles both monitoring and bot commands
+Telegram Movie Bot - Hydrogram Bot Session
+- Hydrogram bot session for better channel access and compatibility
 - MongoDB Atlas (motor) for async storage
+- Advanced indexing system with proper file handling
 - Robust metadata parsing, exact + fuzzy search, channel management
-- Simplified architecture without hybrid session conflicts
+- Enhanced scanning features from Auto-Filter-Bot architecture
 """
 
 import os
@@ -13,33 +14,22 @@ import asyncio
 import sys
 import threading
 import time
+import uuid
+import logging
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from fuzzywuzzy import fuzz
 from motor.motor_asyncio import AsyncIOMotorClient
+# Telegram library imports are now handled above
 
-# Time synchronization patch for environments with incorrect system time
-original_time = time.time
+# Time synchronization patches removed - using system time as-is
 
-def patched_time():
-    """Patched time function to handle time sync issues"""
-    current_time = original_time()
-    # If time is in 2025, adjust it back to 2024 (rough fix for time sync issues)
-    if current_time > 1735689600:  # Jan 1, 2025 timestamp
-        # Subtract approximately 1 year (365 days)
-        adjusted_time = current_time - (365 * 24 * 60 * 60)
-        return adjusted_time
-    return current_time
-
-# Apply the patch only if system time is significantly off
-if time.time() > 1735689600:  # If time is in 2025
-    print("⚠️ Detected time synchronization issue - applying time patch")
-    time.time = patched_time
-
-# Import Kurigram (maintained Pyrogram fork) - uses pyrogram import name
-from pyrogram import Client, filters
-from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, LinkPreviewOptions, CallbackQuery
-from pyrogram.handlers import MessageHandler, InlineQueryHandler, CallbackQueryHandler
+# Import Hydrogram - Telegram MTProto API Framework
+from hydrogram import Client, filters
+from hydrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from hydrogram.handlers import MessageHandler, InlineQueryHandler, CallbackQueryHandler
+from hydrogram.errors import FloodWait, UserNotParticipant
+from hydrogram import enums
 
 load_dotenv()
 
@@ -119,6 +109,224 @@ async def ensure_indexes():
 # -------------------------
 # Client will be initialized within async context
 client = None
+
+# Temporary storage for bulk downloads (to avoid callback data size limits)
+bulk_downloads = {}
+
+# Global variables for indexing
+INDEX_EXTENSIONS = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.ts', '.m2ts']
+indexing_lock = asyncio.Lock()
+
+class TempData:
+    """Temporary data storage for bot operations"""
+    CANCEL = False
+    INDEXING_CHAT = None
+    INDEXING_USER = None
+
+temp_data = TempData()
+
+def cleanup_expired_bulk_downloads():
+    """Remove bulk downloads older than 1 hour"""
+    current_time = datetime.now(timezone.utc)
+    expired_keys = []
+
+    for bulk_id, data in bulk_downloads.items():
+        if (current_time - data['created_at']).total_seconds() > 3600:  # 1 hour
+            expired_keys.append(bulk_id)
+
+    for key in expired_keys:
+        del bulk_downloads[key]
+
+    if expired_keys:
+        print(f"🧹 Cleaned up {len(expired_keys)} expired bulk downloads")
+
+def get_readable_time(seconds):
+    """Convert seconds to readable time format"""
+    periods = [('d', 86400), ('h', 3600), ('m', 60), ('s', 1)]
+    result = ''
+    for period_name, period_seconds in periods:
+        if seconds >= period_seconds:
+            period_value, seconds = divmod(seconds, period_seconds)
+            result += f'{int(period_value)}{period_name}'
+    return result
+
+async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
+    """Enhanced indexing process using Hydrogram's iter_messages"""
+    start_time = time.time()
+    total_files = 0
+    duplicate = 0
+    errors = 0
+    deleted = 0
+    no_media = 0
+    unsupported = 0
+    current = skip
+
+    async with indexing_lock:
+        try:
+            # Get chat info
+            chat = await client.get_chat(chat_id)
+
+            # Update initial message
+            await msg.edit_text("🚀 **Starting Indexing Process**\n\n📺 **Channel:** {}\n🔄 **Status:** Initializing...".format(chat.title))
+
+            # Use Hydrogram's iter_messages for better performance
+            async for message in client.iter_messages(chat_id, limit=last_msg_id, offset=skip):
+                time_taken = get_readable_time(time.time() - start_time)
+
+                # Check for cancellation
+                if temp_data.CANCEL:
+                    temp_data.CANCEL = False
+                    await msg.edit_text(
+                        f"❌ **Indexing Cancelled!**\n\n"
+                        f"📺 **Channel:** {chat.title}\n"
+                        f"⏱️ **Time Taken:** {time_taken}\n"
+                        f"📊 **Progress:** {current}/{last_msg_id}\n\n"
+                        f"✅ **Saved:** {total_files} files\n"
+                        f"🔄 **Duplicates:** {duplicate}\n"
+                        f"🗑️ **Deleted:** {deleted}\n"
+                        f"📄 **No Media:** {no_media}\n"
+                        f"❌ **Errors:** {errors}"
+                    )
+                    return
+
+                current += 1
+
+                # Update progress every 30 messages
+                if current % 30 == 0:
+                    try:
+                        btn = [[InlineKeyboardButton('🛑 CANCEL', callback_data='index#cancel')]]
+                        await msg.edit_text(
+                            f"🔄 **Indexing In Progress**\n\n"
+                            f"📺 **Channel:** {chat.title}\n"
+                            f"⏱️ **Time:** {time_taken}\n"
+                            f"📊 **Progress:** {current}/{last_msg_id}\n\n"
+                            f"✅ **Saved:** {total_files} files\n"
+                            f"🔄 **Duplicates:** {duplicate}\n"
+                            f"🗑️ **Deleted:** {deleted}\n"
+                            f"📄 **No Media:** {no_media}\n"
+                            f"⚠️ **Unsupported:** {unsupported}\n"
+                            f"❌ **Errors:** {errors}",
+                            reply_markup=InlineKeyboardMarkup(btn)
+                        )
+                    except FloodWait as e:
+                        await asyncio.sleep(e.value)
+                    except Exception:
+                        pass  # Continue if update fails
+
+                # Process message
+                if message.empty:
+                    deleted += 1
+                    continue
+                elif not message.media:
+                    no_media += 1
+                    continue
+                elif message.media not in [enums.MessageMediaType.VIDEO, enums.MessageMediaType.DOCUMENT]:
+                    unsupported += 1
+                    continue
+
+                # Get media object
+                media = getattr(message, message.media.value, None)
+                if not media:
+                    unsupported += 1
+                    continue
+
+                # Check file extension for documents
+                if message.media == enums.MessageMediaType.DOCUMENT:
+                    if not hasattr(media, 'file_name') or not media.file_name:
+                        unsupported += 1
+                        continue
+
+                    file_ext = os.path.splitext(media.file_name.lower())[1]
+                    if file_ext not in INDEX_EXTENSIONS:
+                        unsupported += 1
+                        continue
+
+                # Save file
+                try:
+                    result = await save_file_to_db(media, message)
+                    if result == 'suc':
+                        total_files += 1
+                    elif result == 'dup':
+                        duplicate += 1
+                    elif result == 'err':
+                        errors += 1
+                except Exception as e:
+                    errors += 1
+                    print(f"❌ Error processing message {message.id}: {e}")
+
+            # Final success message
+            time_taken = get_readable_time(time.time() - start_time)
+            await msg.edit_text(
+                f"✅ **Indexing Complete!**\n\n"
+                f"📺 **Channel:** {chat.title}\n"
+                f"⏱️ **Time Taken:** {time_taken}\n"
+                f"📊 **Total Processed:** {current}/{last_msg_id}\n\n"
+                f"✅ **Successfully Saved:** {total_files} files\n"
+                f"🔄 **Duplicates Skipped:** {duplicate}\n"
+                f"🗑️ **Deleted Messages:** {deleted}\n"
+                f"📄 **Non-Media Messages:** {no_media}\n"
+                f"⚠️ **Unsupported Media:** {unsupported}\n"
+                f"❌ **Errors:** {errors}\n\n"
+                f"🎉 **Indexing completed successfully!**"
+            )
+
+        except Exception as e:
+            await msg.edit_text(f"❌ **Indexing Failed**\n\nError: {str(e)}")
+            print(f"❌ Indexing error: {e}")
+
+async def save_file_to_db(media, message):
+    """Enhanced file saving function compatible with Hydrogram"""
+    try:
+        # Extract file information
+        if hasattr(media, 'file_name') and media.file_name:
+            file_name = media.file_name
+        else:
+            file_name = f"file_{message.id}"
+
+        # Clean filename for better searching
+        clean_name = re.sub(r"@\w+|(_|\-|\.|\+)", " ", str(file_name))
+
+        # Get file caption
+        file_caption = ""
+        if hasattr(media, 'caption') and media.caption:
+            file_caption = re.sub(r"@\w+|(_|\-|\.|\+)", " ", str(media.caption))
+        elif message.caption:
+            file_caption = re.sub(r"@\w+|(_|\-|\.|\+)", " ", str(message.caption))
+
+        # Create document for database
+        document = {
+            '_id': f"{message.chat.id}_{message.id}",  # Unique identifier
+            'file_name': clean_name,
+            'original_file_name': file_name,
+            'file_size': getattr(media, 'file_size', 0),
+            'caption': file_caption,
+            'channel_id': message.chat.id,
+            'message_id': message.id,
+            'date': message.date,
+            'indexed_at': datetime.now(timezone.utc),
+            'file_type': 'video' if hasattr(media, 'duration') else 'document',
+            'duration': getattr(media, 'duration', 0),
+            'mime_type': getattr(media, 'mime_type', ''),
+        }
+
+        # Parse additional metadata
+        metadata = parse_metadata(file_caption, file_name)
+        document.update(metadata)
+
+        try:
+            # Insert into database
+            await movies_col.insert_one(document)
+            return 'suc'
+        except Exception as e:
+            if 'duplicate key' in str(e).lower():
+                return 'dup'
+            else:
+                print(f"❌ Database error: {e}")
+                return 'err'
+
+    except Exception as e:
+        print(f"❌ Error saving file: {e}")
+        return 'err'
 
 # -------------------------
 # Helpers: roles, logs
@@ -487,6 +695,8 @@ async def handle_command(client, message: Message):
         await cmd_list_channels(client, message)
     elif command == 'channel_stats':
         await cmd_channel_stats(client, message)
+    elif command == 'index_channel' or command == 'index':
+        await cmd_index_channel(client, message)
     elif command == 'rescan_channel':
         await cmd_rescan_channel(client, message)
     elif command == 'toggle_indexing':
@@ -526,12 +736,20 @@ ADMIN_HELP = """
 /remove_channel <link|id>  - Remove a channel
 /list_channels             - List channels
 /channel_stats             - Counts per channel
-/rescan_channel <link|id> [limit] - Rescan channel history (bot must be admin)
+/index_channel             - Enhanced channel indexing (interactive)
+/index                     - Alias for /index_channel
+/rescan_channel            - Legacy command (redirects to /index_channel)
 /toggle_indexing           - Toggle auto-indexing on/off
 /promote <user_id>         - Promote to admin
 /demote <user_id>          - Demote admin
 /ban_user <user_id>        - Ban a user
 /unban_user <user_id>      - Unban a user
+
+🚀 Enhanced Features:
+• Interactive indexing with progress tracking
+• Cancellable operations
+• Better error handling
+• Support for all video file types
 
 ⚠️ Important: Add bot as admin to channels for monitoring and file access
 """
@@ -658,11 +876,23 @@ async def send_search_results(message: Message, results, query):
 
         # Add "Get All" button if multiple results
         if len(button_data) > 1:
-            all_ids = [f"{btn['channel_id']}:{btn['message_id']}" for btn in button_data[:10]]
+            # Generate a short UUID for bulk download to avoid callback data size limits
+            bulk_id = str(uuid.uuid4())[:8]  # Use first 8 characters of UUID
+
+            # Clean up expired downloads first
+            cleanup_expired_bulk_downloads()
+
+            # Store the bulk download data temporarily
+            bulk_downloads[bulk_id] = {
+                'files': [{'channel_id': btn['channel_id'], 'message_id': btn['message_id']} for btn in button_data[:10]],
+                'created_at': datetime.now(timezone.utc),
+                'user_id': message.from_user.id
+            }
+
             buttons.append([
                 InlineKeyboardButton(
                     f"Get All ({len(button_data)})",
-                    callback_data=f"get_all:{'|'.join(all_ids)}"
+                    callback_data=f"bulk:{bulk_id}"
                 )
             ])
 
@@ -678,7 +908,7 @@ async def send_search_results(message: Message, results, query):
     await message.reply_text(
         search_text,
         reply_markup=keyboard,
-        link_preview_options=LinkPreviewOptions(is_disabled=True)
+        disable_web_page_preview=True
     )
 
 async def callback_handler(client, callback_query: CallbackQuery):
@@ -756,21 +986,51 @@ async def callback_handler(client, callback_query: CallbackQuery):
                         reply_markup=callback_query.message.reply_markup
                     )
 
-        elif data.startswith("get_all:"):
-            # Handle multiple file request
-            _, file_data = data.split(":", 1)
-            file_pairs = file_data.split("|")
+        elif data.startswith("index#"):
+            # Handle indexing callback
+            parts = data.split("#")
+            action = parts[1]
 
-            await callback_query.answer(f"📦 Fetching {len(file_pairs)} files...")
+            if action == "yes":
+                # Start indexing process
+                chat_id = int(parts[2]) if parts[2].lstrip('-').isdigit() else parts[2]
+                last_msg_id = int(parts[3])
+                skip = int(parts[4])
+
+                await callback_query.answer("🚀 Starting indexing process...")
+                await start_indexing_process(client, callback_query.message, chat_id, last_msg_id, skip)
+
+            elif action == "cancel":
+                temp_data.CANCEL = True
+                await callback_query.answer("🛑 Cancelling indexing...")
+                await callback_query.message.edit_text("❌ **Indexing Cancelled**\n\nThe indexing process has been cancelled by user request.")
+
+        elif data.startswith("bulk:"):
+            # Handle bulk download request using stored data
+            _, bulk_id = data.split(":", 1)
+
+            # Retrieve bulk download data
+            if bulk_id not in bulk_downloads:
+                await callback_query.answer("❌ Bulk download expired or not found", show_alert=True)
+                return
+
+            bulk_data = bulk_downloads[bulk_id]
+
+            # Verify user permission (only the user who initiated can download)
+            if bulk_data['user_id'] != callback_query.from_user.id:
+                await callback_query.answer("❌ You can only download your own searches", show_alert=True)
+                return
+
+            files = bulk_data['files']
+            await callback_query.answer(f"📦 Fetching {len(files)} files...")
 
             success_count = 0
             failed_files = []
 
-            for pair in file_pairs:
+            for file_info in files:
                 try:
-                    channel_id, message_id = pair.split(":")
-                    channel_id = int(channel_id)
-                    message_id = int(message_id)
+                    channel_id = int(file_info['channel_id'])
+                    message_id = int(file_info['message_id'])
 
                     await client.forward_messages(
                         chat_id=callback_query.from_user.id,
@@ -783,6 +1043,9 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     print(f"❌ Failed to forward {channel_id}:{message_id}: {e}")
                     failed_files.append(f"{channel_id}:{message_id}")
                     continue
+
+            # Clean up the temporary data after use
+            del bulk_downloads[bulk_id]
 
             # Update the message with results
             result_text = f"✅ Successfully sent {success_count}/{len(file_pairs)} files!"
@@ -833,7 +1096,7 @@ async def cmd_search_year(client, message: Message):
     text = f"**🗓️ Movies from {year}:**\n\n" + "\n\n".join(
         [f"🎬 {r.get('title')} [{r.get('quality','N/A')}] — `{r.get('channel_title')}` (msg {r.get('message_id')})" for r in results]
     )
-    await message.reply_text(text, link_preview_options=LinkPreviewOptions(is_disabled=True))
+    await message.reply_text(text, disable_web_page_preview=True)
 
 async def cmd_search_quality(client, message: Message):
     parts = message.text.split()
@@ -848,7 +1111,7 @@ async def cmd_search_quality(client, message: Message):
     text = f"**📺 Movies with quality {quality}:**\n\n" + "\n\n".join(
         [f"🎬 {r.get('title')} ({r.get('year','N/A')}) — `{r.get('channel_title')}` (msg {r.get('message_id')})" for r in results]
     )
-    await message.reply_text(text, link_preview_options=LinkPreviewOptions(is_disabled=True))
+    await message.reply_text(text, disable_web_page_preview=True)
 
 async def cmd_file_info(client, message: Message):
     parts = message.text.split()
@@ -871,7 +1134,7 @@ async def cmd_file_info(client, message: Message):
         f"🆔 Message ID: {doc.get('message_id')}\n"
         f"📝 Caption: {doc.get('caption','')}\n"
     )
-    await message.reply_text(text, link_preview_options=LinkPreviewOptions(is_disabled=True))
+    await message.reply_text(text, disable_web_page_preview=True)
 
 async def cmd_metadata(client, message: Message):
     parts = message.text.split()
@@ -897,7 +1160,7 @@ async def cmd_metadata(client, message: Message):
         f"🆔 Message ID: {doc.get('message_id')}\n"
         f"📝 Caption: {doc.get('caption','')}\n"
     )
-    await message.reply_text(text, link_preview_options=LinkPreviewOptions(is_disabled=True))
+    await message.reply_text(text, disable_web_page_preview=True)
 
 async def cmd_my_history(client, message: Message):
     uid = message.from_user.id
@@ -996,15 +1259,93 @@ async def cmd_channel_stats(client, message: Message):
         parts.append(f"{title} ({r['_id']}): {r['count']}")
     await message.reply_text("\n".join(parts) or "No data.")
 
-async def cmd_rescan_channel(client, message: Message):
+async def cmd_index_channel(client, message: Message):
+    """Enhanced indexing command using Hydrogram's iter_messages"""
     uid = message.from_user.id
     if not await is_admin(uid):
         return await message.reply_text("🚫 Admins only.")
-    parts = message.text.split()
-    if len(parts) < 2:
-        return await message.reply_text("Usage: /rescan_channel <link|id|@username> [limit]")
-    target = parts[1]
-    limit = int(parts[2]) if len(parts) >= 3 else 50  # Reduced default limit
+
+    if indexing_lock.locked():
+        return await message.reply_text('⚠️ Wait until previous indexing process completes.')
+
+    # Ask for channel/message link
+    i = await message.reply_text("📤 Forward the last message from the channel or send the message link.")
+
+    try:
+        # Listen for user response
+        response = await client.listen(chat_id=message.chat.id, user_id=message.from_user.id, timeout=60)
+        await i.delete()
+
+        # Parse the response
+        if response.text and response.text.startswith("https://t.me"):
+            # Handle message link
+            try:
+                msg_link = response.text.split("/")
+                last_msg_id = int(msg_link[-1])
+                chat_id = msg_link[-2]
+                if chat_id.isnumeric():
+                    chat_id = int(("-100" + chat_id))
+            except:
+                return await message.reply_text('❌ Invalid message link!')
+        elif response.forward_from_chat and response.forward_from_chat.type == enums.ChatType.CHANNEL:
+            # Handle forwarded message
+            last_msg_id = response.forward_from_message_id
+            chat_id = response.forward_from_chat.username or response.forward_from_chat.id
+        else:
+            return await message.reply_text('❌ This is not a forwarded message or valid link.')
+
+        # Get chat information
+        try:
+            chat = await client.get_chat(chat_id)
+        except Exception as e:
+            return await message.reply_text(f'❌ Error accessing chat: {e}')
+
+        if chat.type != enums.ChatType.CHANNEL:
+            return await message.reply_text("❌ I can only index channels.")
+
+        # Ask for skip number
+        s = await message.reply_text("🔢 Send the number of messages to skip (0 to start from beginning):")
+        skip_response = await client.listen(chat_id=message.chat.id, user_id=message.from_user.id, timeout=30)
+        await s.delete()
+
+        try:
+            skip = int(skip_response.text)
+        except:
+            return await message.reply_text("❌ Invalid number.")
+
+        # Confirmation
+        buttons = [
+            [InlineKeyboardButton('✅ YES', callback_data=f'index#yes#{chat_id}#{last_msg_id}#{skip}')],
+            [InlineKeyboardButton('❌ CANCEL', callback_data='index#cancel')]
+        ]
+        reply_markup = InlineKeyboardMarkup(buttons)
+
+        await message.reply_text(
+            f'🎬 **Index Channel Confirmation**\n\n'
+            f'📺 **Channel:** {chat.title}\n'
+            f'🆔 **ID:** `{chat_id}`\n'
+            f'📊 **Total Messages:** `{last_msg_id}`\n'
+            f'⏭️ **Skip:** `{skip}` messages\n'
+            f'📁 **Will Process:** `{last_msg_id - skip}` messages\n\n'
+            f'⚠️ **Note:** Only video files will be indexed\n'
+            f'🤖 **Bot must be admin** in the channel\n\n'
+            f'Do you want to proceed?',
+            reply_markup=reply_markup
+        )
+
+    except asyncio.TimeoutError:
+        await i.delete()
+        await message.reply_text("⏰ Timeout! Please try again.")
+    except Exception as e:
+        await message.reply_text(f"❌ Error: {e}")
+
+async def cmd_rescan_channel(client, message: Message):
+    """Legacy rescan command - redirects to new index command"""
+    await message.reply_text(
+        "🔄 **Command Updated!**\n\n"
+        "The `/rescan_channel` command has been replaced with `/index_channel` for better functionality.\n\n"
+        "Please use `/index_channel` instead."
+    )
 
     try:
         chat = await resolve_chat_ref(target)
@@ -1165,39 +1506,21 @@ async def main():
             print("❌ BOT_TOKEN is required for bot session")
             sys.exit(1)
 
-        print("🔄 Starting bot session with proper async context...")
+        print("🔄 Starting bot session...")
 
-        # Clear any existing session files to avoid time sync issues
-        import glob
-        session_files = glob.glob("movie_bot_session.session*")
-        for file in session_files:
-            try:
-                import os
-                os.remove(file)
-                print(f"🗑️ Removed old session file: {file}")
-            except:
-                pass
-
-        # Use async with Client() pattern for bot session
+        # Simple Hydrogram client initialization
         async with Client(
             name="movie_bot_session",
             api_id=API_ID,
             api_hash=API_HASH,
             bot_token=BOT_TOKEN,
             workdir=".",
-            sleep_threshold=60,  # Sleep threshold for flood wait
-            max_concurrent_transmissions=1,  # Reduce concurrent transmissions to avoid timeouts
-            no_updates=False,  # Enable updates
-            device_model="MovieBot",
-            system_version="1.0",
-            app_version="1.0.0",
-            lang_code="en",
-            system_lang_code="en-US",
         ) as app:
             # Get bot info for verification
             bot_info = await app.get_me()
             print(f"✅ Bot authenticated: @{bot_info.username} ({bot_info.first_name})")
             print(f"🆔 Bot ID: {bot_info.id}")
+
             # Set global client reference for handlers
             global client
             client = app
@@ -1208,7 +1531,7 @@ async def main():
             app.add_handler(CallbackQueryHandler(callback_handler))
 
             print("✅ Bot session started successfully")
-            print("✅ MovieBot running with bot session!")
+            print("✅ MovieBot running with Hydrogram!")
             print("📱 Bot is ready to receive commands and monitor channels!")
             print("🛑 Press Ctrl+C to stop")
 
@@ -1227,42 +1550,9 @@ async def main():
                 signal_handler()
 
     except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Error during startup: {error_msg}")
-
-        # Handle specific time synchronization errors
-        if "msg_id is too high" in error_msg or "BadMsgNotification" in error_msg:
-            print("🕐 Time synchronization issue detected!")
-            print("💡 Solutions:")
-            print("   1. Sync system time: sudo ntpdate -s time.nist.gov")
-            print("   2. Enable NTP: sudo timedatectl set-ntp true")
-            print("   3. Manual time set: sudo date -s 'YYYY-MM-DD HH:MM:SS'")
-            print("   4. Restart after time sync")
-            print("⚠️  Current system time appears to be incorrect (showing 2025)")
-        elif "ConnectionError" in error_msg or "Connection timed out" in error_msg:
-            print("🌐 Network connection issue detected!")
-            print("💡 Solutions:")
-            print("   1. Check internet connection")
-            print("   2. Verify firewall settings")
-            print("   3. Try different network/VPN")
-            print("   4. Check if Telegram is blocked in your region")
-        elif "BOT_TOKEN" in error_msg or "Unauthorized" in error_msg:
-            print("🤖 Bot authentication issue detected!")
-            print("💡 Solutions:")
-            print("   1. Verify BOT_TOKEN is correct")
-            print("   2. Check if bot token is from @BotFather")
-            print("   3. Ensure API_ID and API_HASH are correct")
-
+        print(f"❌ Error during startup: {e}")
         import traceback
         traceback.print_exc()
-        raise e
 
 if __name__ == "__main__":
-    # Check Python version and warn about compatibility
-    if sys.version_info >= (3, 13):
-        print("⚠️  WARNING: Python 3.13+ detected!")
-        print("⚠️  This version may have compatibility issues with Pyrogram.")
-        print("⚠️  Recommended: Use Python 3.12.x for best compatibility.")
-        print("⚠️  Attempting to run with compatibility patches...")
-
-    run_bot()
+    asyncio.run(run_bot())

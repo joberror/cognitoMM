@@ -1,7 +1,12 @@
-kurigram>=2.2.12
-pymongo>=4.0.0
+hydrogram
+pymongo
 python-dotenv>=1.0.0
 motor>=3.1.1
 fuzzywuzzy>=0.18.0
 python-levenshtein>=0.20.9  # optional but speeds up fuzzywuzzy
 tgcrypto>=1.2.5  # for better performance
+uvloop
+requests
+aiohttp
+aiofiles
+Pillow

@@ -1,3 +1,10 @@
 {
-  "cSpell.words": ["asyncio", "fuzzywuzzy", "kurigram", "pymongo", "pyrogram"]
+  "cSpell.words": [
+    "asyncio",
+    "fuzzywuzzy",
+    "hydrogram",
+    "kurigram",
+    "pymongo",
+    "pyrogram"
+  ]
 }
