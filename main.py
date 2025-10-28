@@ -229,7 +229,7 @@ async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
                             f"📺 **Channel:** {chat.title}\n"
                             f"⏱️ **Time Taken:** {time_taken}\n"
                             f"📊 **Progress:** {current}/{last_msg_id}\n\n"
-                            f"✅ **Saved:** {total_files} files\n"i
+                            f"✅ **Saved:** {total_files} files\n"
                             f"🔄 **Duplicates:** {duplicate}\n"
                             f"🗑️ **Deleted:** {deleted}\n"
                             f"📄 **No Media:** {no_media}\n"
