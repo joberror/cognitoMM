@@ -36,6 +36,23 @@ load_dotenv()
 print(f"🐍 Python {sys.version}")
 print("🎬 MovieBot - Bot Session")
 
+# Add missing variables for indexing functionality
+class temp_data:
+    CANCEL = False
+
+def get_readable_time(seconds):
+    """Convert seconds to readable time format"""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    elif seconds < 3600:
+        minutes = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{minutes}m {secs}s"
+    else:
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        return f"{hours}h {minutes}m"
+
 # -------------------------
 # CONFIG / ENV
 # -------------------------
@@ -125,6 +142,32 @@ class TempData:
 
 temp_data = TempData()
 
+# User input waiting system (replacement for client.listen)
+user_input_events = {}
+
+async def wait_for_user_input(chat_id: int, user_id: int, timeout: int = 60):
+    """Wait for user input - replacement for client.listen"""
+    key = f"{chat_id}_{user_id}"
+    event = asyncio.Event()
+    user_input_events[key] = {'event': event, 'message': None}
+
+    try:
+        await asyncio.wait_for(event.wait(), timeout=timeout)
+        return user_input_events[key]['message']
+    except asyncio.TimeoutError:
+        raise asyncio.TimeoutError("User input timeout")
+    finally:
+        # Clean up
+        if key in user_input_events:
+            del user_input_events[key]
+
+def set_user_input(chat_id: int, user_id: int, message):
+    """Set user input message - called from message handler"""
+    key = f"{chat_id}_{user_id}"
+    if key in user_input_events:
+        user_input_events[key]['message'] = message
+        user_input_events[key]['event'].set()
+
 def cleanup_expired_bulk_downloads():
     """Remove bulk downloads older than 1 hour"""
     current_time = datetime.now(timezone.utc)
@@ -151,7 +194,7 @@ def get_readable_time(seconds):
     return result
 
 async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
-    """Enhanced indexing process using Hydrogram's iter_messages"""
+    """Enhanced indexing process using Hydrogram's get_chat_history"""
     start_time = time.time()
     total_files = 0
     duplicate = 0
@@ -169,109 +212,137 @@ async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
             # Update initial message
             await msg.edit_text("🚀 **Starting Indexing Process**\n\n📺 **Channel:** {}\n🔄 **Status:** Initializing...".format(chat.title))
 
-            # Use Hydrogram's iter_messages for better performance
-            async for message in client.iter_messages(chat_id, limit=last_msg_id, offset=skip):
-                time_taken = get_readable_time(time.time() - start_time)
+            # Try to use iter_messages as in Auto-Filter-Bot
+            print(f"🔍 Attempting to use iter_messages for chat {chat_id}, last_msg_id: {last_msg_id}, skip: {skip}")
 
-                # Check for cancellation
-                if temp_data.CANCEL:
-                    temp_data.CANCEL = False
-                    await msg.edit_text(
-                        f"❌ **Indexing Cancelled!**\n\n"
-                        f"📺 **Channel:** {chat.title}\n"
-                        f"⏱️ **Time Taken:** {time_taken}\n"
-                        f"📊 **Progress:** {current}/{last_msg_id}\n\n"
-                        f"✅ **Saved:** {total_files} files\n"
-                        f"🔄 **Duplicates:** {duplicate}\n"
-                        f"🗑️ **Deleted:** {deleted}\n"
-                        f"📄 **No Media:** {no_media}\n"
-                        f"❌ **Errors:** {errors}"
-                    )
-                    return
+            try:
+                # Test if iter_messages exists and works
+                async for message in client.iter_messages(chat_id, last_msg_id, skip):
+                    current += 1
+                    time_taken = get_readable_time(time.time() - start_time)
 
-                current += 1
-
-                # Update progress every 30 messages
-                if current % 30 == 0:
-                    try:
-                        btn = [[InlineKeyboardButton('🛑 CANCEL', callback_data='index#cancel')]]
+                    # Check for cancellation
+                    if temp_data.CANCEL:
+                        temp_data.CANCEL = False
                         await msg.edit_text(
-                            f"🔄 **Indexing In Progress**\n\n"
+                            f"❌ **Indexing Cancelled!**\n\n"
                             f"📺 **Channel:** {chat.title}\n"
-                            f"⏱️ **Time:** {time_taken}\n"
+                            f"⏱️ **Time Taken:** {time_taken}\n"
                             f"📊 **Progress:** {current}/{last_msg_id}\n\n"
-                            f"✅ **Saved:** {total_files} files\n"
+                            f"✅ **Saved:** {total_files} files\n"i
                             f"🔄 **Duplicates:** {duplicate}\n"
                             f"🗑️ **Deleted:** {deleted}\n"
                             f"📄 **No Media:** {no_media}\n"
-                            f"⚠️ **Unsupported:** {unsupported}\n"
-                            f"❌ **Errors:** {errors}",
-                            reply_markup=InlineKeyboardMarkup(btn)
+                            f"❌ **Errors:** {errors}"
                         )
-                    except FloodWait as e:
-                        await asyncio.sleep(e.value)
-                    except Exception:
-                        pass  # Continue if update fails
+                        return
 
-                # Process message
-                if message.empty:
-                    deleted += 1
-                    continue
-                elif not message.media:
-                    no_media += 1
-                    continue
-                elif message.media not in [enums.MessageMediaType.VIDEO, enums.MessageMediaType.DOCUMENT]:
-                    unsupported += 1
-                    continue
+                    # Update progress every 30 messages
+                    if current % 30 == 0:
+                        try:
+                            btn = [[InlineKeyboardButton('🛑 CANCEL', callback_data='index#cancel')]]
+                            await msg.edit_text(
+                                f"🔄 **Indexing In Progress**\n\n"
+                                f"📺 **Channel:** {chat.title}\n"
+                                f"⏱️ **Time:** {time_taken}\n"
+                                f"📊 **Progress:** {current}/{last_msg_id}\n\n"
+                                f"✅ **Saved:** {total_files} files\n"
+                                f"🔄 **Duplicates:** {duplicate}\n"
+                                f"🗑️ **Deleted:** {deleted}\n"
+                                f"📄 **No Media:** {no_media}\n"
+                                f"⚠️ **Unsupported:** {unsupported}\n"
+                                f"❌ **Errors:** {errors}",
+                                reply_markup=InlineKeyboardMarkup(btn)
+                            )
+                        except FloodWait as e:
+                            await asyncio.sleep(e.value)
+                        except Exception:
+                            pass  # Continue if update fails
 
-                # Get media object
-                media = getattr(message, message.media.value, None)
-                if not media:
-                    unsupported += 1
-                    continue
-
-                # Check file extension for documents
-                if message.media == enums.MessageMediaType.DOCUMENT:
-                    if not hasattr(media, 'file_name') or not media.file_name:
+                    # Process message
+                    if message.empty:
+                        deleted += 1
+                        continue
+                    elif not message.media:
+                        no_media += 1
+                        continue
+                    elif message.media not in [enums.MessageMediaType.VIDEO, enums.MessageMediaType.DOCUMENT]:
                         unsupported += 1
                         continue
 
-                    file_ext = os.path.splitext(media.file_name.lower())[1]
-                    if file_ext not in INDEX_EXTENSIONS:
+                    # Get media object
+                    media = getattr(message, message.media.value, None)
+                    if not media:
                         unsupported += 1
                         continue
 
-                # Save file
-                try:
-                    result = await save_file_to_db(media, message)
-                    if result == 'suc':
-                        total_files += 1
-                    elif result == 'dup':
-                        duplicate += 1
-                    elif result == 'err':
+                    # Check file extension for documents
+                    if message.media == enums.MessageMediaType.DOCUMENT:
+                        if not hasattr(media, 'file_name') or not media.file_name:
+                            unsupported += 1
+                            continue
+
+                        file_ext = os.path.splitext(media.file_name.lower())[1]
+                        if file_ext not in INDEX_EXTENSIONS:
+                            unsupported += 1
+                            continue
+
+                    # Save file
+                    try:
+                        result = await save_file_to_db(media, message)
+                        if result == 'suc':
+                            total_files += 1
+                        elif result == 'dup':
+                            duplicate += 1
+                        elif result == 'err':
+                            errors += 1
+                    except Exception as e:
                         errors += 1
-                except Exception as e:
-                    errors += 1
-                    print(f"❌ Error processing message {message.id}: {e}")
+                        print(f"❌ Error processing message {message.id}: {e}")
 
-            # Final success message
-            time_taken = get_readable_time(time.time() - start_time)
-            await msg.edit_text(
-                f"✅ **Indexing Complete!**\n\n"
-                f"📺 **Channel:** {chat.title}\n"
-                f"⏱️ **Time Taken:** {time_taken}\n"
-                f"📊 **Total Processed:** {current}/{last_msg_id}\n\n"
-                f"✅ **Successfully Saved:** {total_files} files\n"
-                f"🔄 **Duplicates Skipped:** {duplicate}\n"
-                f"🗑️ **Deleted Messages:** {deleted}\n"
-                f"📄 **Non-Media Messages:** {no_media}\n"
-                f"⚠️ **Unsupported Media:** {unsupported}\n"
-                f"❌ **Errors:** {errors}\n\n"
-                f"🎉 **Indexing completed successfully!**"
-            )
+                # Final success message
+                time_taken = get_readable_time(time.time() - start_time)
+                await msg.edit_text(
+                    f"✅ **Indexing Complete!**\n\n"
+                    f"📺 **Channel:** {chat.title}\n"
+                    f"⏱️ **Time Taken:** {time_taken}\n"
+                    f"📊 **Total Processed:** {current}/{last_msg_id}\n\n"
+                    f"✅ **Successfully Saved:** {total_files} files\n"
+                    f"🔄 **Duplicates Skipped:** {duplicate}\n"
+                    f"🗑️ **Deleted Messages:** {deleted}\n"
+                    f"📄 **Non-Media Messages:** {no_media}\n"
+                    f"⚠️ **Unsupported Media:** {unsupported}\n"
+                    f"❌ **Errors:** {errors}\n\n"
+                    f"🎉 **Indexing completed successfully!**"
+                )
+
+            except AttributeError as e:
+                print(f"❌ iter_messages not available: {e}")
+                await msg.edit_text(
+                    f"❌ **Method Not Available**\n\n"
+                    f"The `iter_messages` method is not available in this version of Hydrogram.\n\n"
+                    f"**Error:** {e}\n\n"
+                    f"**Available alternatives:**\n"
+                    f"• Use real-time auto-indexing instead\n"
+                    f"• Forward messages manually for indexing\n"
+                    f"• Check Hydrogram version compatibility"
+                )
+                return
+            except Exception as e:
+                print(f"❌ iter_messages error: {e}")
+                await msg.edit_text(
+                    f"❌ **Indexing Error**\n\n"
+                    f"An error occurred while trying to index messages.\n\n"
+                    f"**Error:** {e}\n\n"
+                    f"This might be due to:\n"
+                    f"• Bot API limitations\n"
+                    f"• Insufficient permissions\n"
+                    f"• Network issues"
+                )
+                return
 
         except Exception as e:
-            await msg.edit_text(f"❌ **Indexing Failed**\n\nError: {str(e)}")
+            await msg.edit_text(f"❌ **Error:** {e}")
             print(f"❌ Indexing error: {e}")
 
 async def save_file_to_db(media, message):
@@ -619,6 +690,10 @@ async def index_message(msg):
 # Auto-indexing handler
 # -------------------------
 async def on_message(client, message):
+    # Check for user input waiting (replacement for client.listen)
+    if message.chat and message.from_user:
+        set_user_input(message.chat.id, message.from_user.id, message)
+
     # Handle bot commands first (if message starts with /)
     if message.text and message.text.startswith('/'):
         # ACCESS CONTROL: Only process commands from authorized sources
@@ -1260,20 +1335,19 @@ async def cmd_channel_stats(client, message: Message):
     await message.reply_text("\n".join(parts) or "No data.")
 
 async def cmd_index_channel(client, message: Message):
-    """Enhanced indexing command using Hydrogram's iter_messages"""
+    """Enhanced indexing command using iter_messages"""
     uid = message.from_user.id
     if not await is_admin(uid):
         return await message.reply_text("🚫 Admins only.")
 
     if indexing_lock.locked():
-        return await message.reply_text('⚠️ Wait until previous indexing process completes.')
+        return await message.reply_text("⏳ Another indexing process is already running. Please wait.")
 
-    # Ask for channel/message link
-    i = await message.reply_text("📤 Forward the last message from the channel or send the message link.")
+    i = await message.reply_text("📝 Send me the channel username, channel ID, or a message link from the channel you want to index.")
 
     try:
-        # Listen for user response
-        response = await client.listen(chat_id=message.chat.id, user_id=message.from_user.id, timeout=60)
+        # Wait for user response using our custom input system
+        response = await wait_for_user_input(message.chat.id, message.from_user.id, timeout=60)
         await i.delete()
 
         # Parse the response
@@ -1305,7 +1379,7 @@ async def cmd_index_channel(client, message: Message):
 
         # Ask for skip number
         s = await message.reply_text("🔢 Send the number of messages to skip (0 to start from beginning):")
-        skip_response = await client.listen(chat_id=message.chat.id, user_id=message.from_user.id, timeout=30)
+        skip_response = await wait_for_user_input(message.chat.id, message.from_user.id, timeout=30)
         await s.delete()
 
         try:
@@ -1340,11 +1414,15 @@ async def cmd_index_channel(client, message: Message):
         await message.reply_text(f"❌ Error: {e}")
 
 async def cmd_rescan_channel(client, message: Message):
-    """Legacy rescan command - redirects to new index command"""
+    """Legacy rescan command - explains Bot API limitations"""
     await message.reply_text(
-        "🔄 **Command Updated!**\n\n"
-        "The `/rescan_channel` command has been replaced with `/index_channel` for better functionality.\n\n"
-        "Please use `/index_channel` instead."
+        "🔄 **Command Not Available**\n\n"
+        "❌ **Bot API Limitation:** Telegram bots cannot access chat history or rescan past messages.\n\n"
+        "✅ **Alternative:** Use real-time auto-indexing instead:\n"
+        "• Add the bot to channels as admin\n"
+        "• Enable auto-indexing with `/toggle_indexing`\n"
+        "• New messages will be indexed automatically\n\n"
+        "For more details, use `/index_channel`"
     )
 
     try:
@@ -1356,7 +1434,7 @@ async def cmd_rescan_channel(client, message: Message):
 
         # Process in smaller batches with timeout handling
         try:
-            async for m in client.get_chat_history(chat.id, limit=limit):
+            async for m in client.search_messages(chat.id, limit=limit):
                 count += 1
                 try:
                     # Check if message has media before attempting to index
@@ -1490,6 +1568,45 @@ def run_bot():
         import traceback
         traceback.print_exc()
 
+# -------------------------
+# CUSTOM BOT CLASS WITH iter_messages
+# -------------------------
+
+class CognitoBot(Client):
+    """Extended Hydrogram Client with iter_messages method from Auto-Filter-Bot"""
+
+    def __init__(self):
+        super().__init__(
+            name="movie_bot_session",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            bot_token=BOT_TOKEN,
+            workdir=".",
+        )
+
+    async def iter_messages(self, chat_id, limit: int, offset: int = 0):
+        """
+        Iterate through a chat sequentially.
+        This convenience method does the same as repeatedly calling get_messages in a loop.
+
+        Parameters:
+            chat_id (int | str): Unique identifier of the target chat
+            limit (int): Identifier of the last message to be returned
+            offset (int, optional): Identifier of the first message to be returned. Defaults to 0.
+
+        Returns:
+            Generator: A generator yielding Message objects.
+        """
+        current = offset
+        while True:
+            new_diff = min(200, limit - current)
+            if new_diff <= 0:
+                return
+            messages = await self.get_messages(chat_id, list(range(current, current+new_diff+1)))
+            for message in messages:
+                yield message
+                current += 1
+
 async def main():
     print("🔧 Setting up database indexes...")
     await ensure_indexes()
@@ -1508,14 +1625,8 @@ async def main():
 
         print("🔄 Starting bot session...")
 
-        # Simple Hydrogram client initialization
-        async with Client(
-            name="movie_bot_session",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            bot_token=BOT_TOKEN,
-            workdir=".",
-        ) as app:
+        # Use our custom CognitoBot class with iter_messages support
+        async with CognitoBot() as app:
             # Get bot info for verification
             bot_info = await app.get_me()
             print(f"✅ Bot authenticated: @{bot_info.username} ({bot_info.first_name})")
