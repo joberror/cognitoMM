@@ -881,45 +881,89 @@ async def cmd_search(client, message: Message):
     # Create flashy, neat search results
     await send_search_results(message, all_results, query)
 
+def format_file_size(size_bytes):
+    """Convert bytes to human readable format (GB, MB, KB)"""
+    if not size_bytes or size_bytes == 0:
+        return "N/A"
+
+    # Convert to appropriate unit
+    if size_bytes >= 1024**3:  # GB
+        return f"{size_bytes / (1024**3):.1f}GB"
+    elif size_bytes >= 1024**2:  # MB
+        return f"{size_bytes / (1024**2):.0f}MB"
+    elif size_bytes >= 1024:  # KB
+        return f"{size_bytes / 1024:.0f}KB"
+    else:
+        return f"{size_bytes}B"
+
 async def send_search_results(message: Message, results, query):
     """Send beautifully formatted search results with inline buttons"""
 
-    # Create the exact format requested
+    # Create the refined format requested
     search_text = f"```\n"
     search_text += f"Search: \"{query}\"\n"
     search_text += f"Total Results: {len(results)}\n\n"
-    search_text += f"#   Info\n"
-    search_text += f"-------------------------------\n"
 
     # Format each result
     button_data = []
 
     for i, result in enumerate(results, 1):
         title = result.get('title', 'Unknown Title')
-        year = result.get('year', 'N/A')
-        quality = result.get('quality', 'N/A')
-        rip = result.get('rip', 'N/A')
+        year = result.get('year')
+        quality = result.get('quality')
+        rip = result.get('rip')
         movie_type = result.get('type', 'Movie')
         season = result.get('season')
         episode = result.get('episode')
+        file_size = result.get('file_size')
         channel_id = result.get('channel_id')
         message_id = result.get('message_id')
 
-        # Truncate title if too long
-        display_title = title[:20] + "..." if len(title) > 20 else title
+        # Format file size
+        size_str = format_file_size(file_size)
 
-        # Format season/episode info
+        # Format quality (resolution)
+        quality_str = quality if quality else ""
+
+        # Format season/episode info for series
         series_info = ""
         if movie_type.lower() in ['series', 'tv', 'show'] and (season or episode):
             if season and episode:
-                series_info = f", S{season:02d}E{episode:02d}"
+                series_info = f"S{season:02d}E{episode:02d}"
             elif season:
-                series_info = f", S{season}"
+                series_info = f"S{season:02d}"
             elif episode:
-                series_info = f", E{episode}"
+                series_info = f"E{episode:02d}"
 
-        # Create result line in exact format requested
-        search_text += f"{i}.  {display_title} ({quality} {rip}, {year}{series_info})\n"
+        # Format year
+        year_str = str(year) if year else ""
+
+        # Format rip type (BluRay, WEBRip, etc.)
+        rip_str = ""
+        if rip and rip.lower() in ['bluray', 'blu-ray', 'bdrip', 'bd']:
+            rip_str = "Blu"
+        elif rip and 'web' in rip.lower():
+            rip_str = "Web"
+        elif rip and 'hd' in rip.lower():
+            rip_str = "HD"
+
+        # Build the info string: [size.quality.series_info.year.rip]
+        info_parts = []
+        if size_str != "N/A":
+            info_parts.append(size_str)
+        if quality_str:
+            info_parts.append(quality_str)
+        if series_info:
+            info_parts.append(series_info)
+        if year_str:
+            info_parts.append(year_str)
+        if rip_str:
+            info_parts.append(rip_str)
+
+        info_string = ".".join(info_parts) if info_parts else "N/A"
+
+        # Create result line in the new refined format
+        search_text += f"{i}. {title} [{info_string}]\n"
 
         # Store button data
         if channel_id and message_id:
@@ -1666,4 +1710,4 @@ async def main():
         traceback.print_exc()
 
 if __name__ == "__main__":
-    asyncio.run(run_bot())
+    run_bot()
