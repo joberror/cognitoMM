@@ -855,12 +855,12 @@ async def cmd_search(client, message: Message):
     # record search history
     await users_col.update_one({"user_id": uid}, {"$push": {"search_history": {"q": query, "ts": datetime.now(timezone.utc)}}}, upsert=True)
 
-    # Search for exact matches
-    exact = await movies_col.find({"title": {"$regex": query, "$options": "i"}}).to_list(length=8)
+    # Search for exact matches (no limit - show all results)
+    exact = await movies_col.find({"title": {"$regex": query, "$options": "i"}}).to_list(length=None)
 
-    # Search for fuzzy matches if we have less than 8 exact matches
+    # Search for fuzzy matches if we have less exact matches
     all_results = list(exact)
-    if len(exact) < 8:
+    if len(exact) < 50:  # Only do fuzzy search if we don't have many exact matches
         candidates = []
         cursor = movies_col.find({}, {"title": 1, "year": 1, "quality": 1, "channel_title": 1, "message_id": 1, "channel_id": 1, "type": 1, "season": 1, "episode": 1, "rip": 1}).limit(500)
         async for r in cursor:
@@ -872,7 +872,7 @@ async def cmd_search(client, message: Message):
             if score >= FUZZY_THRESHOLD:
                 candidates.append((score, r))
 
-        candidates = sorted(candidates, key=lambda x: x[0], reverse=True)[:8-len(exact)]
+        candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
         all_results.extend([c[1] for c in candidates])
 
     if not all_results:
@@ -1164,7 +1164,7 @@ async def cmd_search_year(client, message: Message):
     except ValueError:
         return await message.reply_text("Year must be a number")
 
-    results = await movies_col.find({"year": year}).to_list(length=20)
+    results = await movies_col.find({"year": year}).to_list(length=None)
     if not results:
         return await message.reply_text(f"⚠️ No movies found for year {year}")
 
@@ -1179,7 +1179,7 @@ async def cmd_search_quality(client, message: Message):
         return await message.reply_text("Usage: /search_quality <quality>")
 
     quality = parts[1]
-    results = await movies_col.find({"quality": {"$regex": quality, "$options": "i"}}).to_list(length=20)
+    results = await movies_col.find({"quality": {"$regex": quality, "$options": "i"}}).to_list(length=None)
     if not results:
         return await message.reply_text(f"⚠️ No movies found with quality {quality}")
 
@@ -1537,7 +1537,7 @@ async def inline_handler(client, inline_query: InlineQuery):
     q = inline_query.query.strip()
     if not q:
         return
-    exact = await movies_col.find({"title": {"$regex": q, "$options": "i"}}).to_list(length=20)
+    exact = await movies_col.find({"title": {"$regex": q, "$options": "i"}}).to_list(length=None)
     results = []
     for i, r in enumerate(exact):
         results.append(
