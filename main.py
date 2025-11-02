@@ -1052,13 +1052,27 @@ async def callback_handler(client, callback_query: CallbackQuery):
             await callback_query.answer("📥 Fetching file...")
 
             try:
-                # For bot sessions, try to forward the message from the channel
-                # Note: Bot must be added to the channel as admin for this to work
-                forwarded = await client.forward_messages(
-                    chat_id=callback_query.from_user.id,
-                    from_chat_id=channel_id,
-                    message_ids=message_id
-                )
+                # Get the message from the channel to extract media
+                msg = await client.get_messages(channel_id, message_id)
+
+                if not msg:
+                    raise Exception("Message not found")
+
+                # Extract media and send using send_cached_media (no forward header)
+                if msg.video:
+                    await client.send_cached_media(
+                        chat_id=callback_query.from_user.id,
+                        file_id=msg.video.file_id,
+                        caption=msg.caption or ""
+                    )
+                elif msg.document:
+                    await client.send_cached_media(
+                        chat_id=callback_query.from_user.id,
+                        file_id=msg.document.file_id,
+                        caption=msg.caption or ""
+                    )
+                else:
+                    raise Exception("Message does not contain video or document")
 
                 # Edit the callback message to show success
                 await callback_query.edit_message_text(
@@ -1087,11 +1101,11 @@ async def callback_handler(client, callback_query: CallbackQuery):
                             channel_link = f"Channel ID: {channel_id}, Message: {message_id}"
 
                         await callback_query.edit_message_text(
-                            f"❌ Cannot forward file directly (bot needs channel access)\n\n"
+                            f"❌ Cannot send file directly (bot needs channel access)\n\n"
                             f"📁 File: {title}\n"
                             f"📺 Channel: {channel_title}\n"
                             f"🔗 Link: {channel_link}\n\n"
-                            f"💡 Add bot as admin to channel for direct forwarding",
+                            f"💡 Add bot as admin to channel for direct file access",
                             reply_markup=callback_query.message.reply_markup
                         )
                     else:
@@ -1151,15 +1165,32 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     channel_id = int(file_info['channel_id'])
                     message_id = int(file_info['message_id'])
 
-                    await client.forward_messages(
-                        chat_id=callback_query.from_user.id,
-                        from_chat_id=channel_id,
-                        message_ids=message_id
-                    )
+                    # Get the message from the channel to extract media
+                    msg = await client.get_messages(channel_id, message_id)
+
+                    if not msg:
+                        raise Exception("Message not found")
+
+                    # Extract media and send using send_cached_media (no forward header)
+                    if msg.video:
+                        await client.send_cached_media(
+                            chat_id=callback_query.from_user.id,
+                            file_id=msg.video.file_id,
+                            caption=msg.caption or ""
+                        )
+                    elif msg.document:
+                        await client.send_cached_media(
+                            chat_id=callback_query.from_user.id,
+                            file_id=msg.document.file_id,
+                            caption=msg.caption or ""
+                        )
+                    else:
+                        raise Exception("Message does not contain video or document")
+
                     success_count += 1
 
                 except Exception as e:
-                    print(f"❌ Failed to forward {channel_id}:{message_id}: {e}")
+                    print(f"❌ Failed to send {channel_id}:{message_id}: {e}")
                     failed_files.append(f"{channel_id}:{message_id}")
                     continue
 
@@ -1167,11 +1198,11 @@ async def callback_handler(client, callback_query: CallbackQuery):
             del bulk_downloads[bulk_id]
 
             # Update the message with results
-            result_text = f"✅ Successfully sent {success_count}/{len(file_pairs)} files!"
+            result_text = f"✅ Successfully sent {success_count}/{len(files)} files!"
 
             if failed_files:
                 result_text += f"\n❌ Failed: {len(failed_files)} files"
-                result_text += f"\n💡 Add bot as admin to channels for direct forwarding"
+                result_text += f"\n💡 Add bot as admin to channels for direct file access"
 
             await callback_query.edit_message_text(
                 f"{result_text}\n\n{callback_query.message.text}",
