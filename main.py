@@ -784,6 +784,10 @@ async def handle_command(client, message: Message):
         await cmd_ban_user(client, message)
     elif command == 'unban_user':
         await cmd_unban_user(client, message)
+    elif command == 'reset':
+        await cmd_reset(client, message)
+    elif command == 'reset_channel':
+        await cmd_reset_channel(client, message)
     else:
         # Unknown command
         await message.reply_text("❓ Unknown command. Use /help to see available commands.")
@@ -819,12 +823,16 @@ ADMIN_HELP = """
 /demote <user_id>          - Demote admin
 /ban_user <user_id>        - Ban a user
 /unban_user <user_id>      - Unban a user
+/reset                     - Clear all indexed data from database (requires confirmation)
+/reset_channel             - Clear indexed data from a specific registered channel (requires confirmation)
 
 🚀 Enhanced Features:
 • Interactive indexing with progress tracking
 • Cancellable operations
 • Better error handling
 • Support for all video file types
+• Safe database reset with confirmation
+• Selective channel data clearing
 
 ⚠️ Important: Add bot as admin to channels for monitoring and file access
 """
@@ -1680,6 +1688,271 @@ async def cmd_unban_user(client, message: Message):
         await log_action("unban_user", by=uid, target=target)
     except Exception:
         await message.reply_text("Invalid user id.")
+
+async def cmd_reset(client, message: Message):
+    """Reset command - clears all indexed data with confirmation"""
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+    
+    # Send confirmation prompt
+    confirmation_msg = await message.reply_text(
+        "⚠️ **Database Reset Confirmation**\n\n"
+        "🗑️ This will **PERMANENTLY DELETE** all indexed movie data from the database!\n\n"
+        "📊 **What will be deleted:**\n"
+        "• All movie entries in the database\n"
+        "• All search history will remain\n"
+        "• All user accounts will remain\n"
+        "• Channel configurations will remain\n\n"
+        "🔄 **After reset:**\n"
+        "• Fresh indexing will be required\n"
+        "• All previous movie files will need to be re-indexed\n\n"
+        "**To confirm, type:** `CONFIRM`\n"
+        "**To cancel, type anything else or wait 30 seconds**\n\n"
+        "⏰ This prompt will timeout in 30 seconds."
+    )
+    
+    try:
+        # Wait for user response with 30-second timeout
+        response = await wait_for_user_input(message.chat.id, message.from_user.id, timeout=30)
+        
+        if response and response.text and response.text.upper().strip() == "CONFIRM":
+            # User confirmed - proceed with reset
+            await confirmation_msg.edit_text(
+                "🔄 **Resetting Database...**\n\n"
+                "🗑️ Clearing all indexed movie data..."
+            )
+            
+            try:
+                # Clear the movies collection (this contains all indexed movie data)
+                result = await movies_col.delete_many({})
+                deleted_count = result.deleted_count
+                
+                # Log the reset action
+                await log_action("reset_database", by=uid, extra={
+                    "deleted_count": deleted_count,
+                    "success": True
+                })
+                
+                # Update confirmation message with success
+                await confirmation_msg.edit_text(
+                    f"✅ **Database Reset Complete!**\n\n"
+                    f"🗑️ **Deleted:** {deleted_count} movie entries\n"
+                    f"👤 **By:** {uid}\n"
+                    f"🕒 **Time:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+                    f"🔄 **The database is now clean and ready for fresh indexing.**\n"
+                    f"💡 Use `/index_channel` to add new movie files to the database."
+                )
+                
+                print(f"🗑️ Database reset completed by user {uid}. Deleted {deleted_count} movie entries.")
+                
+            except Exception as e:
+                # Handle database error
+                await log_action("reset_database", by=uid, extra={
+                    "success": False,
+                    "error": str(e)
+                })
+                
+                await confirmation_msg.edit_text(
+                    f"❌ **Database Reset Failed!**\n\n"
+                    f"**Error:** {str(e)}\n\n"
+                    f"🔄 The database was not modified. Please try again later."
+                )
+                
+                print(f"❌ Database reset failed for user {uid}: {e}")
+                
+        else:
+            # User cancelled or typed something else
+            await confirmation_msg.edit_text(
+                "❌ **Database Reset Cancelled**\n\n"
+                "🛡️ No changes were made to the database.\n"
+                "💡 All your indexed movie data is safe."
+            )
+            
+    except asyncio.TimeoutError:
+        # Timeout - auto cancel
+        await confirmation_msg.edit_text(
+            "⏰ **Database Reset Timeout**\n\n"
+            "🛡️ The reset operation was cancelled due to timeout.\n"
+            "💡 All your indexed movie data is safe.\n"
+            "🔄 You can try again later if needed."
+        )
+        
+    except Exception as e:
+        # Unexpected error
+        await log_action("reset_error", by=uid, extra={"error": str(e)})
+        await confirmation_msg.edit_text(
+            f"❌ **Unexpected Error**\n\n"
+            f"**Error:** {str(e)}\n\n"
+            f"🛡️ The database was not modified."
+        )
+
+async def cmd_reset_channel(client, message: Message):
+    """Reset command - clears indexed data from a specific channel with confirmation"""
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+
+    # Step 1: Get list of registered channels
+    try:
+        channels_cursor = channels_col.find({})
+        channels = []
+        async for channel_doc in channels_cursor:
+            channels.append({
+                'channel_id': channel_doc.get('channel_id'),
+                'channel_title': channel_doc.get('channel_title', 'Unknown Channel'),
+                'enabled': channel_doc.get('enabled', True)
+            })
+
+        if not channels:
+            return await message.reply_text("📺 No registered channels found. Use /add_channel to add channels first.")
+
+        # Step 2: Display numbered list of channels
+        channel_list_text = "📺 **Select a channel to reset:**\n\n"
+        for i, channel in enumerate(channels, 1):
+            status = "✅ Enabled" if channel['enabled'] else "❌ Disabled"
+            channel_list_text += f"{i}. **{channel['channel_title']}**\n"
+            channel_list_text += f"   📊 ID: `{channel['channel_id']}` | {status}\n\n"
+
+        channel_list_text += "🔢 **Send the number** of the channel you want to reset\n"
+        channel_list_text += "⏰ **Timeout:** 30 seconds\n"
+        channel_list_text += "🛑 **To cancel:** Send 'CANCEL'"
+
+        selection_msg = await message.reply_text(channel_list_text)
+
+        # Step 3: Wait for channel selection
+        try:
+            response = await wait_for_user_input(message.chat.id, message.from_user.id, timeout=30)
+            
+            # Handle cancellation
+            if not response or (response.text and response.text.upper().strip() == "CANCEL"):
+                await selection_msg.edit_text("❌ **Channel Reset Cancelled**\n\n🛡️ No changes were made to the database.")
+                return
+            
+            # Parse channel selection
+            try:
+                selection = int(response.text.strip())
+                if selection < 1 or selection > len(channels):
+                    raise ValueError("Invalid selection")
+                selected_channel = channels[selection - 1]
+            except (ValueError, IndexError):
+                await selection_msg.edit_text("❌ **Invalid Selection**\n\nPlease send a valid channel number or 'CANCEL' to abort.")
+                return
+            
+            # Step 4: Show confirmation with channel details
+            channel_id = selected_channel['channel_id']
+            channel_title = selected_channel['channel_title']
+            
+            # Count documents to be deleted
+            docs_to_delete = await movies_col.count_documents({"channel_id": channel_id})
+            
+            confirmation_text = f"🗑️ **Channel Reset Confirmation**\n\n"
+            confirmation_text += f"📺 **Channel:** {channel_title}\n"
+            confirmation_text += f"🆔 **ID:** `{channel_id}`\n"
+            confirmation_text += f"📊 **Files to delete:** {docs_to_delete} movie entries\n\n"
+            confirmation_text += f"⚠️ **This will permanently delete ALL indexed movie data from this channel!**\n\n"
+            confirmation_text += f"**What will be deleted:**\n"
+            confirmation_text += f"• All movie entries from {channel_title}\n"
+            confirmation_text += f"• All metadata associated with this channel\n"
+            confirmation_text += f"• Search results will be affected\n\n"
+            confirmation_text += f"**What will remain:**\n"
+            confirmation_text += f"• Channel configuration\n"
+            confirmation_text += f"• Data from other channels\n"
+            confirmation_text += f"• User accounts and settings\n\n"
+            confirmation_text += f"**To confirm, type:** `CONFIRM`\n"
+            confirmation_text += f"**To cancel, type:** `CANCEL`\n\n"
+            confirmation_text += f"⏰ **This prompt will timeout in 30 seconds.**"
+            
+            confirmation_msg = await message.reply_text(confirmation_text)
+            
+            # Step 5: Wait for final confirmation
+            try:
+                final_response = await wait_for_user_input(message.chat.id, message.from_user.id, timeout=30)
+                
+                # Handle final cancellation
+                if not final_response or (final_response.text and final_response.text.upper().strip() != "CONFIRM"):
+                    await confirmation_msg.edit_text(
+                        f"❌ **Channel Reset Cancelled**\n\n"
+                        f"🛡️ No changes were made to the database.\n"
+                        f"📁 All movie data from {channel_title} remains safe."
+                    )
+                    return
+                
+                # Step 6: Proceed with channel reset
+                await confirmation_msg.edit_text(
+                    f"🔄 **Resetting Channel Data...**\n\n"
+                    f"📺 Channel: {channel_title}\n"
+                    f"🗑️ Clearing indexed movie data..."
+                )
+                
+                try:
+                    # Delete documents from movies collection for this channel
+                    result = await movies_col.delete_many({"channel_id": channel_id})
+                    deleted_count = result.deleted_count
+                    
+                    # Log the reset action with comprehensive details
+                    await log_action("reset_channel", by=uid, target=channel_id, extra={
+                        "channel_name": channel_title,
+                        "deleted_count": deleted_count,
+                        "success": True
+                    })
+                    
+                    # Update confirmation message with success
+                    await confirmation_msg.edit_text(
+                        f"✅ **Channel Reset Complete!**\n\n"
+                        f"📺 **Channel:** {channel_title}\n"
+                        f"🆔 **ID:** `{channel_id}`\n"
+                        f"🗑️ **Deleted:** {deleted_count} movie entries\n"
+                        f"👤 **By:** {uid}\n"
+                        f"🕒 **Time:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+                        f"🔄 **The channel data has been cleared.**\n"
+                        f"💡 Use `/index_channel` to re-index movie files for this channel."
+                    )
+                    
+                    print(f"🗑️ Channel reset completed by user {uid}. Deleted {deleted_count} movie entries from channel {channel_id} ({channel_title}).")
+                    
+                except Exception as e:
+                    # Handle database error
+                    await log_action("reset_channel", by=uid, target=channel_id, extra={
+                        "channel_name": channel_title,
+                        "success": False,
+                        "error": str(e)
+                    })
+                    
+                    await confirmation_msg.edit_text(
+                        f"❌ **Channel Reset Failed!**\n\n"
+                        f"📺 **Channel:** {channel_title}\n"
+                        f"**Error:** {str(e)}\n\n"
+                        f"🔄 The database was not modified. Please try again later."
+                    )
+                    
+                    print(f"❌ Channel reset failed for user {uid}, channel {channel_id}: {e}")
+                    
+            except asyncio.TimeoutError:
+                # Final timeout - auto cancel
+                await confirmation_msg.edit_text(
+                    f"⏰ **Channel Reset Timeout**\n\n"
+                    f"🛡️ The reset operation was cancelled due to timeout.\n"
+                    f"📁 All movie data from {channel_title} remains safe.\n"
+                    f"🔄 You can try again later if needed."
+                )
+                
+        except asyncio.TimeoutError:
+            # Selection timeout
+            await selection_msg.edit_text(
+                f"⏰ **Channel Selection Timeout**\n\n"
+                f"🛡️ The reset operation was cancelled due to timeout.\n"
+                f"🔄 You can try again later with /reset_channel."
+            )
+            
+    except Exception as e:
+        # Unexpected error during channel listing
+        await log_action("reset_channel_error", by=uid, extra={"error": str(e)})
+        await message.reply_text(
+            f"❌ **Unexpected Error**\n\n"
+            f"**Error:** {str(e)}\n\n"
+            f"🛡️ No changes were made to the database."
+        )
 
 # -------------------------
 # Inline Query Support
