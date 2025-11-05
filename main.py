@@ -1294,23 +1294,99 @@ async def cmd_metadata(client, message: Message):
     doc = await movies_col.find_one({"title": {"$regex": query, "$options": "i"}})
     if not doc:
         return await message.reply_text("No metadata found for that title.")
-    text = (
-        f"🎬 **{doc.get('title','Unknown')}**\n"
-        f"📅 Year: {doc.get('year','N/A')}\n"
-        f"🧵 Rip: {doc.get('rip','N/A')}\n"
-        f"🌐 Source: {doc.get('source','N/A')}\n"
-        f"🎚️ Quality: {doc.get('quality','N/A')}\n"
-        f"📁 Extension: {doc.get('extension','N/A')}\n"
-        f"🖥️ Resolution: {doc.get('resolution','N/A')}\n"
-        f"🔊 Audio: {doc.get('audio','N/A')}\n"
-        f"📺 Type: {doc.get('type','N/A')}\n"
-        f"Season/Episode: {doc.get('season','N/A')}/{doc.get('episode','N/A')}\n"
-        f"📂 File size: {doc.get('file_size','N/A')}\n"
-        f"🔗 Channel: {doc.get('channel_title','N/A')}\n"
-        f"🆔 Message ID: {doc.get('message_id')}\n"
-        f"📝 Caption: {doc.get('caption','')}\n"
-    )
-    await message.reply_text(text, disable_web_page_preview=True)
+    
+    # Helper function to check if value is available
+    def has_value(val):
+        return val and val not in ['N/A', 'Unknown', '', None] and val != 0
+    
+    # Extract metadata fields
+    title = doc.get('title', 'Unknown')
+    caption = doc.get('caption')
+    quality = doc.get('quality')
+    rip = doc.get('rip')
+    audio = doc.get('audio')
+    file_size = doc.get('file_size')
+    resolution = doc.get('resolution')
+    movie_type = doc.get('type')
+    year = doc.get('year')
+    season = doc.get('season')
+    episode = doc.get('episode')
+    source = doc.get('source')
+    extension = doc.get('extension')
+    
+    # Build metadata output with specific attributes
+    metadata_text = f"```\n"
+    metadata_text += f"Metadata: \"{query}\"\n\n"
+    
+    # 1. Name (always shown)
+    metadata_text += f"Name: {title}\n"
+    
+    # 2. Caption (only if available)
+    if has_value(caption):
+        metadata_text += f"Caption: {caption}\n"
+    
+    # 3. Quality (combine quality and rip if available)
+    quality_parts = []
+    if has_value(quality):
+        quality_parts.append(quality)
+    if has_value(rip):
+        quality_parts.append(rip)
+    if quality_parts:
+        metadata_text += f"Quality: {' '.join(quality_parts)}\n"
+    
+    # 4. Audio (only if available)
+    if has_value(audio):
+        metadata_text += f"Audio: {audio}\n"
+    
+    # 5. Size (formatted, only if available)
+    if has_value(file_size):
+        size_str = format_file_size(file_size)
+        metadata_text += f"Size: {size_str}\n"
+    
+    # 6. Resolution (only if available)
+    if has_value(resolution):
+        metadata_text += f"Resolution: {resolution}\n"
+    
+    # 7. Type (only if available)
+    if has_value(movie_type):
+        metadata_text += f"Type: {movie_type}\n"
+    
+    # 8. Year (only if available)
+    if has_value(year):
+        metadata_text += f"Year: {year}\n"
+    
+    # 9. Season (only if available for series)
+    if has_value(season) or has_value(episode):
+        season_str = ""
+        if has_value(season) and has_value(episode):
+            season_str = f"S{season:02d}E{episode:02d}"
+        elif has_value(season):
+            season_str = f"S{season:02d}"
+        elif has_value(episode):
+            season_str = f"E{episode:02d}"
+        if season_str:
+            metadata_text += f"Season: {season_str}\n"
+    
+    # 10. Features (combine source, extension, and other special features)
+    features = []
+    if has_value(source):
+        features.append(source)
+    if has_value(extension):
+        features.append(extension.upper().replace('.', ''))
+    # Check for DV, HDR, Dolby Vision in caption or filename
+    if caption:
+        caption_lower = caption.lower()
+        if 'dolby vision' in caption_lower or 'dv' in caption_lower:
+            if 'Dolby Vision' not in features:
+                features.append('Dolby Vision')
+        if 'hdr' in caption_lower and 'HDR' not in features:
+            features.append('HDR')
+    if features:
+        metadata_text += f"Features: {', '.join(features)}\n"
+    
+    metadata_text += f"```"
+    
+    await message.reply_text(metadata_text, disable_web_page_preview=True)
 
 async def cmd_my_history(client, message: Message):
     uid = message.from_user.id
