@@ -515,6 +515,10 @@ def parse_metadata(caption: str = None, filename: str = None) -> dict:
         "extension": None,
         "resolution": None,
         "audio": None,
+        "audio_channels": None,     # NEW - 2CH, 5.1CH, 6CH, 7.1CH
+        "video_codec": None,        # NEW - x264, x265, HEVC, AVC, VP9
+        "bit_depth": None,          # NEW - 8bit, 10bit, 12bit
+        "hdr_format": None,         # NEW - HDR, HDR10, HDR10+, Dolby Vision, DV
         "imdb": None,
         "type": None,
         "season": None,
@@ -523,6 +527,16 @@ def parse_metadata(caption: str = None, filename: str = None) -> dict:
 
     if not text:
         return md
+
+    # Extract extension BEFORE normalization (to preserve the period)
+    ext_match = re.search(r"\.(mkv|mp4|avi|mov|webm|m4v|3gp|ts|m2ts|flv)$", text, re.I)
+    if ext_match:
+        md["extension"] = ext_match.group(0).lower()
+
+    # Extract audio channels BEFORE normalization (to preserve decimal points like 7.1CH)
+    audio_ch_match = re.search(r"(\d+(?:\.\d+)?CH)", text, re.I)
+    if audio_ch_match:
+        md["audio_channels"] = audio_ch_match.group(1).upper()
 
     # Normalize spacing
     t = re.sub(r"[_\.]+", " ", text)
@@ -544,8 +558,40 @@ def parse_metadata(caption: str = None, filename: str = None) -> dict:
             md["rip"] = bt
         if re.search(r"netflix|amazon|prime|disney|hbo|hulu|apple", bt_l):
             md["source"] = bt
-        if re.search(r"aac|dts|ac3|eac3|flac|mp3|atmos", bt_l):
+        if re.search(r"aac|dts-hd|dts-x|dts|truehd|ac3|eac3|flac|mp3|m4a|atmos", bt_l):
             md["audio"] = bt
+        
+        # Audio channels (bracketed)
+        if re.search(r"\d+ch|\d+\.\d+ch", bt_l):
+            m = re.search(r"(\d+(?:\.\d+)?ch)", bt, re.I)
+            if m:
+                md["audio_channels"] = m.group(1)
+        
+        # Video codec (bracketed)
+        if re.search(r"x264|x265|h\.?264|h\.?265|hevc|avc|vp9", bt_l):
+            if re.search(r"x265|h\.?265|hevc", bt_l):
+                md["video_codec"] = "x265/HEVC"
+            elif re.search(r"x264|h\.?264|avc", bt_l):
+                md["video_codec"] = "x264/AVC"
+            elif re.search(r"vp9", bt_l):
+                md["video_codec"] = "VP9"
+        
+        # Bit depth (bracketed)
+        if re.search(r"\d+bit", bt_l):
+            m = re.search(r"(8bit|10bit|12bit)", bt, re.I)
+            if m:
+                md["bit_depth"] = m.group(1)
+        
+        # HDR format (bracketed)
+        if re.search(r"hdr|dolby.?vision|dv", bt_l):
+            if re.search(r"dolby.?vision|dv", bt_l):
+                md["hdr_format"] = "Dolby Vision"
+            elif re.search(r"hdr10\+", bt_l):
+                md["hdr_format"] = "HDR10+"
+            elif re.search(r"hdr10", bt_l):
+                md["hdr_format"] = "HDR10"
+            elif re.search(r"hdr", bt_l):
+                md["hdr_format"] = "HDR"
 
     # Quality (inline)
     m = re.search(r"(480p|720p|1080p|2160p|4K)", t, re.I)
@@ -562,10 +608,12 @@ def parse_metadata(caption: str = None, filename: str = None) -> dict:
     if m and not md["source"]:
         md["source"] = m.group(1)
 
-    # Extension
-    m = re.search(r"\.(mkv|mp4|avi|mov|webm)", t, re.I)
-    if m:
-        md["extension"] = "." + m.group(1).lower()
+    # Extension - already extracted before normalization
+    # This is a fallback in case it wasn't found earlier
+    if not md["extension"]:
+        m = re.search(r"(mkv|mp4|avi|mov|webm|m4v|3gp|ts|m2ts|flv)", t, re.I)
+        if m:
+            md["extension"] = "." + m.group(1).lower()
 
     # Resolution
     m = re.search(r"(\d{3,4}x\d{3,4})", t)
@@ -573,9 +621,40 @@ def parse_metadata(caption: str = None, filename: str = None) -> dict:
         md["resolution"] = m.group(1)
 
     # Audio inline
-    m = re.search(r"(AAC|DTS|AC3|EAC3|FLAC|MP3|Atmos)", t, re.I)
+    m = re.search(r"(AAC|DTS-HD|DTS-X|DTS|TrueHD|AC3|EAC3|FLAC|MP3|M4A|Atmos)", t, re.I)
     if m and not md["audio"]:
         md["audio"] = m.group(1)
+    
+    # Audio channels (inline) - match patterns like 7.1CH, 5.1CH, 6CH, 2CH
+    m = re.search(r"(\d+(?:\.\d+)?CH)", t, re.I)
+    if m and not md["audio_channels"]:
+        # Ensure we capture the full channel specification (e.g., "7.1CH" not just "1CH")
+        md["audio_channels"] = m.group(1).upper()
+    
+    # Video codec (inline)
+    if not md["video_codec"]:
+        if re.search(r"x265|H\.?265|HEVC", t, re.I):
+            md["video_codec"] = "x265/HEVC"
+        elif re.search(r"x264|H\.?264|AVC", t, re.I):
+            md["video_codec"] = "x264/AVC"
+        elif re.search(r"VP9", t, re.I):
+            md["video_codec"] = "VP9"
+    
+    # Bit depth (inline)
+    m = re.search(r"(8bit|10bit|12bit)", t, re.I)
+    if m and not md["bit_depth"]:
+        md["bit_depth"] = m.group(1)
+    
+    # HDR format (inline)
+    if not md["hdr_format"]:
+        if re.search(r"Dolby.?Vision|DV", t, re.I):
+            md["hdr_format"] = "Dolby Vision"
+        elif re.search(r"HDR10\+", t, re.I):
+            md["hdr_format"] = "HDR10+"
+        elif re.search(r"HDR10", t, re.I):
+            md["hdr_format"] = "HDR10"
+        elif re.search(r"HDR", t, re.I):
+            md["hdr_format"] = "HDR"
 
     # Season/Episode S01E02 or S1 E2 or 1x02
     m = re.search(r"[sS](\d{1,2})[ ._-]?[eE](\d{1,2})", t)
