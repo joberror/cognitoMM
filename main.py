@@ -598,7 +598,16 @@ def parse_metadata(caption: str = None, filename: str = None) -> dict:
     clean = re.sub(r"(\[.*?\]|\(.*?\)|\{.*?\})", " ", t)  # remove bracket groups
     clean = re.sub(r"(\.|\_)+", " ", clean)
     # split at imdb or year or quality or rip
-    split_at = re.search(r"(tt\d{6,8}|19\d{2}|20\d{2}|480p|720p|1080p|2160p|4K|WEBRip|BluRay|HDRip|DVDRip|CAM)", clean, re.I)
+    split_at = re.search(
+        r"(tt\d{6,8}|"                           # IMDB ID
+        r"[sS]\d{1,2}[eE]\d{1,2}|"              # S##E## or s##e##
+        r"[sS]\d{1,2}(?:\s|\.|-|_)|"            # S## followed by separator
+        r"\d{1,2}x\d{1,2}|"                      # ##x## format
+        r"19\d{2}|20\d{2}|"                      # Year
+        r"480p|720p|1080p|2160p|4K|"            # Quality
+        r"WEBRip|BluRay|HDRip|DVDRip|CAM)",     # Rip type
+        clean, re.I
+    )
     if split_at:
         title_guess = clean[:split_at.start()].strip()
     else:
