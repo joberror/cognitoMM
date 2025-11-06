@@ -1464,11 +1464,7 @@ async def cmd_metadata(client, message: Message):
     # 1. Name (always shown)
     metadata_text += f"Name: {title}\n"
     
-    # 2. Caption (only if available)
-    if has_value(caption):
-        metadata_text += f"Caption: {caption}\n"
-    
-    # 3. Quality (combine quality and rip if available)
+    # 2. Quality (combine quality and rip if available)
     quality_parts = []
     if has_value(quality):
         quality_parts.append(quality)
@@ -1525,7 +1521,7 @@ async def cmd_metadata(client, message: Message):
         if 'hdr' in caption_lower and 'HDR' not in features:
             features.append('HDR')
     if features:
-        metadata_text += f"Features: {', '.join(features)}\n"
+        metadata_text += f"Extras: {', '.join(features)}\n"
     
     metadata_text += f"```"
     
