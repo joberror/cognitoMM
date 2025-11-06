@@ -667,29 +667,76 @@ def parse_metadata(caption: str = None, filename: str = None) -> dict:
     else:
         md["type"] = "Movie"
 
-    # Year
-    m = re.search(r"(19\d{2}|20\d{2})", t)
-    if m:
-        md["year"] = int(m.group(1))
+    # Year - Multi-year detection with context-aware selection
+    # Find all years with their positions
+    all_years = []
+    for match in re.finditer(r'(19\d{2}|20\d{2})', t):
+        all_years.append({
+            'value': int(match.group(1)),
+            'position': match.start()
+        })
+    
+    # Determine which year is the release year
+    release_year = None
+    split_position = None
+    
+    if len(all_years) == 0:
+        # No year found
+        pass
+    elif len(all_years) == 1:
+        # Single year - use it
+        release_year = all_years[0]['value']
+        split_position = all_years[0]['position']
+    else:
+        # Multiple years - find metadata markers
+        metadata_pattern = r'(480p|720p|1080p|2160p|4K|WEBRip|BluRay|HDRip|DVDRip|BRRip|CAM|HDTS|WEB-DL)'
+        metadata_match = re.search(metadata_pattern, t, re.I)
+        
+        if metadata_match:
+            # Find year closest to (but before) metadata markers
+            metadata_pos = metadata_match.start()
+            candidates = [y for y in all_years if y['position'] < metadata_pos]
+            if candidates:
+                # Use the year closest to metadata
+                release_year_obj = max(candidates, key=lambda y: y['position'])
+            else:
+                # All years after metadata - use last year
+                release_year_obj = all_years[-1]
+        else:
+            # No metadata markers - use last year
+            release_year_obj = all_years[-1]
+        
+        release_year = release_year_obj['value']
+        split_position = release_year_obj['position']
+    
+    # Set the year in metadata
+    if release_year:
+        md["year"] = release_year
 
     # Heuristic title extraction:
     # - remove bracket tags and known tokens, then take leading chunk before year/quality/rip/imdb
     clean = re.sub(r"(\[.*?\]|\(.*?\)|\{.*?\})", " ", t)  # remove bracket groups
     clean = re.sub(r"(\.|\_)+", " ", clean)
-    # split at imdb or year or quality or rip
+    # split at imdb or season/episode or quality or rip (year removed from pattern)
     split_at = re.search(
         r"(tt\d{6,8}|"                           # IMDB ID
         r"[sS]\d{1,2}[eE]\d{1,2}|"              # S##E## or s##e##
         r"[sS]\d{1,2}(?:\s|\.|-|_)|"            # S## followed by separator
         r"\d{1,2}x\d{1,2}|"                      # ##x## format
-        r"19\d{2}|20\d{2}|"                      # Year
         r"480p|720p|1080p|2160p|4K|"            # Quality
         r"WEBRip|BluRay|HDRip|DVDRip|CAM)",     # Rip type
         clean, re.I
     )
-    if split_at:
+    
+    # Determine split position for title extraction
+    if split_position is not None:
+        # Use the selected year position
+        title_guess = clean[:split_position].strip()
+    elif split_at:
+        # No year, use other markers
         title_guess = clean[:split_at.start()].strip()
     else:
+        # No markers found
         title_guess = clean.strip()
 
     # Take first line and remove trailing separators
