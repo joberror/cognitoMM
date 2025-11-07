@@ -923,6 +923,8 @@ async def handle_command(client, message: Message):
         await cmd_reset(client, message)
     elif command == 'reset_channel':
         await cmd_reset_channel(client, message)
+    elif command == 'recent':
+        await cmd_recent(client, message)
     else:
         # Unknown command
         await message.reply_text("❓ Unknown command. Use /help to see available commands.")
@@ -937,6 +939,7 @@ USER_HELP = """
 /search_quality <quality> - Search by quality
 /file_info <message_id>   - Show stored file info
 /metadata <title>         - Show rich metadata
+/recent                   - Show recently added content
 /my_history               - Show your search history
 /my_prefs                 - Show or set preferences
 /help                     - Show this message
@@ -1038,6 +1041,168 @@ def format_file_size(size_bytes):
         return f"{size_bytes / 1024:.0f}KB"
     else:
         return f"{size_bytes}B"
+
+def group_recent_content(results):
+    """Group database results by title with quality/episode consolidation and categorization"""
+    movies = []
+    series = []
+    
+    for item in results:
+        # Skip items without required fields
+        if not item.get('title') or not item.get('type'):
+            continue
+            
+        title = item.get('title', 'Unknown')
+        content_type = item.get('type', 'Movie').lower()
+        year = item.get('year')
+        
+        # Create unique key for grouping
+        group_key = title
+        
+        # Prepare group data with year included
+        group_data = {
+            'title': title,
+            'type': content_type,
+            'year': year,
+            'qualities': set(),
+            'seasons_episodes': [],
+            'count': 0
+        }
+        
+        # Add quality if available
+        quality = item.get('quality')
+        if quality:
+            group_data['qualities'].add(quality.upper())
+        
+        # Collect season/episode info for series
+        if content_type in ['series', 'tv', 'show']:
+            season = item.get('season')
+            episode = item.get('episode')
+            if season and episode:
+                group_data['seasons_episodes'].append((season, episode))
+        
+        group_data['count'] += 1
+        
+        # Categorize into movies or series
+        if content_type in ['series', 'tv', 'show']:
+            series.append(group_data)
+        else:
+            movies.append(group_data)
+    
+    # Process each category to create display names
+    categorized_results = {
+        'movies': [],
+        'series': []
+    }
+    
+    # Process movies
+    for movie_data in movies:
+        display_name = format_movie_group(movie_data)
+        categorized_results['movies'].append({
+            'display_name': display_name,
+            'count': movie_data['count']
+        })
+    
+    # Process series
+    for series_data in series:
+        display_name = format_series_group(series_data)
+        categorized_results['series'].append({
+            'display_name': display_name,
+            'count': series_data['count']
+        })
+    
+    return categorized_results
+
+def format_movie_group(group_data):
+    """Format movie group with quality consolidation and year"""
+    title = group_data['title']
+    year = group_data['year']
+    qualities = sorted(group_data['qualities'])
+    
+    # Start with title and year
+    base_name = f"{title} {year}" if year else title
+    
+    if not qualities:
+        return base_name
+    
+    if len(qualities) == 1:
+        return f"{base_name} ({qualities[0]})"
+    else:
+        # Join multiple qualities with " & "
+        quality_str = " & ".join(qualities)
+        return f"{base_name} ({quality_str})"
+
+def format_series_group(group_data):
+    """Format series group with season/episode consolidation and year"""
+    title = group_data['title']
+    year = group_data['year']
+    seasons_episodes = group_data['seasons_episodes']
+    
+    # Start with title and year
+    base_name = f"{title} {year}" if year else title
+    
+    if not seasons_episodes:
+        return base_name
+    
+    # Group by season
+    season_groups = {}
+    for season, episode in seasons_episodes:
+        if season not in season_groups:
+            season_groups[season] = []
+        season_groups[season].append(episode)
+    
+    # Format each season's episode ranges
+    season_parts = []
+    for season in sorted(season_groups.keys()):
+        episodes = sorted(season_groups[season])
+        
+        if len(episodes) == 1:
+            episode_str = f"E{episodes[0]:02d}"
+        else:
+            # Create episode range
+            first_ep = episodes[0]
+            last_ep = episodes[-1]
+            episode_str = f"E{first_ep:02d}-{last_ep:02d}"
+        
+        season_parts.append(f"S{season:02d}({episode_str})")
+    
+    # Join all season parts with base name
+    episode_info = ", ".join(season_parts)
+    return f"{base_name} {episode_info}"
+
+def format_recent_output(categorized_results):
+    """Format categorized results for display"""
+    output_text = f"```\n"
+    output_text += f"Recently Added Content\n\n"
+    
+    # Display Movies section
+    movies = categorized_results['movies']
+    if movies:
+        output_text += f"🎬 MOVIES\n"
+        output_text += f"{'-' * 40}\n"
+        for i, result in enumerate(movies, 1):
+            display_name = result['display_name']
+            output_text += f"{i}. {display_name}\n"
+        output_text += f"\n"
+    
+    # Display Series section
+    series = categorized_results['series']
+    if series:
+        output_text += f"📺 SERIES\n"
+        output_text += f"{'-' * 40}\n"
+        for i, result in enumerate(series, 1):
+            display_name = result['display_name']
+            output_text += f"{i}. {display_name}\n"
+        output_text += f"\n"
+    
+    # Calculate total items and check if we hit the limit
+    total_items = len(movies) + len(series)
+    if total_items >= 20:
+        output_text += f"..and many others"
+    
+    output_text += f"```"
+    
+    return output_text
 
 async def send_search_results(message: Message, results, query):
     """Send beautifully formatted search results with inline buttons"""
@@ -1550,6 +1715,65 @@ async def cmd_my_prefs(client, message: Message):
         value = " ".join(parts[2:])
         await users_col.update_one({"user_id": uid}, {"$set": {f"preferences.{key}": value}}, upsert=True)
         await message.reply_text(f"Set preference `{key}` = `{value}`")
+
+async def cmd_recent(client, message: Message):
+    """Handle /recent command to display recently added content"""
+    
+    # Check if user is banned
+    if await check_banned(message):
+        return
+    
+    try:
+        # Database query with error handling
+        cursor = movies_col.find(
+            {},
+            {
+                "title": 1,
+                "type": 1,
+                "quality": 1,
+                "season": 1,
+                "episode": 1,
+                "year": 1,
+                "indexed_at": 1,
+                "_id": 1
+            }
+        ).sort("indexed_at", -1).limit(100)
+        
+        raw_results = await cursor.to_list(length=100)
+        
+        # Handle empty results
+        if not raw_results:
+            await message.reply_text(
+                "📭 **No Content Found**\n\n"
+                "The database doesn't contain any indexed content yet.\n\n"
+                "💡 Add channels and enable indexing to see recent content here."
+            )
+            return
+        
+        # Process and format results
+        grouped_results = group_recent_content(raw_results)
+        formatted_output = format_recent_output(grouped_results)
+        
+        # Send response
+        await message.reply_text(formatted_output, disable_web_page_preview=True)
+        
+        # Log successful usage
+        await log_action("recent_command", by=message.from_user.id, extra={
+            "results_count": len(raw_results),
+            "grouped_count": len(grouped_results)
+        })
+        
+    except Exception as e:
+        # Comprehensive error handling
+        await log_action("recent_command_error", by=message.from_user.id, extra={
+            "error": str(e),
+            "error_type": "general"
+        })
+        
+        await message.reply_text(
+            "❌ **Error**\n\n"
+            "Unable to fetch recent content. Please try again later."
+        )
 
 # -------------------------
 # Admin Commands (simplified implementations)
