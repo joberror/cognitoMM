@@ -1173,15 +1173,27 @@ def format_series_group(group_data):
     episode_info = ", ".join(season_parts)
     return f"{base_name} {episode_info}"
 
-def format_recent_output(categorized_results):
-    """Format categorized results for display"""
+def format_recent_output(categorized_results, total_files=None, total_movies=None, total_series=None, last_updated=None):
+    """Format categorized results for display with context information"""
     output_text = f"```\n"
     output_text += f"Recently Added Content\n\n"
+    
+    # Add context information
+    if last_updated:
+        output_text += f"Last Updated: {last_updated}\n"
+    if total_files is not None:
+        output_text += f"Total Files Added: {total_files}\n"
+    if total_movies is not None:
+        output_text += f"Total Movie Files: {total_movies}\n"
+    if total_series is not None:
+        output_text += f"Total Series Files: {total_series}\n"
+    
+    output_text += f"\n"
     
     # Display Movies section
     movies = categorized_results['movies']
     if movies:
-        output_text += f"🎬 MOVIES\n"
+        output_text += f"MOVIES\n"
         output_text += f"{'-' * 40}\n"
         for i, result in enumerate(movies, 1):
             display_name = result['display_name']
@@ -1191,7 +1203,7 @@ def format_recent_output(categorized_results):
     # Display Series section
     series = categorized_results['series']
     if series:
-        output_text += f"📺 SERIES\n"
+        output_text += f"SERIES\n"
         output_text += f"{'-' * 40}\n"
         for i, result in enumerate(series, 1):
             display_name = result['display_name']
@@ -1753,9 +1765,22 @@ async def cmd_recent(client, message: Message):
             )
             return
         
+        # Calculate statistics
+        total_files = len(raw_results)
+        total_movies = len([r for r in raw_results if r.get('type', 'Movie').lower() not in ['series', 'tv', 'show']])
+        total_series = len([r for r in raw_results if r.get('type', 'Movie').lower() in ['series', 'tv', 'show']])
+        
+        # Get last updated time from most recent item
+        last_updated = None
+        if raw_results:
+            last_indexed = raw_results[0].get('indexed_at')
+            if last_indexed:
+                # Format the datetime for display
+                last_updated = last_indexed.strftime('%Y-%m-%d %H:%M:%S UTC')
+        
         # Process and format results
         grouped_results = group_recent_content(raw_results)
-        formatted_output = format_recent_output(grouped_results)
+        formatted_output = format_recent_output(grouped_results, total_files, total_movies, total_series, last_updated)
         
         # Send response
         await message.reply_text(formatted_output, disable_web_page_preview=True)
@@ -1763,7 +1788,10 @@ async def cmd_recent(client, message: Message):
         # Log successful usage
         await log_action("recent_command", by=message.from_user.id, extra={
             "results_count": len(raw_results),
-            "grouped_count": len(grouped_results)
+            "grouped_count": len(grouped_results),
+            "total_files": total_files,
+            "total_movies": total_movies,
+            "total_series": total_series
         })
         
     except Exception as e:

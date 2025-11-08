@@ -124,3 +124,8 @@ cython_debug/
 
 # Logs
 logs/
+
+# Sessions
+*.session
+*.session-shm
+*.session-wal
