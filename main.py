@@ -1044,57 +1044,60 @@ def format_file_size(size_bytes):
 
 def group_recent_content(results):
     """Group database results by title with quality/episode consolidation and categorization"""
-    movies = []
-    series = []
-    
+    # Use dictionaries to group by title first
+    movies_dict = {}
+    series_dict = {}
+
     for item in results:
         # Skip items without required fields
         if not item.get('title') or not item.get('type'):
             continue
-            
+
         title = item.get('title', 'Unknown')
         content_type = item.get('type', 'Movie').lower()
         year = item.get('year')
-        
-        # Create unique key for grouping
-        group_key = title
-        
-        # Prepare group data with year included
-        group_data = {
-            'title': title,
-            'type': content_type,
-            'year': year,
-            'qualities': set(),
-            'seasons_episodes': [],
-            'count': 0
-        }
-        
+
+        # Determine which dictionary to use
+        target_dict = series_dict if content_type in ['series', 'tv', 'show'] else movies_dict
+
+        # Initialize group data if title not seen before
+        if title not in target_dict:
+            target_dict[title] = {
+                'title': title,
+                'type': content_type,
+                'year': year,
+                'qualities': set(),
+                'seasons_episodes': [],
+                'count': 0
+            }
+
+        # Update existing group data
+        group_data = target_dict[title]
+
         # Add quality if available
         quality = item.get('quality')
         if quality:
             group_data['qualities'].add(quality.upper())
-        
+
         # Collect season/episode info for series
         if content_type in ['series', 'tv', 'show']:
             season = item.get('season')
             episode = item.get('episode')
             if season and episode:
                 group_data['seasons_episodes'].append((season, episode))
-        
+
         group_data['count'] += 1
-        
-        # Categorize into movies or series
-        if content_type in ['series', 'tv', 'show']:
-            series.append(group_data)
-        else:
-            movies.append(group_data)
-    
+
+    # Convert dictionaries to lists for processing
+    movies = list(movies_dict.values())
+    series = list(series_dict.values())
+
     # Process each category to create display names
     categorized_results = {
         'movies': [],
         'series': []
     }
-    
+
     # Process movies
     for movie_data in movies:
         display_name = format_movie_group(movie_data)
@@ -1102,7 +1105,7 @@ def group_recent_content(results):
             'display_name': display_name,
             'count': movie_data['count']
         })
-    
+
     # Process series
     for series_data in series:
         display_name = format_series_group(series_data)
@@ -1110,7 +1113,7 @@ def group_recent_content(results):
             'display_name': display_name,
             'count': series_data['count']
         })
-    
+
     return categorized_results
 
 def format_movie_group(group_data):
