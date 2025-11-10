@@ -134,6 +134,25 @@ bulk_downloads = {}
 INDEX_EXTENSIONS = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.ts', '.m2ts']
 indexing_lock = asyncio.Lock()
 
+# DIAGNOSTIC: Track concurrent indexing operations
+import threading
+active_indexing_threads = set()
+indexing_stats = {
+    'total_attempts': 0,
+    'successful_inserts': 0,
+    'duplicate_errors': 0,
+    'other_errors': 0,
+    'concurrent_peak': 0
+}
+
+# SOLUTION: Message queue for sequential processing
+from collections import deque
+import time
+
+# Global message queue for sequential processing
+message_queue = deque(maxlen=100)
+queue_processor_task = None
+
 class TempData:
     """Temporary data storage for bot operations"""
     CANCEL = False
@@ -754,31 +773,47 @@ async def index_message(msg):
         # Debug logging (remove this in production)
         # print(f"🔍 Index attempt: Chat={getattr(msg.chat, 'type', 'None')} ID={getattr(msg.chat, 'id', 'None')} HasVideo={getattr(msg, 'video', None) is not None} HasDoc={getattr(msg, 'document', None) is not None}")
 
+        # DIAGNOSTIC LOG: Track indexing attempts
+        import threading
+        current_thread = threading.current_thread().ident
+        timestamp = datetime.now(timezone.utc).isoformat()
+        print(f"[DIAGNOSTIC] {timestamp} - index_message() called for msg {msg.id} on thread {current_thread}")
+
         # must be channel, supergroup, or forum post
         if getattr(msg, "chat", None) is None:
+            print(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: No chat object")
             return
 
         chat_type = getattr(msg.chat, "type", None)
         # Handle both string and enum values
         chat_type_str = str(chat_type).lower() if chat_type else ""
         if not any(supported in chat_type_str for supported in ["channel", "supergroup", "forum"]):
+            print(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: Unsupported chat type {chat_type}")
             return
 
         # Only index channels that exist in channels_col and enabled True
         chdoc = await channels_col.find_one({"channel_id": msg.chat.id})
         if not chdoc or not chdoc.get("enabled", True):
+            print(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: Channel {msg.chat.id} not registered or disabled")
             return
 
         # Only process video or documents with video mime
         has_video = getattr(msg, "video", None) is not None
         has_doc = getattr(msg, "document", None) is not None and getattr(msg.document, "mime_type", "").startswith("video")
         if not (has_video or has_doc):
+            print(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: No video content")
             return
 
+        # DIAGNOSTIC LOG: Track duplicate check race condition
+        print(f"[DIAGNOSTIC] {timestamp} - Checking for duplicate of message {msg.id} in channel {msg.chat.id}")
+        
         # Avoid duplicates
         existing = await movies_col.find_one({"channel_id": msg.chat.id, "message_id": msg.id})
         if existing:
+            print(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: Already exists in database")
             return
+        
+        print(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} passed duplicate check, proceeding with database insertion")
 
         file_size = None
         filename = None
@@ -814,9 +849,27 @@ async def index_message(msg):
             "indexed_at": datetime.now(timezone.utc)
         }
 
-        await movies_col.insert_one(entry)
-        await log_action("indexed_message", extra={"title": entry["title"], "channel_id": entry["channel_id"], "message_id": entry["message_id"]})
-        print(f"[INDEXED] {entry['title']} from {entry['channel_title']}")
+        # DIAGNOSTIC LOG: Track database insertion
+        timestamp = datetime.now(timezone.utc).isoformat()
+        print(f"[DIAGNOSTIC] {timestamp} - Attempting to insert message {msg.id} into database")
+        
+        try:
+            await movies_col.insert_one(entry)
+            print(f"[DIAGNOSTIC] {timestamp} - Successfully inserted message {msg.id} into database")
+            indexing_stats['successful_inserts'] += 1
+            await log_action("indexed_message", extra={"title": entry["title"], "channel_id": entry["channel_id"], "message_id": entry["message_id"]})
+            print(f"[INDEXED] {entry['title']} from {entry['channel_title']}")
+        except Exception as db_error:
+            print(f"[DIAGNOSTIC] {timestamp} - Database insertion failed for message {msg.id}: {str(db_error)}")
+            # Check if it's a duplicate key error
+            if 'duplicate key' in str(db_error).lower():
+                print(f"[DIAGNOSTIC] {timestamp} - Duplicate key error detected for message {msg.id} - RACE CONDITION CONFIRMED")
+                indexing_stats['duplicate_errors'] += 1
+            else:
+                print(f"[DIAGNOSTIC] {timestamp} - Other database error for message {msg.id}: {str(db_error)}")
+                indexing_stats['other_errors'] += 1
+            await log_action("index_error", extra={"error": str(db_error)})
+            print("Index error:", db_error)
     except Exception as e:
         await log_action("index_error", extra={"error": str(e)})
         print("Index error:", e)
@@ -849,7 +902,26 @@ async def on_message(client, message):
     #         print(f"📺 {message.chat.type} message: {getattr(message.chat, 'title', 'Unknown')} ({message.chat.id}) - Auto-index: {auto_index}")
 
     if auto_index:
-        await index_message(message)
+        # SOLUTION: Use message queue for sequential processing
+        import threading
+        current_thread = threading.current_thread().ident
+        timestamp = datetime.now(timezone.utc).isoformat()
+        
+        # Add message to queue for sequential processing
+        message_queue.append(message)
+        
+        # Start queue processor if not already running
+        global queue_processor_task
+        if queue_processor_task is None:
+            queue_processor_task = asyncio.create_task(process_message_queue())
+            print(f"[DIAGNOSTIC] {timestamp} - Started message queue processor task")
+        
+        # Update global indexing statistics
+        indexing_stats['total_attempts'] += 1
+        
+        # Log message arrival for analysis
+        print(f"[DIAGNOSTIC] {timestamp} - Message {message.id} queued for sequential processing")
+        print(f"[DIAGNOSTIC] {timestamp} - Queue size: {len(message_queue)}")
 
 # -------------------------
 # Command Handler
@@ -925,6 +997,10 @@ async def handle_command(client, message: Message):
         await cmd_reset_channel(client, message)
     elif command == 'recent':
         await cmd_recent(client, message)
+    elif command == 'indexing_stats':
+        await cmd_indexing_stats(client, message)
+    elif command == 'reset_stats':
+        await cmd_reset_stats(client, message)
     else:
         # Unknown command
         await message.reply_text("❓ Unknown command. Use /help to see available commands.")
@@ -963,6 +1039,8 @@ ADMIN_HELP = """
 /unban_user <user_id>      - Unban a user
 /reset                     - Clear all indexed data from database (requires confirmation)
 /reset_channel             - Clear indexed data from a specific registered channel (requires confirmation)
+/indexing_stats           - Show indexing statistics (diagnose file skipping)
+/reset_stats              - Reset indexing statistics counters
 
 🚀 Enhanced Features:
 • Interactive indexing with progress tracking
@@ -971,6 +1049,7 @@ ADMIN_HELP = """
 • Support for all video file types
 • Safe database reset with confirmation
 • Selective channel data clearing
+• Diagnostic logging for troubleshooting file indexing issues
 
 ⚠️ Important: Add bot as admin to channels for monitoring and file access
 """
@@ -2474,6 +2553,142 @@ async def main():
         print(f"❌ Error during startup: {e}")
         import traceback
         traceback.print_exc()
+
+async def process_message_queue():
+    """Process messages from queue sequentially to avoid race conditions"""
+    print("[DIAGNOSTIC] Message queue processor started")
+    
+    while True:
+        try:
+            # Wait for message with timeout
+            if not message_queue:
+                await asyncio.sleep(1)  # Wait for new messages
+                continue
+                
+            message = message_queue.popleft()
+            if not message:
+                await asyncio.sleep(1)  # Wait for new messages
+                continue
+                
+            # Process message sequentially
+            current_thread = threading.current_thread().ident
+            timestamp = datetime.now(timezone.utc).isoformat()
+            print(f"[DIAGNOSTIC] {timestamp} - Processing queued message {message.id} on thread {current_thread}")
+            
+            # Check if this message has media before attempting to index
+            has_video = getattr(message, "video", None) is not None
+            has_doc = getattr(message, "document", None) is not None and getattr(message.document, "mime_type", "").startswith("video")
+            
+            if has_video or has_doc:
+                print(f"[DIAGNOSTIC] {timestamp} - Media detected in queued message {message.id}, attempting to index...")
+                
+                try:
+                    await index_message(message)
+                    indexing_stats['successful_inserts'] += 1
+                    print(f"[DIAGNOSTIC] {timestamp} - Successfully indexed queued message {message.id}")
+                except Exception as e:
+                    indexing_stats['other_errors'] += 1
+                    print(f"[DIAGNOSTIC] {timestamp} - ERROR indexing queued message {message.id}: {str(e)}")
+            else:
+                print(f"[DIAGNOSTIC] {timestamp} - Queued message {message.id} skipped: No media content")
+                
+        except Exception as e:
+            print(f"[DIAGNOSTIC] Message queue processor error: {e}")
+            await asyncio.sleep(5)  # Brief pause before retrying
+
+async def cmd_indexing_stats(client, message: Message):
+    """Display indexing statistics to diagnose file skipping issues"""
+    
+    # Check if user is admin
+    if not await is_admin(message.from_user.id):
+        await message.reply_text("🚫 Admins only.")
+        return
+    
+    # Create comprehensive statistics report
+    stats_text = f"```\n"
+    stats_text += f"📊 **INDEXING DIAGNOSTIC STATISTICS**\n\n"
+    
+    # Basic statistics
+    stats_text += f"🔢 Total indexing attempts: {indexing_stats['total_attempts']}\n"
+    stats_text += f"✅ Successful insertions: {indexing_stats['successful_inserts']}\n"
+    stats_text += f"🔄 Duplicate errors: {indexing_stats['duplicate_errors']}\n"
+    stats_text += f"❌ Other errors: {indexing_stats['other_errors']}\n"
+    stats_text += f"📈 Peak concurrent operations: {indexing_stats['concurrent_peak']}\n\n"
+    
+    # Calculate success rate
+    if indexing_stats['total_attempts'] > 0:
+        success_rate = (indexing_stats['successful_inserts'] / indexing_stats['total_attempts']) * 100
+        stats_text += f"📈 Success rate: {success_rate:.1f}%\n\n"
+    else:
+        stats_text += f"📈 Success rate: N/A (no attempts)\n\n"
+    
+    # Error analysis
+    if indexing_stats['duplicate_errors'] > 0:
+        stats_text += f"⚠️ **RACE CONDITION DETECTED**: {indexing_stats['duplicate_errors']} duplicate key errors\n"
+        stats_text += f"💡 This indicates concurrent indexing attempts on the same message\n\n"
+    
+    if indexing_stats['other_errors'] > 0:
+        stats_text += f"⚠️ **OTHER ERRORS**: {indexing_stats['other_errors']} database/processing errors\n"
+        stats_text += f"💡 Check logs for specific error details\n\n"
+    
+    # Concurrency analysis
+    if indexing_stats['concurrent_peak'] > 1:
+        stats_text += f"🔄 **CONCURRENCY ISSUES**: Peak of {indexing_stats['concurrent_peak']} simultaneous operations\n"
+        stats_text += f"💡 Auto-indexing lacks proper synchronization\n"
+        stats_text += f"🔧 Recommendation: Implement message queuing for better handling\n\n"
+    else:
+        stats_text += f"✅ **CONCURRENCY**: No significant concurrent activity detected\n\n"
+    
+    # Queue status
+    stats_text += f"📦 **QUEUE STATUS**: {len(message_queue)} messages pending\n\n"
+    
+    # Recommendations
+    stats_text += f"🛠️ **TROUBLESHOOTING RECOMMENDATIONS**:\n\n"
+    stats_text += f"1. Use /indexing_stats to monitor real-time statistics\n"
+    stats_text += f"2. Check [DIAGNOSTIC] logs in console for race conditions\n"
+    stats_text += f"3. Monitor 'Duplicate key error' messages for concurrent indexing\n"
+    stats_text += f"4. Consider implementing message queue for high-volume channels\n\n"
+    
+    stats_text += f"🔄 **RESET STATISTICS**: Use /reset_stats to clear counters\n"
+    stats_text += f"```"
+    
+    await message.reply_text(stats_text, disable_web_page_preview=True)
+    
+    # Log statistics viewing
+    await log_action("indexing_stats_viewed", by=message.from_user.id, extra=indexing_stats)
+
+async def cmd_reset_stats(client, message: Message):
+    """Reset indexing statistics counters"""
+    
+    # Check if user is admin
+    if not await is_admin(message.from_user.id):
+        await message.reply_text("🚫 Admins only.")
+        return
+    
+    # Reset global statistics
+    global indexing_stats
+    old_stats = indexing_stats.copy()
+    
+    indexing_stats = {
+        'total_attempts': 0,
+        'successful_inserts': 0,
+        'duplicate_errors': 0,
+        'other_errors': 0,
+        'concurrent_peak': 0
+    }
+    
+    await message.reply_text(
+        f"✅ **Indexing Statistics Reset**\n\n"
+        f"📊 Previous stats:\n"
+        f"• Total attempts: {old_stats['total_attempts']}\n"
+        f"• Successful: {old_stats['successful_inserts']}\n"
+        f"• Duplicate errors: {old_stats['duplicate_errors']}\n"
+        f"• Other errors: {old_stats['other_errors']}\n"
+        f"• Peak concurrent: {old_stats['concurrent_peak']}\n\n"
+        f"🔄 Counters reset to zero. Monitoring will continue.\n"
+    )
+    
+    await log_action("indexing_stats_reset", by=message.from_user.id, extra=old_stats)
 
 if __name__ == "__main__":
     run_bot()
