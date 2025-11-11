@@ -1544,50 +1544,12 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 else:
                     raise Exception("Message does not contain video or document")
 
-                # Edit the callback message to show success
-                await callback_query.edit_message_text(
-                    f"✅ File sent successfully!\n\n{callback_query.message.text}",
-                    reply_markup=callback_query.message.reply_markup
-                )
+                # Show success notification without editing the message
+                await callback_query.answer("✅ File sent successfully!", show_alert=True)
 
             except Exception as e:
-                # If forwarding fails, provide channel link instead
-                try:
-                    # Get movie info from database
-                    movie_doc = await movies_col.find_one({
-                        "channel_id": channel_id,
-                        "message_id": message_id
-                    })
-
-                    if movie_doc:
-                        title = movie_doc.get('title', 'Unknown')
-                        channel_title = movie_doc.get('channel_title', 'Unknown Channel')
-
-                        # Create a link to the message
-                        if channel_id < 0:
-                            # Convert to public channel format if possible
-                            channel_link = f"https://t.me/c/{str(channel_id)[4:]}/{message_id}"
-                        else:
-                            channel_link = f"Channel ID: {channel_id}, Message: {message_id}"
-
-                        await callback_query.edit_message_text(
-                            f"❌ Cannot send file directly (bot needs channel access)\n\n"
-                            f"📁 File: {title}\n"
-                            f"📺 Channel: {channel_title}\n"
-                            f"🔗 Link: {channel_link}\n\n"
-                            f"💡 Add bot as admin to channel for direct file access",
-                            reply_markup=callback_query.message.reply_markup
-                        )
-                    else:
-                        await callback_query.edit_message_text(
-                            f"❌ Failed to fetch file: {str(e)}\n\n{callback_query.message.text}",
-                            reply_markup=callback_query.message.reply_markup
-                        )
-                except Exception as inner_e:
-                    await callback_query.edit_message_text(
-                        f"❌ Failed to fetch file: {str(e)}\n\n{callback_query.message.text}",
-                        reply_markup=callback_query.message.reply_markup
-                    )
+                # If forwarding fails, show error notification
+                await callback_query.answer(f"❌ Failed to fetch file: {str(e)}", show_alert=True)
 
         elif data.startswith("page:"):
             # Handle pagination callback
