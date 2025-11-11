@@ -956,12 +956,14 @@ async def handle_command(client, message: Message):
         await cmd_help(client, message)
     elif command == 'search':
         await cmd_search(client, message)
-    elif command == 'search_year':
-        await cmd_search_year(client, message)
-    elif command == 'search_quality':
-        await cmd_search_quality(client, message)
-    elif command == 'file_info':
-        await cmd_file_info(client, message)
+    # REMOVED COMMANDS: search_year, search_quality, file_info
+    # These commands were deemed unoptimized and unnecessary
+    # elif command == 'search_year':
+    #     await cmd_search_year(client, message)
+    # elif command == 'search_quality':
+    #     await cmd_search_quality(client, message)
+    # elif command == 'file_info':
+    #     await cmd_file_info(client, message)
     elif command == 'metadata':
         await cmd_metadata(client, message)
     elif command == 'my_history':
@@ -1011,9 +1013,6 @@ async def handle_command(client, message: Message):
 USER_HELP = """
 🤖 Movie Bot Commands (Bot Session)
 /search <title>           - Search (exact + fuzzy)
-/search_year <year>       - Search by year
-/search_quality <quality> - Search by quality
-/file_info <message_id>   - Show stored file info
 /metadata <title>         - Show rich metadata
 /recent                   - Show recently added content
 /my_history               - Show your search history
@@ -1631,62 +1630,64 @@ async def should_process_command_for_user(user_id: int) -> bool:
     # For now, allow all non-banned users
     return True
 
-async def cmd_search_year(client, message: Message):
-    parts = message.text.split()
-    if len(parts) < 2:
-        return await message.reply_text("Usage: /search_year <year>")
-
-    try:
-        year = int(parts[1])
-    except ValueError:
-        return await message.reply_text("Year must be a number")
-
-    results = await movies_col.find({"year": year}).to_list(length=None)
-    if not results:
-        return await message.reply_text(f"⚠️ No movies found for year {year}")
-
-    text = f"**🗓️ Movies from {year}:**\n\n" + "\n\n".join(
-        [f"🎬 {r.get('title')} [{r.get('quality','N/A')}] — `{r.get('channel_title')}` (msg {r.get('message_id')})" for r in results]
-    )
-    await message.reply_text(text, disable_web_page_preview=True)
-
-async def cmd_search_quality(client, message: Message):
-    parts = message.text.split()
-    if len(parts) < 2:
-        return await message.reply_text("Usage: /search_quality <quality>")
-
-    quality = parts[1]
-    results = await movies_col.find({"quality": {"$regex": quality, "$options": "i"}}).to_list(length=None)
-    if not results:
-        return await message.reply_text(f"⚠️ No movies found with quality {quality}")
-
-    text = f"**📺 Movies with quality {quality}:**\n\n" + "\n\n".join(
-        [f"🎬 {r.get('title')} ({r.get('year','N/A')}) — `{r.get('channel_title')}` (msg {r.get('message_id')})" for r in results]
-    )
-    await message.reply_text(text, disable_web_page_preview=True)
-
-async def cmd_file_info(client, message: Message):
-    parts = message.text.split()
-    if len(parts) < 2:
-        return await message.reply_text("Usage: /file_info <message_id>")
-    try:
-        msg_id = int(parts[1])
-    except Exception:
-        return await message.reply_text("message_id must be integer")
-    doc = await movies_col.find_one({"message_id": msg_id})
-    if not doc:
-        return await message.reply_text("No file indexed with that message_id.")
-    text = (
-        f"🎬 **{doc.get('title','Unknown')}**\n"
-        f"📅 Year: {doc.get('year','N/A')}\n"
-        f"📂 Size: {doc.get('file_size','N/A')} bytes\n"
-        f"🎚️ Quality: {doc.get('quality','N/A')}\n"
-        f"📁 Type: {doc.get('type','N/A')}\n"
-        f"🔗 Channel: {doc.get('channel_title','N/A')} (id {doc.get('channel_id')})\n"
-        f"🆔 Message ID: {doc.get('message_id')}\n"
-        f"📝 Caption: {doc.get('caption','')}\n"
-    )
-    await message.reply_text(text, disable_web_page_preview=True)
+# REMOVED COMMANDS: cmd_search_year, cmd_search_quality, cmd_file_info
+# These commands were deemed unoptimized and unnecessary
+# async def cmd_search_year(client, message: Message):
+#     parts = message.text.split()
+#     if len(parts) < 2:
+#         return await message.reply_text("Usage: /search_year <year>")
+#
+#     try:
+#         year = int(parts[1])
+#     except ValueError:
+#         return await message.reply_text("Year must be a number")
+#
+#     results = await movies_col.find({"year": year}).to_list(length=None)
+#     if not results:
+#         return await message.reply_text(f"⚠️ No movies found for year {year}")
+#
+#     text = f"**🗓️ Movies from {year}:**\n\n" + "\n\n".join(
+#         [f"🎬 {r.get('title')} [{r.get('quality','N/A')}] — `{r.get('channel_title')}` (msg {r.get('message_id')})" for r in results]
+#     )
+#     await message.reply_text(text, disable_web_page_preview=True)
+#
+# async def cmd_search_quality(client, message: Message):
+#     parts = message.text.split()
+#     if len(parts) < 2:
+#         return await message.reply_text("Usage: /search_quality <quality>")
+#
+#     quality = parts[1]
+#     results = await movies_col.find({"quality": {"$regex": quality, "$options": "i"}}).to_list(length=None)
+#     if not results:
+#         return await message.reply_text(f"⚠️ No movies found with quality {quality}")
+#
+#     text = f"**📺 Movies with quality {quality}:**\n\n" + "\n\n".join(
+#         [f"🎬 {r.get('title')} ({r.get('year','N/A')}) — `{r.get('channel_title')}` (msg {r.get('message_id')})" for r in results]
+#     )
+#     await message.reply_text(text, disable_web_page_preview=True)
+#
+# async def cmd_file_info(client, message: Message):
+#     parts = message.text.split()
+#     if len(parts) < 2:
+#         return await message.reply_text("Usage: /file_info <message_id>")
+#     try:
+#         msg_id = int(parts[1])
+#     except Exception:
+#         return await message.reply_text("message_id must be integer")
+#     doc = await movies_col.find_one({"message_id": msg_id})
+#     if not doc:
+#         return await message.reply_text("No file indexed with that message_id.")
+#     text = (
+#         f"🎬 **{doc.get('title','Unknown')}**\n"
+#         f"📅 Year: {doc.get('year','N/A')}\n"
+#         f"📂 Size: {doc.get('file_size','N/A')} bytes\n"
+#         f"🎚️ Quality: {doc.get('quality','N/A')}\n"
+#         f"📁 Type: {doc.get('type','N/A')}\n"
+#         f"🔗 Channel: {doc.get('channel_title','N/A')} (id {doc.get('channel_id')})\n"
+#         f"🆔 Message ID: {doc.get('message_id')}\n"
+#         f"📝 Caption: {doc.get('caption','')}\n"
+#     )
+#     await message.reply_text(text, disable_web_page_preview=True)
 
 async def cmd_metadata(client, message: Message):
     parts = message.text.split()

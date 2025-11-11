@@ -64,13 +64,10 @@ USER_HELP = """
 
 🔍 **Search**
 /search <title>          - Search movies by title
-/search_year <year>      - Search by release year
-/search_quality <q>      - Search by quality (720p, 1080p)
 /search_type <movie|series> - Filter by type
 /search_episode <SxxExx> - Search by season & episode
 
 📁 **File Info**
-/file_info <message_id>  - Show details of a file
 /metadata <title>        - Show stored metadata
 
 👤 **Account**
@@ -126,23 +123,25 @@ async def search_title(client, message):
     text = "\n\n".join([f"🎬 {r['title']} ({r.get('upload_date').strftime('%Y') if r.get('upload_date') else ''})\n📂 File size: {r.get('file_size')} bytes\n🔗 Channel: {r.get('channel_title')}" for r in results])
     await message.reply_text(text or "No results found.")
 
-@bot.on_message(filters.command("search_year"))
-async def search_year(client, message):
-    if len(message.command) < 2:
-        return await message.reply_text("❌ Usage: /search_year <year>")
-    year = int(message.command[1])
-    results = movies_col.find({"year": year}).limit(10)
-    text = "\n\n".join([f"🎬 {r['title']} ({year})" for r in results])
-    await message.reply_text(text or "No results found.")
+# REMOVED COMMANDS: search_year, search_quality
+# These commands were deemed unoptimized and unnecessary
+# @bot.on_message(filters.command("search_year"))
+# async def search_year(client, message):
+#     if len(message.command) < 2:
+#         return await message.reply_text("❌ Usage: /search_year <year>")
+#     year = int(message.command[1])
+#     results = movies_col.find({"year": year}).limit(10)
+#     text = "\n\n".join([f"🎬 {r['title']} ({year})" for r in results])
+#     await message.reply_text(text or "No results found.")
 
-@bot.on_message(filters.command("search_quality"))
-async def search_quality(client, message):
-    if len(message.command) < 2:
-        return await message.reply_text("❌ Usage: /search_quality <quality>")
-    quality = message.command[1]
-    results = movies_col.find({"quality": {"$regex": quality, "$options": "i"}}).limit(10)
-    text = "\n\n".join([f"🎬 {r['title']} [{quality}]" for r in results])
-    await message.reply_text(text or "No results found.")
+# @bot.on_message(filters.command("search_quality"))
+# async def search_quality(client, message):
+#     if len(message.command) < 2:
+#         return await message.reply_text("❌ Usage: /search_quality <quality>")
+#     quality = message.command[1]
+#     results = movies_col.find({"quality": {"$regex": quality, "$options": "i"}}).limit(10)
+#     text = "\n\n".join([f"🎬 {r['title']} [{quality}]" for r in results])
+#     await message.reply_text(text or "No results found.")
 
 @bot.on_message(filters.command("search_type"))
 async def search_type(client, message):
@@ -203,34 +202,36 @@ if __name__ == "__main__":
 # ... [imports + config stay the same as in your previous block] ...
 
 # ------------------ EXTRA FILE INFO COMMANDS ------------------
-@bot.on_message(filters.command("file_info"))
-async def file_info(client, message):
-    """
-    Usage: /file_info <message_id>
-    Returns details of a specific indexed movie file
-    """
-    if len(message.command) < 2:
-        return await message.reply_text("❌ Usage: /file_info <message_id>")
-    try:
-        msg_id = int(message.command[1])
-    except ValueError:
-        return await message.reply_text("❌ Message ID must be a number")
-
-    entry = movies_col.find_one({"message_id": msg_id})
-    if not entry:
-        return await message.reply_text("⚠️ No file found with that ID.")
-
-    text = f"""
-🎬 **{entry.get('title', 'Unknown')}**
-📅 Year: {entry.get('upload_date').strftime('%Y') if entry.get('upload_date') else 'N/A'}
-📂 File Size: {entry.get('file_size', 'N/A')} bytes
-🎚️ Quality: {entry.get('quality', 'Unknown')}
-📁 Type: {entry.get('type', 'Unknown')}
-🔗 Channel: {entry.get('channel_title', 'Unknown')}
-🆔 Message ID: {entry.get('message_id')}
-📝 Caption: {entry.get('caption', '')}
-"""
-    await message.reply_text(text, disable_web_page_preview=True)
+# REMOVED COMMAND: file_info
+# This command was deemed unoptimized and unnecessary
+# @bot.on_message(filters.command("file_info"))
+# async def file_info(client, message):
+#     """
+#     Usage: /file_info <message_id>
+#     Returns details of a specific indexed movie file
+#     """
+#     if len(message.command) < 2:
+#         return await message.reply_text("❌ Usage: /file_info <message_id>")
+#     try:
+#         msg_id = int(message.command[1])
+#     except ValueError:
+#         return await message.reply_text("❌ Message ID must be a number")
+#
+#     entry = movies_col.find_one({"message_id": msg_id})
+#     if not entry:
+#         return await message.reply_text("⚠️ No file found with that ID.")
+#
+#     text = f"""
+# 🎬 **{entry.get('title', 'Unknown')}**
+# 📅 Year: {entry.get('upload_date').strftime('%Y') if entry.get('upload_date') else 'N/A'}
+# 📂 File Size: {entry.get('file_size', 'N/A')} bytes
+# 🎚️ Quality: {entry.get('quality', 'Unknown')}
+# 📁 Type: {entry.get('type', 'Unknown')}
+# 🔗 Channel: {entry.get('channel_title', 'Unknown')}
+# 🆔 Message ID: {entry.get('message_id')}
+# 📝 Caption: {entry.get('caption', '')}
+# """
+#     await message.reply_text(text, disable_web_page_preview=True)
 
 
 @bot.on_message(filters.command("metadata"))
@@ -269,7 +270,6 @@ async def metadata(client, message):
 
 # ------------------ NOTE ------------------
 """
-👉 /file_info is useful when you already have a message_id (maybe from logs or admin reference).
 👉 /metadata is useful when searching by title (user-friendly).
 """
 

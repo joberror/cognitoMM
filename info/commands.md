@@ -29,13 +29,10 @@ USER_HELP = """
 
 🔍 **Search**
 /search <title>             - Search movies by title
-/search_year <year>         - Search by release year
-/search_quality <q>         - Search by quality (720p, 1080p)
 /search_type <movie|series> - Filter by type
 /search_episode <SxxExx>    - Search by season & episode
 
 📁 **File Info**
-/file_info <message_id>     - Show details of a file
 /metadata <title>           - Show stored metadata
 
 👤 **Account**
