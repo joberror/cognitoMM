@@ -954,7 +954,7 @@ async def handle_command(client, message: Message):
         await cmd_start(client, message)
     elif command == 'help':
         await cmd_help(client, message)
-    elif command == 'search':
+    elif command == 'search' or command == 'f':
         await cmd_search(client, message)
     # REMOVED COMMANDS: search_year, search_quality, file_info
     # These commands were deemed unoptimized and unnecessary
@@ -1013,13 +1013,19 @@ async def handle_command(client, message: Message):
 USER_HELP = """
 🤖 Movie Bot Commands (Bot Session)
 /search <title>           - Search (exact + fuzzy)
+/f <title>             - Shortcut for search command
+/search -e <title>      - Exact search (match full title)
 /metadata <title>         - Show rich metadata
 /recent                   - Show recently added content
 /my_history               - Show your search history
 /my_prefs                 - Show or set preferences
 /help                     - Show this message
 
-💡 Note: Bot must be added as admin to channels for file forwarding
+💡 Search Tips:
+• Use /f for quick searches
+• Use -e for exact title matches
+• Normal search combines exact + fuzzy results
+• Exact search finds perfect title matches only
 """
 
 ADMIN_HELP = """
@@ -1074,33 +1080,56 @@ async def cmd_search(client, message: Message):
     if len(parts) < 2:
         return await message.reply_text("Usage: /search <title>")
 
-    query = " ".join(parts[1:]).strip()
+    # Check for exact search flag
+    exact_search = False
+    if parts[1] == "-e" and len(parts) >= 3:
+        exact_search = True
+        query = " ".join(parts[2:]).strip()
+    else:
+        query = " ".join(parts[1:]).strip()
 
     # record search history
     await users_col.update_one({"user_id": uid}, {"$push": {"search_history": {"q": query, "ts": datetime.now(timezone.utc)}}}, upsert=True)
 
-    # Search for exact matches (no limit - show all results)
-    exact = await movies_col.find({"title": {"$regex": query, "$options": "i"}}).to_list(length=None)
+    if exact_search:
+        # Exact search mode - only look for exact title matches
+        exact_pattern = f"^{re.escape(query)}$"
+        exact = await movies_col.find({"title": {"$regex": exact_pattern, "$options": "i"}}).to_list(length=None)
+        
+        if not exact:
+            # No exact matches found - suggest normal search
+            await message.reply_text(
+                f"⚠️ No exact matches found for \"{query}\"\n\n"
+                f"💡 **Try normal search:** /search {query}\n"
+                f"🔍 Normal search finds partial and similar titles"
+            )
+            return
+        
+        all_results = exact
+    else:
+        # Normal search - exact + fuzzy
+        # Search for exact matches (no limit - show all results)
+        exact = await movies_col.find({"title": {"$regex": query, "$options": "i"}}).to_list(length=None)
 
-    # Search for fuzzy matches if we have less exact matches
-    all_results = list(exact)
-    if len(exact) < 50:  # Only do fuzzy search if we don't have many exact matches
-        candidates = []
-        cursor = movies_col.find({}, {"title": 1, "year": 1, "quality": 1, "channel_title": 1, "message_id": 1, "channel_id": 1, "type": 1, "season": 1, "episode": 1, "rip": 1}).limit(500)
-        async for r in cursor:
-            # Skip if already in exact matches
-            if any(ex.get("_id") == r.get("_id") for ex in exact):
-                continue
-            title = r.get("title", "")
-            score = fuzz.partial_ratio(query.lower(), title.lower())
-            if score >= FUZZY_THRESHOLD:
-                candidates.append((score, r))
+        # Search for fuzzy matches if we have less exact matches
+        all_results = list(exact)
+        if len(exact) < 50:  # Only do fuzzy search if we don't have many exact matches
+            candidates = []
+            cursor = movies_col.find({}, {"title": 1, "year": 1, "quality": 1, "channel_title": 1, "message_id": 1, "channel_id": 1, "type": 1, "season": 1, "episode": 1, "rip": 1}).limit(500)
+            async for r in cursor:
+                # Skip if already in exact matches
+                if any(ex.get("_id") == r.get("_id") for ex in exact):
+                    continue
+                title = r.get("title", "")
+                score = fuzz.partial_ratio(query.lower(), title.lower())
+                if score >= FUZZY_THRESHOLD:
+                    candidates.append((score, r))
 
-        candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
-        all_results.extend([c[1] for c in candidates])
+            candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
+            all_results.extend([c[1] for c in candidates])
 
-    if not all_results:
-        return await message.reply_text("⚠️ No results found for your search.")
+        if not all_results:
+            return await message.reply_text("⚠️ No results found for your search.")
 
     # Create flashy, neat search results
     await send_search_results(message, all_results, query)
