@@ -1326,18 +1326,31 @@ def format_recent_output(categorized_results, total_files=None, total_movies=Non
     
     return output_text
 
-async def send_search_results(message: Message, results, query):
-    """Send beautifully formatted search results with inline buttons"""
+async def send_search_results(message: Message, results, query, page=1):
+    """Send beautifully formatted search results with pagination"""
 
-    # Create the refined format requested
+    # Pagination settings
+    RESULTS_PER_PAGE = 9
+    total_results = len(results)
+    total_pages = (total_results + RESULTS_PER_PAGE - 1) // RESULTS_PER_PAGE  # Ceiling division
+
+    # Ensure page is within valid range
+    page = max(1, min(page, total_pages))
+
+    # Calculate start and end indices for current page
+    start_idx = (page - 1) * RESULTS_PER_PAGE
+    end_idx = min(start_idx + RESULTS_PER_PAGE, total_results)
+    page_results = results[start_idx:end_idx]
+
+    # Create the header
     search_text = f"```\n"
     search_text += f"Search: \"{query}\"\n"
-    search_text += f"Total Results: {len(results)}\n\n"
+    search_text += f"Total Results: {total_results} | Page {page}/{total_pages}\n\n"
 
-    # Format each result
+    # Format each result on current page
     button_data = []
 
-    for i, result in enumerate(results, 1):
+    for i, result in enumerate(page_results, start=start_idx + 1):
         title = result.get('title', 'Unknown Title')
         year = result.get('year')
         quality = result.get('quality')
@@ -1405,10 +1418,10 @@ async def send_search_results(message: Message, results, query):
 
     search_text += f"```"
 
-    # Create buttons - fix the structure issue
+    # Create buttons
     buttons = []
     if button_data:
-        # Create individual file buttons in rows of 4
+        # Create individual file buttons in rows of 3
         current_row = []
         for btn in button_data:
             current_row.append(
@@ -1418,40 +1431,67 @@ async def send_search_results(message: Message, results, query):
                 )
             )
 
-            # Add row when we have 4 buttons or it's the last button
-            if len(current_row) == 4 or btn == button_data[-1]:
+            # Add row when we have 3 buttons or it's the last button
+            if len(current_row) == 3 or btn == button_data[-1]:
                 buttons.append(current_row)
                 current_row = []
 
-        # Add "Get All" button if multiple results
-        if len(button_data) > 1:
-            # Generate a short UUID for bulk download to avoid callback data size limits
-            bulk_id = str(uuid.uuid4())[:8]  # Use first 8 characters of UUID
+        # Create navigation row with Prev, Get All, and Next buttons
+        nav_row = []
 
-            # Clean up expired downloads first
-            cleanup_expired_bulk_downloads()
+        # Store search results for pagination (using UUID to avoid callback data size limits)
+        search_id = str(uuid.uuid4())[:8]
+        cleanup_expired_bulk_downloads()  # Clean up old data
 
-            # Store the bulk download data temporarily
+        bulk_downloads[search_id] = {
+            'results': results,  # Store all results for pagination
+            'query': query,
+            'created_at': datetime.now(timezone.utc),
+            'user_id': message.from_user.id
+        }
+
+        # Previous button
+        if page > 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    "← Prev",
+                    callback_data=f"page:{search_id}:{page-1}"
+                )
+            )
+
+        # Get All button (for all results, not just current page)
+        if total_results > 1:
+            # Generate bulk download ID for all results
+            bulk_id = str(uuid.uuid4())[:8]
             bulk_downloads[bulk_id] = {
-                'files': [{'channel_id': btn['channel_id'], 'message_id': btn['message_id']} for btn in button_data[:10]],
+                'files': [{'channel_id': r.get('channel_id'), 'message_id': r.get('message_id')}
+                         for r in results if r.get('channel_id') and r.get('message_id')][:10],
                 'created_at': datetime.now(timezone.utc),
                 'user_id': message.from_user.id
             }
 
-            buttons.append([
+            nav_row.append(
                 InlineKeyboardButton(
-                    f"Get All ({len(button_data)})",
+                    f"Get All ({total_results})",
                     callback_data=f"bulk:{bulk_id}"
                 )
-            ])
+            )
 
-    # Create keyboard - this is the critical fix
+        # Next button
+        if page < total_pages:
+            nav_row.append(
+                InlineKeyboardButton(
+                    "Next →",
+                    callback_data=f"page:{search_id}:{page+1}"
+                )
+            )
+
+        # Add navigation row if it has buttons
+        if nav_row:
+            buttons.append(nav_row)
+
+    # Create keyboard
     keyboard = InlineKeyboardMarkup(buttons) if buttons else None
-
-    # Debug: Print detailed button info
-    print(f"🔧 DEBUG: Button data count: {len(button_data)}")
-    print(f"🔧 DEBUG: Button rows created: {len(buttons) if buttons else 0}")
-    print(f"🔧 DEBUG: Keyboard object: {keyboard is not None}")
 
     # Send the message
     await message.reply_text(
@@ -1548,6 +1588,173 @@ async def callback_handler(client, callback_query: CallbackQuery):
                         f"❌ Failed to fetch file: {str(e)}\n\n{callback_query.message.text}",
                         reply_markup=callback_query.message.reply_markup
                     )
+
+        elif data.startswith("page:"):
+            # Handle pagination callback
+            _, search_id, page_str = data.split(":")
+            page = int(page_str)
+
+            # Retrieve search data
+            if search_id not in bulk_downloads:
+                await callback_query.answer("❌ Search expired or not found", show_alert=True)
+                return
+
+            search_data = bulk_downloads[search_id]
+
+            # Verify user permission
+            if search_data['user_id'] != callback_query.from_user.id:
+                await callback_query.answer("❌ You can only navigate your own searches", show_alert=True)
+                return
+
+            results = search_data['results']
+            query = search_data['query']
+
+            await callback_query.answer(f"📄 Page {page}")
+
+            # Update the message with new page
+            # Create the header
+            RESULTS_PER_PAGE = 9
+            total_results = len(results)
+            total_pages = (total_results + RESULTS_PER_PAGE - 1) // RESULTS_PER_PAGE
+
+            # Calculate start and end indices for current page
+            start_idx = (page - 1) * RESULTS_PER_PAGE
+            end_idx = min(start_idx + RESULTS_PER_PAGE, total_results)
+            page_results = results[start_idx:end_idx]
+
+            # Create the search text
+            search_text = f"```\n"
+            search_text += f"Search: \"{query}\"\n"
+            search_text += f"Total Results: {total_results} | Page {page}/{total_pages}\n\n"
+
+            # Format each result on current page
+            button_data = []
+            for i, result in enumerate(page_results, start=start_idx + 1):
+                title = result.get('title', 'Unknown Title')
+                year = result.get('year')
+                quality = result.get('quality')
+                rip = result.get('rip')
+                movie_type = result.get('type', 'Movie')
+                season = result.get('season')
+                episode = result.get('episode')
+                file_size = result.get('file_size')
+                channel_id = result.get('channel_id')
+                message_id = result.get('message_id')
+
+                # Format file size
+                size_str = format_file_size(file_size)
+                quality_str = quality if quality else ""
+
+                # Format season/episode info for series
+                series_info = ""
+                if movie_type.lower() in ['series', 'tv', 'show'] and (season or episode):
+                    if season and episode:
+                        series_info = f"S{season:02d}E{episode:02d}"
+                    elif season:
+                        series_info = f"S{season:02d}"
+                    elif episode:
+                        series_info = f"E{episode:02d}"
+
+                year_str = str(year) if year else ""
+
+                # Format rip type
+                rip_str = ""
+                if rip and rip.lower() in ['bluray', 'blu-ray', 'bdrip', 'bd']:
+                    rip_str = "Blu"
+                elif rip and 'web' in rip.lower():
+                    rip_str = "Web"
+                elif rip and 'hd' in rip.lower():
+                    rip_str = "HD"
+
+                # Build the info string
+                info_parts = []
+                if size_str != "N/A":
+                    info_parts.append(size_str)
+                if quality_str:
+                    info_parts.append(quality_str)
+                if series_info:
+                    info_parts.append(series_info)
+                if year_str:
+                    info_parts.append(year_str)
+                if rip_str:
+                    info_parts.append(rip_str)
+
+                info_string = ".".join(info_parts) if info_parts else "N/A"
+                search_text += f"{i}. {title} [{info_string}]\n"
+
+                if channel_id and message_id:
+                    button_data.append({
+                        'number': i,
+                        'channel_id': channel_id,
+                        'message_id': message_id
+                    })
+
+            search_text += f"```"
+
+            # Create buttons
+            buttons = []
+            if button_data:
+                # Create individual file buttons in rows of 3
+                current_row = []
+                for btn in button_data:
+                    current_row.append(
+                        InlineKeyboardButton(
+                            f"Get [{btn['number']}]",
+                            callback_data=f"get_file:{btn['channel_id']}:{btn['message_id']}"
+                        )
+                    )
+                    if len(current_row) == 3 or btn == button_data[-1]:
+                        buttons.append(current_row)
+                        current_row = []
+
+                # Create navigation row
+                nav_row = []
+
+                # Previous button
+                if page > 1:
+                    nav_row.append(
+                        InlineKeyboardButton(
+                            "← Prev",
+                            callback_data=f"page:{search_id}:{page-1}"
+                        )
+                    )
+
+                # Get All button
+                if total_results > 1:
+                    bulk_id = str(uuid.uuid4())[:8]
+                    bulk_downloads[bulk_id] = {
+                        'files': [{'channel_id': r.get('channel_id'), 'message_id': r.get('message_id')}
+                                 for r in results if r.get('channel_id') and r.get('message_id')][:10],
+                        'created_at': datetime.now(timezone.utc),
+                        'user_id': callback_query.from_user.id
+                    }
+                    nav_row.append(
+                        InlineKeyboardButton(
+                            f"Get All ({total_results})",
+                            callback_data=f"bulk:{bulk_id}"
+                        )
+                    )
+
+                # Next button
+                if page < total_pages:
+                    nav_row.append(
+                        InlineKeyboardButton(
+                            "Next →",
+                            callback_data=f"page:{search_id}:{page+1}"
+                        )
+                    )
+
+                if nav_row:
+                    buttons.append(nav_row)
+
+            keyboard = InlineKeyboardMarkup(buttons) if buttons else None
+
+            # Edit the message
+            await callback_query.edit_message_text(
+                search_text,
+                reply_markup=keyboard,
+                disable_web_page_preview=True
+            )
 
         elif data.startswith("index#"):
             # Handle indexing callback
