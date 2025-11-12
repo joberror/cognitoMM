@@ -689,6 +689,21 @@ async def is_banned(user_id: int):
     doc = await get_user_doc(user_id)
     return bool(doc and doc.get("role") == "banned")
 
+async def has_accepted_terms(user_id: int):
+    """Check if user has accepted terms and privacy policy"""
+    doc = await get_user_doc(user_id)
+    return bool(doc and doc.get("terms_accepted", False))
+
+async def load_terms_and_privacy():
+    """Load terms and privacy policy from markdown file"""
+    try:
+        with open('TERMS_AND_PRIVACY.md', 'r', encoding='utf-8') as f:
+            content = f.read()
+        return content
+    except Exception as e:
+        print(f"❌ Failed to load terms and privacy: {e}")
+        return None
+
 async def log_action(action: str, by: int = None, target: int = None, extra: dict = None):
     doc = {
         "action": action,
@@ -715,6 +730,23 @@ async def check_banned(message: Message) -> bool:
         await message.reply_text("🚫 You are banned from using this bot.")
         return True
     return False
+
+async def check_terms_acceptance(message: Message) -> bool:
+    """Check if user has accepted terms and send prompt if they haven't"""
+    uid = message.from_user.id
+
+    # Admins bypass terms acceptance check
+    if await is_admin(uid):
+        return True
+
+    if not await has_accepted_terms(uid):
+        await message.reply_text(
+            "⚠️ **Terms Acceptance Required**\n\n"
+            "You must accept our Terms of Use and Privacy Policy before using this bot.\n\n"
+            "Please use /start to view and accept the terms."
+        )
+        return False
+    return True
 
 async def should_process_command(message: Message) -> bool:
     """
@@ -1204,6 +1236,10 @@ async def handle_command(client, message: Message):
     if command != 'start' and await check_banned(message):
         return
 
+    # Check if user has accepted terms (except for start command)
+    if command != 'start' and not await check_terms_acceptance(message):
+        return
+
     # Route commands
     if command == 'start':
         await cmd_start(client, message)
@@ -1319,8 +1355,90 @@ async def cmd_start(client, message: Message):
     if await check_banned(message):
         return
 
-    await users_col.update_one({"user_id": message.from_user.id}, {"$set": {"last_seen": datetime.now(timezone.utc)}}, upsert=True)
-    await message.reply_text("👋 Welcome! Use /help to see commands.")
+    uid = message.from_user.id
+    user_name = message.from_user.first_name or "User"
+
+    # Update last seen
+    await users_col.update_one(
+        {"user_id": uid},
+        {"$set": {"last_seen": datetime.now(timezone.utc)}},
+        upsert=True
+    )
+
+    # Check if user has already accepted terms
+    if await has_accepted_terms(uid):
+        # User has already accepted terms - show welcome message
+        await message.reply_text(
+            f"👋 **Welcome back, {user_name}!**\n\n"
+            f"You're all set to use the MovieBot.\n\n"
+            f"Use /help to see available commands.",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+        return
+
+    # User hasn't accepted terms - show terms and privacy policy
+    terms_content = await load_terms_and_privacy()
+
+    if not terms_content:
+        # Fallback if terms file can't be loaded
+        await message.reply_text(
+            "❌ **Error Loading Terms**\n\n"
+            "Unable to load Terms of Use and Privacy Policy.\n"
+            "Please contact the administrator.",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+        return
+
+    # Split the content into chunks (Telegram has a 4096 character limit)
+    # We'll send the full terms in one message if possible, or split if needed
+    max_length = 4000  # Leave some room for formatting
+
+    if len(terms_content) <= max_length:
+        # Send in one message
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Yes, I Agree", callback_data="terms#accept")],
+            [InlineKeyboardButton("❌ Decline", callback_data="terms#decline")]
+        ])
+
+        await message.reply_text(
+            terms_content,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+    else:
+        # Split into multiple messages
+        # Send first part
+        first_part = terms_content[:max_length]
+        await message.reply_text(
+            first_part,
+            disable_web_page_preview=True,
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+
+        # Send remaining parts
+        remaining = terms_content[max_length:]
+        while len(remaining) > max_length:
+            chunk = remaining[:max_length]
+            await message.reply_text(
+                chunk,
+                disable_web_page_preview=True,
+                parse_mode=enums.ParseMode.MARKDOWN
+            )
+            remaining = remaining[max_length:]
+
+        # Send final part with buttons
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Yes, I Agree", callback_data="terms#accept")],
+            [InlineKeyboardButton("❌ Decline", callback_data="terms#decline")]
+        ])
+
+        await message.reply_text(
+            remaining,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
 
 async def cmd_help(client, message: Message):
     uid = message.from_user.id
@@ -1763,9 +1881,63 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
         print(f"🔧 DEBUG: Callback received - Data: {data}, User: {user_id}")
 
-        # Check access control
+        # Handle terms acceptance (bypass access control for this)
+        if data.startswith("terms#"):
+            action = data.split("#")[1]
+
+            if action == "accept":
+                # User accepted terms
+                await users_col.update_one(
+                    {"user_id": user_id},
+                    {
+                        "$set": {
+                            "terms_accepted": True,
+                            "terms_accepted_at": datetime.now(timezone.utc),
+                            "last_seen": datetime.now(timezone.utc)
+                        }
+                    },
+                    upsert=True
+                )
+
+                # Log the acceptance
+                await log_action("terms_accepted", by=user_id)
+
+                # Update the message to show acceptance
+                await callback_query.message.edit_text(
+                    "✅ **Terms Accepted**\n\n"
+                    "Thank you for accepting our Terms of Use and Privacy Policy!\n\n"
+                    "You can now use all features of the MovieBot.\n\n"
+                    "Use /help to see available commands.",
+                    parse_mode=enums.ParseMode.MARKDOWN
+                )
+
+                await callback_query.answer("✅ Terms accepted! Welcome to MovieBot!", show_alert=True)
+
+            elif action == "decline":
+                # User declined terms
+                await callback_query.message.edit_text(
+                    "❌ **Terms Declined**\n\n"
+                    "You have declined the Terms of Use and Privacy Policy.\n\n"
+                    "Unfortunately, you cannot use this bot without accepting the terms.\n\n"
+                    "If you change your mind, use /start to view the terms again.",
+                    parse_mode=enums.ParseMode.MARKDOWN
+                )
+
+                await callback_query.answer("You must accept the terms to use this bot.", show_alert=True)
+
+            return
+
+        # Check access control for all other callbacks
         if not await should_process_command_for_user(user_id):
             await callback_query.answer("🚫 Access denied.", show_alert=True)
+            return
+
+        # Check terms acceptance for all other callbacks
+        if not await has_accepted_terms(user_id) and not await is_admin(user_id):
+            await callback_query.answer(
+                "⚠️ You must accept the Terms of Use first. Use /start to accept.",
+                show_alert=True
+            )
             return
 
         if data.startswith("get_file:"):
@@ -2921,6 +3093,26 @@ async def cmd_reset_channel(client, message: Message):
 # Inline Query Support
 # -------------------------
 async def inline_handler(client, inline_query: InlineQuery):
+    user_id = inline_query.from_user.id
+
+    # Check if user has accepted terms (admins bypass)
+    if not await has_accepted_terms(user_id) and not await is_admin(user_id):
+        # Return a single result telling user to accept terms
+        results = [
+            InlineQueryResultArticle(
+                id="terms_required",
+                title="⚠️ Terms Acceptance Required",
+                description="You must accept Terms of Use to use this bot",
+                input_message_content=InputTextMessageContent(
+                    "⚠️ **Terms Acceptance Required**\n\n"
+                    "You must accept our Terms of Use and Privacy Policy before using this bot.\n\n"
+                    "Please use /start to view and accept the terms."
+                )
+            )
+        ]
+        await inline_query.answer(results, cache_time=0)
+        return
+
     q = inline_query.query.strip()
     if not q:
         return
