@@ -241,8 +241,8 @@ async def cleanup_expired_file_deletions():
 async def track_file_for_deletion(user_id, message_id, delete_at=None):
     """Track a file for auto-deletion"""
     if delete_at is None:
-        # Default: 15 minutes from now
-        delete_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+        # Default: 5 minutes from now
+        delete_at = datetime.now(timezone.utc) + timedelta(minutes=5)
     
     file_id = str(uuid.uuid4())[:8]
     
@@ -273,52 +273,61 @@ async def check_files_for_deletion():
     # Thread-safe access to file_deletions
     async with file_deletions_lock:
         for file_id, data in file_deletions.items():
-            # Check if it's time to send 5-minute warning
-            warning_time = data['delete_at'] - timedelta(minutes=5)
+            # Check if it's time to send 2-minute warning (for 5-minute deletion timer)
+            warning_time = data['delete_at'] - timedelta(minutes=2)
             if not data['notified'] and current_time >= warning_time:
                 files_to_warn.append((file_id, data.copy()))
-            
+
             # Check if it's time to delete
             if current_time >= data['delete_at']:
                 files_to_delete.append((file_id, data.copy()))
-    
-    # Send 5-minute warnings
+
+    # Send 2-minute warnings
+    warned_count = 0
     for file_id, data in files_to_warn:
         try:
             await client.send_message(
                 data['user_id'],
-                f"⏰ **5-Minute Warning**\n\n"
-                f"The file I sent you will be **auto-deleted** in 5 minutes.\n"
+                f"⏰ **2-Minute Warning**\n\n"
+                f"The file I sent you will be **auto-deleted** in 2 minutes.\n"
                 f"Please save it if you want to keep it!"
             )
-            
+
             # Update notified flag in thread-safe manner
             async with file_deletions_lock:
                 if file_id in file_deletions:
                     file_deletions[file_id]['notified'] = True
-            
-            print(f"⏰ Sent 5-minute deletion warning to user {data['user_id']}")
+
+            warned_count += 1
         except Exception as e:
+            # Only log errors, not successful warnings
             print(f"❌ Failed to send warning to user {data['user_id']}: {e}")
             # Still mark as notified to avoid spamming failed attempts
             async with file_deletions_lock:
                 if file_id in file_deletions:
                     file_deletions[file_id]['notified'] = True
+
+    # Log summary of warnings sent
+    if warned_count > 0:
+        print(f"⏰ Sent {warned_count} deletion warning(s)")
     
     # Delete files that are due
+    deleted_count = 0
+    failed_count = 0
+
     for file_id, data in files_to_delete:
         deletion_success = False
         retry_count = data.get('retry_count', 0)
         max_retries = 3
-        
+
         # Check if this is an immediate deletion (no warning sent)
         is_immediate = not data['notified']
-        
+
         try:
             await client.delete_messages(data['user_id'], data['message_id'])
-            print(f"🗑️ Auto-deleted message {data['message_id']} for user {data['user_id']}")
             deletion_success = True
-            
+            deleted_count += 1
+
             # Send notification about deletion (only if not immediate deletion)
             if not is_immediate:
                 try:
@@ -327,28 +336,37 @@ async def check_files_for_deletion():
                         "🗑️ **Auto-Deleted**\n\n"
                         "The file has been automatically deleted as scheduled."
                     )
-                    print(f"📧 Sent deletion notification to user {data['user_id']}")
                 except Exception as notify_error:
-                    print(f"❌ Failed to send deletion notification to user {data['user_id']}: {notify_error}")
-                    # Continue even if notification fails
-                
+                    # Silently continue if notification fails - not critical
+                    pass
+
         except Exception as e:
+            failed_count += 1
+            # Only log errors, not every deletion
             print(f"❌ Failed to delete message {data['message_id']} for user {data['user_id']}: {e}")
-            
-            # For test purposes: always remove from tracking on first failure
-            # In production, you might want to implement retry logic here
             deletion_success = False
-        
+
         # Remove from tracking (always remove, regardless of success/failure for test compatibility)
         async with file_deletions_lock:
             if file_id in file_deletions:
                 del file_deletions[file_id]
-    
+
+    # Log summary instead of individual deletions
+    if deleted_count > 0:
+        print(f"🗑️ Auto-deleted {deleted_count} file(s)")
+    if failed_count > 0:
+        print(f"⚠️ Failed to delete {failed_count} file(s)")
+
     # Save state to disk after processing (but don't await to avoid blocking)
+    # Don't use verbose mode here to reduce log spam
     asyncio.create_task(save_file_deletions_to_disk())
 
-async def save_file_deletions_to_disk():
-    """Save file deletions to persistent storage"""
+async def save_file_deletions_to_disk(verbose=False):
+    """Save file deletions to persistent storage
+
+    Args:
+        verbose: If True, print success message. Default False to reduce log spam.
+    """
     try:
         async with file_deletions_lock:
             # Create a serializable copy of the data
@@ -362,14 +380,17 @@ async def save_file_deletions_to_disk():
                     'notified': data['notified'],
                     'retry_count': data.get('retry_count', 0)
                 }
-        
+
         # Write to file
         import json
         with open('file_deletions.json', 'w') as f:
             json.dump(serializable_data, f)
-        
-        print("💾 Saved file deletions to disk")
+
+        # Only log if verbose mode is enabled
+        if verbose:
+            print("💾 Saved file deletions to disk")
     except Exception as e:
+        # Always log errors
         print(f"❌ Failed to save file deletions to disk: {e}")
 
 async def load_file_deletions_from_disk():
@@ -431,7 +452,8 @@ async def periodic_save_file_deletions():
     while True:
         try:
             await asyncio.sleep(300)  # 5 minutes
-            await save_file_deletions_to_disk()
+            # Use verbose=True for periodic saves to confirm they're working
+            await save_file_deletions_to_disk(verbose=True)
         except Exception as e:
             print(f"❌ Error in periodic save: {e}")
 
@@ -1790,8 +1812,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
                         await client.send_message(
                             callback_query.from_user.id,
                             "⏰ **Auto-Delete Notice**\n\n"
-                            "This file will be **automatically deleted in 15 minutes**.\n"
-                            "You'll receive a 5-minute warning before deletion.\n\n"
+                            "This file will be **automatically deleted in 5 minutes**.\n"
+                            "You'll receive a 2-minute warning before deletion.\n\n"
                             "💡 Please save the file if you want to keep it!"
                         )
                     except Exception as notify_error:
