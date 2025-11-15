@@ -23,7 +23,7 @@ from .utils import get_readable_time, wait_for_user_input, set_user_input, clean
 from .metadata_parser import parse_metadata
 from .user_management import get_user_doc, is_admin, is_banned, has_accepted_terms, load_terms_and_privacy, log_action, check_banned, check_terms_acceptance, should_process_command, require_not_banned
 from .file_deletion import track_file_for_deletion
-from .indexing import INDEX_EXTENSIONS, indexing_lock, start_indexing_process, save_file_to_db, index_message, message_queue, process_message_queue, indexing_stats
+from .indexing import INDEX_EXTENSIONS, indexing_lock, start_indexing_process, save_file_to_db, index_message, message_queue, process_message_queue, indexing_stats, prune_orphaned_index_entries
 from .search import format_file_size, group_recent_content, format_recent_output, send_search_results
 
 # -------------------------
@@ -110,6 +110,10 @@ async def handle_command(client, message: Message):
         await cmd_indexing_stats(client, message)
     elif command == 'reset_stats':
         await cmd_reset_stats(client, message)
+    elif command == 'prune_orphans':
+        await cmd_prune_orphans(client, message)
+    elif command == 'update_db':
+        await cmd_update_db(client, message)
     else:
         # Unknown command
         await message.reply_text("❓ Unknown command. Use /help to see available commands.")
@@ -151,16 +155,18 @@ ADMIN_HELP = """
 /unban_user <user_id>      - Unban a user
 /reset                     - Clear all indexed data from database (requires confirmation)
 /reset_channel             - Clear indexed data from a specific registered channel (requires confirmation)
-/indexing_stats           - Show indexing statistics (diagnose file skipping)
-/reset_stats              - Reset indexing statistics counters
+/indexing_stats            - Show indexing statistics (diagnose file skipping)
+/reset_stats               - Reset indexing statistics counters
+/prune_orphans             - Manually prune orphaned index entries
+/update_db                 - Scan for duplicates + remove orphaned entries (maintenance)
 
 🚀 Enhanced Features:
 • Interactive indexing with progress tracking
 • Cancellable operations
 • Better error handling
 • Support for all video file types
-• Safe database reset with confirmation
-• Selective channel data clearing
+• Safe database & per-channel reset with confirmation
+• Orphan/duplicate cleanup utilities
 • Diagnostic logging for troubleshooting file indexing issues
 
 ⚠️ Important: Add bot as admin to channels for monitoring and file access
@@ -1114,3 +1120,71 @@ async def cmd_reset_stats(client, message: Message):
     )
     
     await log_action("indexing_stats_reset", by=message.from_user.id, extra=old_stats)
+
+async def cmd_prune_orphans(client, message: Message):
+    """
+    Admin command to trigger immediate orphaned index reconciliation.
+    Usage: /prune_orphans [limit]
+    limit (optional) caps number of recent entries scanned (default 500).
+    """
+    if not await is_admin(message.from_user.id):
+        await message.reply_text("🚫 Admins only.")
+        return
+
+    parts = message.text.split()
+    limit = 500
+    if len(parts) >= 2:
+        try:
+            limit = int(parts[1])
+        except ValueError:
+            return await message.reply_text("❌ Invalid limit. Usage: /prune_orphans [limit]")
+
+    start = datetime.now(timezone.utc).isoformat()
+    await message.reply_text(f"🔍 Starting orphan prune (limit {limit})...")
+
+    removed = 0
+    checked = 0
+    errors = 0
+
+    # Custom inline version of prune for user feedback (reuse core function but capture prints)
+    try:
+        cursor = movies_col.find({}, {"channel_id": 1, "message_id": 1, "title": 1}).sort("indexed_at", -1).limit(limit)
+        async for doc in cursor:
+            checked += 1
+            channel_id = doc.get("channel_id")
+            message_id = doc.get("message_id")
+            doc_id = doc.get("_id")
+            if channel_id is None or message_id is None:
+                try:
+                    await movies_col.delete_one({"_id": doc_id})
+                    removed += 1
+                except Exception:
+                    errors += 1
+                continue
+            try:
+                msg = await client.get_messages(channel_id, message_id)
+                if not msg or getattr(msg, "empty", False):
+                    await movies_col.delete_one({"_id": doc_id})
+                    removed += 1
+            except Exception:
+                try:
+                    await movies_col.delete_one({"_id": doc_id})
+                    removed += 1
+                except Exception:
+                    errors += 1
+        end = datetime.now(timezone.utc).isoformat()
+        await log_action("prune_orphans", by=message.from_user.id, extra={
+            "checked": checked,
+            "removed": removed,
+            "errors": errors,
+            "start": start,
+            "end": end
+        })
+        await message.reply_text(
+            f"✅ Orphan prune complete\n"
+            f"Checked: {checked}\nRemoved: {removed}\nErrors: {errors}\n"
+            f"Window: {start} → {end}"
+        )
+    except Exception as e:
+        await log_action("prune_orphans_error", by=message.from_user.id, extra={"error": str(e)})
+        await message.reply_text(f"❌ Orphan prune failed: {e}")

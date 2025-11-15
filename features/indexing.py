@@ -401,14 +401,7 @@ async def on_message(client, message):
     s = await settings_col.find_one({"k": "auto_indexing"})
     auto_index = s["v"] if s and "v" in s else AUTO_INDEX_DEFAULT
 
-    # Debug: Show all non-command messages from supported chat types (remove in production)
-    # if message.chat:
-    #     chat_type_str = str(message.chat.type).lower() if message.chat.type else ""
-    #     if any(supported in chat_type_str for supported in ["channel", "supergroup", "forum"]):
-    #         print(f"📺 {message.chat.type} message: {getattr(message.chat, 'title', 'Unknown')} ({message.chat.id}) - Auto-index: {auto_index}")
-
     if auto_index:
-        # SOLUTION: Use message queue for sequential processing
         import threading
         current_thread = threading.current_thread().ident
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -428,3 +421,89 @@ async def on_message(client, message):
         # Log message arrival for analysis
         print(f"[DIAGNOSTIC] {timestamp} - Message {message.id} queued for sequential processing")
         print(f"[DIAGNOSTIC] {timestamp} - Queue size: {len(message_queue)}")
+
+# -------------------------
+# ORPHANED INDEX RECONCILIATION
+# -------------------------
+async def prune_orphaned_index_entries(limit: int = 500):
+    """
+    Verify recently indexed entries still have a source Telegram message.
+    If the source message has been deleted from the channel, remove the DB entry.
+
+    Strategy:
+    1. Fetch recent documents sorted by indexed_at DESC (bounded by limit).
+    2. For each document attempt to retrieve the original message via get_messages.
+       - Success: keep entry.
+       - Failure / message empty / not found: delete entry.
+    3. Collect statistics and log a diagnostic summary.
+
+    NOTE: Telegram Bot API does NOT send deletion updates for channel history reliably.
+    This periodic reconciliation compensates for missing real-time delete events.
+    """
+    from .config import client
+    removed = 0
+    checked = 0
+    errors = 0
+    start_ts = datetime.now(timezone.utc).isoformat()
+
+    # Only proceed if client is available
+    if client is None:
+        print(f"[ORPHAN-MONITOR] {start_ts} - Client unavailable, skipping prune cycle.")
+        return
+
+    try:
+        cursor = movies_col.find({}, {"channel_id": 1, "message_id": 1, "title": 1}).sort("indexed_at", -1).limit(limit)
+        async for doc in cursor:
+            checked += 1
+            channel_id = doc.get("channel_id")
+            message_id = doc.get("message_id")
+            doc_id = doc.get("_id")
+
+            # Skip if fundamental fields missing
+            if channel_id is None or message_id is None:
+                try:
+                    await movies_col.delete_one({"_id": doc_id})
+                    removed += 1
+                except Exception as e:
+                    errors += 1
+                    print(f"[ORPHAN-MONITOR] Error deleting malformed entry {doc_id}: {e}")
+                continue
+
+            try:
+                msg = await client.get_messages(channel_id, message_id)
+                # If API returns None or an 'empty' message, treat as orphan
+                if not msg or getattr(msg, "empty", False):
+                    await movies_col.delete_one({"_id": doc_id})
+                    removed += 1
+                    print(f"[ORPHAN-MONITOR] Removed orphan entry {doc_id} (channel {channel_id} message {message_id})")
+            except Exception as e:
+                # Any failure to fetch message likely means deletion or access loss
+                try:
+                    await movies_col.delete_one({"_id": doc_id})
+                    removed += 1
+                    print(f"[ORPHAN-MONITOR] Removed orphan (fetch error) entry {doc_id}: {e}")
+                except Exception as del_err:
+                    errors += 1
+                    print(f"[ORPHAN-MONITOR] Secondary delete failure for {doc_id}: {del_err}")
+
+        end_ts = datetime.now(timezone.utc).isoformat()
+        print(f"[ORPHAN-MONITOR] Cycle complete {start_ts} -> {end_ts} | Checked={checked} Removed={removed} Errors={errors}")
+
+    except Exception as outer_e:
+        errors += 1
+        print(f"[ORPHAN-MONITOR] Fatal cycle error: {outer_e}")
+
+async def start_orphan_monitor(interval_minutes: int = 30):
+    """
+    Background task that periodically calls prune_orphaned_index_entries.
+    Runs indefinitely until process shutdown.
+
+    interval_minutes: frequency of reconciliation cycles.
+    """
+    print(f"[ORPHAN-MONITOR] Starting orphan monitor (interval {interval_minutes}m)")
+    while True:
+        try:
+            await prune_orphaned_index_entries()
+        except Exception as e:
+            print(f"[ORPHAN-MONITOR] Unhandled exception in monitor loop: {e}")
+        await asyncio.sleep(interval_minutes * 60)
