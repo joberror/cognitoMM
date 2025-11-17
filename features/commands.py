@@ -429,13 +429,67 @@ async def cmd_metadata(client, message: Message):
     await message.reply_text(metadata_text, disable_web_page_preview=True)
 
 async def cmd_my_history(client, message: Message):
+    """Display user's search history with clickable command links"""
     uid = message.from_user.id
     doc = await users_col.find_one({"user_id": uid})
     history = doc.get("search_history", []) if doc else []
+
     if not history:
-        return await message.reply_text("You have no search history.")
-    text = "\n".join([f"{h['ts'].isoformat()} — {h['q']}" for h in history[-20:]])
-    await message.reply_text(text)
+        return await message.reply_text(
+            "No search history found.\n\n"
+            "Use /search or /f to start searching."
+        )
+
+    # Get statistics
+    total_searches = len(history)
+    recent_history = history[-20:]  # Last 20 searches
+    unique_queries = len(set(h['q'].lower() for h in history))
+
+    # Get first and last search dates
+    first_search = history[0]['ts']
+    last_search = history[-1]['ts']
+
+    # Build compact header with statistics
+    text = "<b>SEARCH HISTORY</b>\n"
+    text += f"Total: {total_searches} | Unique: {unique_queries}\n"
+    text += f"Period: {first_search.strftime('%b %d, %Y')} - {last_search.strftime('%b %d, %Y')}\n\n"
+
+    # Group searches by date
+    from collections import defaultdict
+    grouped = defaultdict(list)
+
+    for h in reversed(recent_history):
+        date_key = h['ts'].strftime('%d %b, %Y')
+        grouped[date_key].append(h)
+
+    # Display grouped searches
+    for date_key, searches in grouped.items():
+        text += f"<b>{date_key}</b>\n"
+
+        for h in searches:
+            query = h['q']
+            timestamp = h['ts']
+
+            # Format time only
+            time_str = timestamp.strftime('%I:%M%p')
+
+            # Create clickable commands
+            normal_cmd = f"/f {query}"
+            exact_cmd = f"/f -e {query}"
+
+            # Add entry with time and commands
+            text += f"  {time_str} | <code>{normal_cmd}</code> | <code>{exact_cmd}</code>\n"
+
+        text += "\n"
+
+    text += f"<i>Click any command to copy and search</i>"
+
+    # Send message with HTML formatting (no buttons)
+    await message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
 
 async def cmd_my_prefs(client, message: Message):
     uid = message.from_user.id

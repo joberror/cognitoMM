@@ -430,6 +430,47 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 reply_markup=callback_query.message.reply_markup
             )
 
+        elif data.startswith("hsearch#") or data.startswith("hsearch_exact#"):
+            # Handle history search callback
+            is_exact = data.startswith("hsearch_exact#")
+            query = data.split("#", 1)[1]
+
+            await callback_query.answer(f"🔍 Searching for: {query}")
+
+            # Import search functionality
+            from .search import perform_search
+            from .config import FUZZY_THRESHOLD
+
+            # Perform the search
+            results = await perform_search(query, exact_search=is_exact, fuzzy_threshold=FUZZY_THRESHOLD)
+
+            # Check if results exist
+            if not results:
+                if is_exact:
+                    await callback_query.message.reply_text(
+                        f"⚠️ No exact matches found for \"{query}\"\n\n"
+                        f"💡 **Try normal search:** /search {query}\n"
+                        f"🔍 Normal search finds partial and similar titles"
+                    )
+                else:
+                    await callback_query.message.reply_text("⚠️ No results found for your search.")
+                return
+
+            # Send search results as a new message
+            await send_search_results(
+                client=client,
+                message=callback_query.message,
+                results=results,
+                query=query
+            )
+
+            # Record search history
+            await users_col.update_one(
+                {"user_id": callback_query.from_user.id},
+                {"$push": {"search_history": {"q": query, "ts": datetime.now(timezone.utc)}}},
+                upsert=True
+            )
+
         else:
             await callback_query.answer("❌ Unknown action.", show_alert=True)
 
