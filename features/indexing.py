@@ -390,13 +390,18 @@ async def process_message_queue():
 
 
 async def on_message(client, message):
+    """Handle incoming messages for auto-indexing and user input"""
+    # Check for user input waiting (replacement for client.listen)
+    if message.chat and message.from_user:
+        from .utils import set_user_input
+        set_user_input(message.chat.id, message.from_user.id, message)
+
     # DIAGNOSTIC: Check if this is a command message
     if message.text and message.text.startswith('/'):
         timestamp = datetime.now(timezone.utc).isoformat()
         print(f"[DIAGNOSTIC] {timestamp} - COMMAND DETECTED: {message.text} - This should be handled by command handler, not indexing!")
         # Don't process commands in indexing - let them fall through to command handler
         return
-    """Handle incoming messages for auto-indexing"""
     # Auto-indexing for channel messages
     s = await settings_col.find_one({"k": "auto_indexing"})
     auto_index = s["v"] if s and "v" in s else AUTO_INDEX_DEFAULT
@@ -437,8 +442,13 @@ async def prune_orphaned_index_entries(limit: int = 500):
        - Failure / message empty / not found: delete entry.
     3. Collect statistics and log a diagnostic summary.
 
-    NOTE: Telegram Bot API does NOT send deletion updates for channel history reliably.
-    This periodic reconciliation compensates for missing real-time delete events.
+    NOTE: Telegram Bot API does NOT send deletion updates for channel posts to bots.
+    This is a Telegram API limitation. Bots only receive deletion updates for messages
+    in groups/supergroups, NOT for channel posts. This periodic verification is the
+    ONLY reliable way to detect deleted channel posts.
+
+    Args:
+        limit: Number of recent entries to check (default: 500)
     """
     from .config import client
     removed = 0
@@ -493,14 +503,19 @@ async def prune_orphaned_index_entries(limit: int = 500):
         errors += 1
         print(f"[ORPHAN-MONITOR] Fatal cycle error: {outer_e}")
 
-async def start_orphan_monitor(interval_minutes: int = 30):
+async def start_orphan_monitor(interval_minutes: int = 15):
     """
     Background task that periodically calls prune_orphaned_index_entries.
     Runs indefinitely until process shutdown.
 
-    interval_minutes: frequency of reconciliation cycles.
+    Args:
+        interval_minutes: frequency of reconciliation cycles (default: 15 minutes)
+
+    Note: This is the PRIMARY mechanism for detecting deleted channel posts since
+    Telegram Bot API does not send deletion updates for channel posts to bots.
     """
-    print(f"[ORPHAN-MONITOR] Starting orphan monitor (interval {interval_minutes}m)")
+    print(f"[ORPHAN-MONITOR] Starting orphan monitor (interval {interval_minutes}m, checking 500 recent entries per cycle)")
+    print(f"[ORPHAN-MONITOR] This is the primary deletion detection mechanism for channel posts")
     while True:
         try:
             await prune_orphaned_index_entries()

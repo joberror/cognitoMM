@@ -21,21 +21,26 @@ Heuristic Strategy:
 5. All exceptions are caught and logged without interrupting other handlers.
 
 Notes / Limitations:
-- Telegram bot sessions often DO NOT receive channel history deletion updates unless
-  specific privileges are granted or using a user session. If no updates arrive,
-  this handler will remain mostly idle; orphan monitor still performs cleanup.
-- The handler is defensive: if structure changes or attributes differ, it silently
-  ignores the update.
-- If future Hydrogram adds explicit deletion update types, adapt detection logic here.
+- **CRITICAL**: Telegram Bot API does NOT send deletion updates for channel posts to bots.
+  This is a Telegram API limitation, not a library issue. Bots only receive deletion updates
+  for messages in groups/supergroups where the bot is a member, NOT for channel posts.
+- For channels, the ONLY reliable way to detect deletions is periodic verification by
+  attempting to fetch messages (done by prune_orphaned_index_entries in indexing.py).
+- This handler will catch deletions in groups/supergroups but will remain idle for channels.
+- The periodic orphan monitor (every 30 minutes) is the PRIMARY deletion detection mechanism.
 
 Diagnostic Tags:
 - [REALTIME-DELETE] for visibility in runtime console.
+- [REALTIME-DELETE-DEBUG] for detailed update inspection (enable for troubleshooting).
 """
 
 from typing import Any, Iterable
 
 from .database import movies_col, channels_col
 from .user_management import log_action
+
+# Enable debug mode to see all raw updates (WARNING: Very verbose!)
+DEBUG_RAW_UPDATES = False
 
 
 async def _extract_channel_id(update: Any) -> int | None:
@@ -95,8 +100,21 @@ async def handle_raw_update(client, update, users, chats):
     a list of message ids. All other updates are ignored.
     """
     try:
+        # Debug mode: Log all raw updates to understand what we're receiving
+        if DEBUG_RAW_UPDATES:
+            update_type = type(update).__name__
+            update_attrs = dir(update)
+            print(f"[REALTIME-DELETE-DEBUG] Update type: {update_type}")
+            print(f"[REALTIME-DELETE-DEBUG] Update attributes: {update_attrs}")
+            if hasattr(update, '__dict__'):
+                print(f"[REALTIME-DELETE-DEBUG] Update dict: {update.__dict__}")
+
         channel_id = await _extract_channel_id(update)
         message_ids = _extract_message_ids(update)
+
+        # Debug: Log extraction results
+        if DEBUG_RAW_UPDATES and (channel_id or message_ids):
+            print(f"[REALTIME-DELETE-DEBUG] Extracted channel_id: {channel_id}, message_ids: {message_ids}")
 
         if not channel_id or not message_ids:
             return  # Not a deletion-like update

@@ -471,6 +471,143 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 upsert=True
             )
 
+        elif data.startswith("mdel#"):
+            # Handle manual deletion callbacks
+            from .config import temp_data
+
+            parts = data.split("#")
+            session_id = parts[1]
+            action = parts[2]
+
+            temp_data_key = f"manual_deletion_{session_id}"
+
+            # Check if session exists
+            if not hasattr(temp_data, 'deletion_sessions') or temp_data_key not in temp_data.deletion_sessions:
+                await callback_query.answer("Session expired. Please start a new search with /manual_deletion", show_alert=True)
+                return
+
+            session = temp_data.deletion_sessions[temp_data_key]
+
+            # Verify user
+            if session['user_id'] != user_id:
+                await callback_query.answer("This is not your deletion session.", show_alert=True)
+                return
+
+            if action == "toggle":
+                # Toggle selection
+                idx = int(parts[3])
+
+                if idx in session['selected']:
+                    session['selected'].remove(idx)
+                else:
+                    session['selected'].add(idx)
+
+                # Update buttons to reflect selection
+                results = session['results']
+                buttons = []
+
+                for i in range(min(len(results), 20)):
+                    if i in session['selected']:
+                        button_text = f"[X] {i + 1}"
+                    else:
+                        button_text = f"[ ] {i + 1}"
+
+                    callback_data = f"mdel#{session_id}#toggle#{i}"
+
+                    if i % 2 == 0:
+                        buttons.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+                    else:
+                        buttons[-1].append(InlineKeyboardButton(button_text, callback_data=callback_data))
+
+                # Add action buttons
+                buttons.append([
+                    InlineKeyboardButton("Delete Selected", callback_data=f"mdel#{session_id}#confirm"),
+                    InlineKeyboardButton("Cancel", callback_data=f"mdel#{session_id}#cancel")
+                ])
+
+                # Update message
+                try:
+                    await callback_query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
+                    await callback_query.answer(f"{'Selected' if idx in session['selected'] else 'Deselected'} entry #{idx + 1}")
+                except Exception as e:
+                    await callback_query.answer("Error updating selection.", show_alert=True)
+
+            elif action == "confirm":
+                # Confirm and delete selected entries
+                if not session['selected']:
+                    await callback_query.answer("No entries selected. Please select at least one entry to delete.", show_alert=True)
+                    return
+
+                await callback_query.answer("Deleting selected entries...")
+
+                # Get selected entries
+                results = session['results']
+                selected_indices = sorted(session['selected'])
+                deleted_count = 0
+                errors = 0
+
+                deleted_titles = []
+
+                for idx in selected_indices:
+                    if idx < len(results):
+                        doc = results[idx]
+                        try:
+                            result = await movies_col.delete_one({"_id": doc['_id']})
+                            if result.deleted_count > 0:
+                                deleted_count += 1
+                                deleted_titles.append(doc.get('title', 'Unknown'))
+                        except Exception as e:
+                            errors += 1
+                            print(f"Error deleting entry {doc['_id']}: {e}")
+
+                # Log the action
+                await log_action("manual_deletion_confirmed", by=user_id, extra={
+                    "session_id": session_id,
+                    "search_title": session['search_title'],
+                    "selected_count": len(selected_indices),
+                    "deleted_count": deleted_count,
+                    "errors": errors,
+                    "deleted_titles": deleted_titles
+                })
+
+                # Update message with results
+                result_text = f"**Deletion Complete**\n\n"
+                result_text += f"Deleted: {deleted_count} entries\n"
+                if errors > 0:
+                    result_text += f"Errors: {errors}\n"
+                result_text += f"\n**Deleted Entries:**\n"
+
+                for title in deleted_titles[:10]:  # Show first 10
+                    result_text += f"{title}\n"
+
+                if len(deleted_titles) > 10:
+                    result_text += f"... and {len(deleted_titles) - 10} more\n"
+
+                await callback_query.message.edit_text(result_text)
+
+                # Clean up session
+                del temp_data.deletion_sessions[temp_data_key]
+
+                print(f"Manual deletion completed by user {user_id}. Deleted {deleted_count} entries.")
+
+            elif action == "cancel":
+                # Cancel deletion
+                await callback_query.answer("Deletion cancelled.")
+
+                await callback_query.message.edit_text(
+                    "**Deletion Cancelled**\n\n"
+                    "No entries were deleted."
+                )
+
+                # Clean up session
+                del temp_data.deletion_sessions[temp_data_key]
+
+                # Log cancellation
+                await log_action("manual_deletion_cancelled", by=user_id, extra={
+                    "session_id": session_id,
+                    "search_title": session['search_title']
+                })
+
         else:
             await callback_query.answer("❌ Unknown action.", show_alert=True)
 

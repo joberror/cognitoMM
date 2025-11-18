@@ -110,10 +110,10 @@ async def handle_command(client, message: Message):
         await cmd_indexing_stats(client, message)
     elif command == 'reset_stats':
         await cmd_reset_stats(client, message)
-    elif command == 'prune_orphans':
-        await cmd_prune_orphans(client, message)
     elif command == 'update_db':
         await cmd_update_db(client, message)
+    elif command == 'manual_deletion':
+        await cmd_manual_deletion(client, message)
     else:
         # Unknown command
         await message.reply_text("❓ Unknown command. Use /help to see available commands.")
@@ -157,8 +157,8 @@ ADMIN_HELP = """
 /reset_channel             - Clear indexed data from a specific registered channel (requires confirmation)
 /indexing_stats            - Show indexing statistics (diagnose file skipping)
 /reset_stats               - Reset indexing statistics counters
-/prune_orphans             - Manually prune orphaned index entries
-/update_db                 - Scan for duplicates + remove orphaned entries (maintenance)
+/update_db                 - Database maintenance: remove duplicates + orphaned entries (with limit option)
+/manual_deletion [title]   - Manually delete indexed entries by searching title
 
 🚀 Enhanced Features:
 • Interactive indexing with progress tracking
@@ -290,7 +290,7 @@ async def cmd_search(client, message: Message):
         # Exact search mode - only look for exact title matches
         exact_pattern = f"^{re.escape(query)}$"
         exact = await movies_col.find({"title": {"$regex": exact_pattern, "$options": "i"}}).to_list(length=None)
-        
+
         if not exact:
             # No exact matches found - suggest normal search
             await message.reply_text(
@@ -299,7 +299,7 @@ async def cmd_search(client, message: Message):
                 f"🔍 Normal search finds partial and similar titles"
             )
             return
-        
+
         all_results = exact
     else:
         # Normal search - exact + fuzzy
@@ -338,11 +338,11 @@ async def cmd_metadata(client, message: Message):
     doc = await movies_col.find_one({"title": {"$regex": query, "$options": "i"}})
     if not doc:
         return await message.reply_text("No metadata found for that title.")
-    
+
     # Helper function to check if value is available
     def has_value(val):
         return val and val not in ['N/A', 'Unknown', '', None] and val != 0
-    
+
     # Extract metadata fields
     title = doc.get('title', 'Unknown')
     caption = doc.get('caption')
@@ -357,14 +357,14 @@ async def cmd_metadata(client, message: Message):
     episode = doc.get('episode')
     source = doc.get('source')
     extension = doc.get('extension')
-    
+
     # Build metadata output with specific attributes
     metadata_text = f"```\n"
     metadata_text += f"Metadata: \"{query}\"\n\n"
-    
+
     # 1. Name (always shown)
     metadata_text += f"Name: {title}\n"
-    
+
     # 2. Quality (combine quality and rip if available)
     quality_parts = []
     if has_value(quality):
@@ -373,28 +373,28 @@ async def cmd_metadata(client, message: Message):
         quality_parts.append(rip)
     if quality_parts:
         metadata_text += f"Quality: {' '.join(quality_parts)}\n"
-    
+
     # 4. Audio (only if available)
     if has_value(audio):
         metadata_text += f"Audio: {audio}\n"
-    
+
     # 5. Size (formatted, only if available)
     if has_value(file_size):
         size_str = format_file_size(file_size)
         metadata_text += f"Size: {size_str}\n"
-    
+
     # 6. Resolution (only if available)
     if has_value(resolution):
         metadata_text += f"Resolution: {resolution}\n"
-    
+
     # 7. Type (only if available)
     if has_value(movie_type):
         metadata_text += f"Type: {movie_type}\n"
-    
+
     # 8. Year (only if available)
     if has_value(year):
         metadata_text += f"Year: {year}\n"
-    
+
     # 9. Season (only if available for series)
     if has_value(season) or has_value(episode):
         season_str = ""
@@ -406,7 +406,7 @@ async def cmd_metadata(client, message: Message):
             season_str = f"E{episode:02d}"
         if season_str:
             metadata_text += f"Season: {season_str}\n"
-    
+
     # 10. Features (combine source, extension, and other special features)
     features = []
     if has_value(source):
@@ -423,9 +423,9 @@ async def cmd_metadata(client, message: Message):
             features.append('HDR')
     if features:
         metadata_text += f"Extras: {', '.join(features)}\n"
-    
+
     metadata_text += f"```"
-    
+
     await message.reply_text(metadata_text, disable_web_page_preview=True)
 
 async def cmd_my_history(client, message: Message):
@@ -508,11 +508,11 @@ async def cmd_my_prefs(client, message: Message):
 
 async def cmd_recent(client, message: Message):
     """Handle /recent command to display recently added content"""
-    
+
     # Check if user is banned
     if await check_banned(message):
         return
-    
+
     try:
         # Database query with error handling
         cursor = movies_col.find(
@@ -528,9 +528,9 @@ async def cmd_recent(client, message: Message):
                 "_id": 1
             }
         ).sort("indexed_at", -1).limit(100)
-        
+
         raw_results = await cursor.to_list(length=100)
-        
+
         # Handle empty results
         if not raw_results:
             await message.reply_text(
@@ -539,12 +539,12 @@ async def cmd_recent(client, message: Message):
                 "💡 Add channels and enable indexing to see recent content here."
             )
             return
-        
+
         # Calculate statistics
         total_files = len(raw_results)
         total_movies = len([r for r in raw_results if r.get('type', 'Movie').lower() not in ['series', 'tv', 'show']])
         total_series = len([r for r in raw_results if r.get('type', 'Movie').lower() in ['series', 'tv', 'show']])
-        
+
         # Get last updated time from most recent item
         last_updated = None
         if raw_results:
@@ -552,14 +552,14 @@ async def cmd_recent(client, message: Message):
             if last_indexed:
                 # Format datetime for display
                 last_updated = last_indexed.strftime('%Y-%m-%d %H:%M:%S UTC')
-        
+
         # Process and format results
         grouped_results = group_recent_content(raw_results)
         formatted_output = format_recent_output(grouped_results, total_files, total_movies, total_series, last_updated)
-        
+
         # Send response
         await message.reply_text(formatted_output, disable_web_page_preview=True)
-        
+
         # Log successful usage
         await log_action("recent_command", by=message.from_user.id, extra={
             "results_count": len(raw_results),
@@ -568,14 +568,14 @@ async def cmd_recent(client, message: Message):
             "total_movies": total_movies,
             "total_series": total_series
         })
-        
+
     except Exception as e:
         # Comprehensive error handling
         await log_action("recent_command_error", by=message.from_user.id, extra={
             "error": str(e),
             "error_type": "general"
         })
-        
+
         await message.reply_text(
             "❌ **Error**\n\n"
             "Unable to fetch recent content. Please try again later."
@@ -821,7 +821,7 @@ async def cmd_reset(client, message: Message):
     uid = message.from_user.id
     if not await is_admin(uid):
         return await message.reply_text("🚫 Admins only.")
-    
+
     # Send confirmation prompt
     confirmation_msg = await message.reply_text(
         "⚠️ **Database Reset Confirmation**\n\n"
@@ -838,29 +838,29 @@ async def cmd_reset(client, message: Message):
         "**To cancel, type anything else or wait 30 seconds**\n\n"
         "⏰ This prompt will timeout in 30 seconds."
     )
-    
+
     try:
         # Wait for user response with 30-second timeout
         response = await wait_for_user_input(message.chat.id, message.from_user.id, timeout=30)
-        
+
         if response and response.text and response.text.upper().strip() == "CONFIRM":
             # User confirmed - proceed with reset
             await confirmation_msg.edit_text(
                 "🔄 **Resetting Database...**\n\n"
                 "🗑️ Clearing all indexed movie data..."
             )
-            
+
             try:
                 # Clear movies collection (this contains all indexed movie data)
                 result = await movies_col.delete_many({})
                 deleted_count = result.deleted_count
-                
+
                 # Log reset action
                 await log_action("reset_database", by=uid, extra={
                     "deleted_count": deleted_count,
                     "success": True
                 })
-                
+
                 # Update confirmation message with success
                 await confirmation_msg.edit_text(
                     f"✅ **Database Reset Complete!**\n\n"
@@ -870,24 +870,24 @@ async def cmd_reset(client, message: Message):
                     f"🔄 **The database is now clean and ready for fresh indexing.**\n"
                     f"💡 Use `/index_channel` to add new movie files to the database."
                 )
-                
+
                 print(f"🗑️ Database reset completed by user {uid}. Deleted {deleted_count} movie entries.")
-                
+
             except Exception as e:
                 # Handle database error
                 await log_action("reset_database", by=uid, extra={
                     "success": False,
                     "error": str(e)
                 })
-                
+
                 await confirmation_msg.edit_text(
                     f"❌ **Database Reset Failed!**\n\n"
                     f"**Error:** {str(e)}\n\n"
                     f"🔄 The database was not modified. Please try again later."
                 )
-                
+
                 print(f"❌ Database reset failed for user {uid}: {e}")
-                
+
         else:
             # User cancelled or typed something else
             await confirmation_msg.edit_text(
@@ -895,7 +895,7 @@ async def cmd_reset(client, message: Message):
                 "🛡️ No changes were made to the database.\n"
                 "💡 All your indexed movie data is safe."
             )
-            
+
     except asyncio.TimeoutError:
         # Timeout - auto cancel
         await confirmation_msg.edit_text(
@@ -904,7 +904,7 @@ async def cmd_reset(client, message: Message):
             "💡 All your indexed movie data is safe.\n"
             "🔄 You can try again later if needed."
         )
-        
+
     except Exception as e:
         # Unexpected error
         await log_action("reset_error", by=uid, extra={"error": str(e)})
@@ -950,12 +950,12 @@ async def cmd_reset_channel(client, message: Message):
         # Step 3: Wait for channel selection
         try:
             response = await wait_for_user_input(message.chat.id, message.from_user.id, timeout=30)
-            
+
             # Handle cancellation
             if not response or (response.text and response.text.upper().strip() == "CANCEL"):
                 await selection_msg.edit_text("❌ **Channel Reset Cancelled**\n\n🛡️ No changes were made to the database.")
                 return
-            
+
             # Parse channel selection
             try:
                 selection = int(response.text.strip())
@@ -965,14 +965,14 @@ async def cmd_reset_channel(client, message: Message):
             except (ValueError, IndexError):
                 await selection_msg.edit_text("❌ **Invalid Selection**\n\nPlease send a valid channel number or 'CANCEL' to abort.")
                 return
-            
+
             # Step 4: Show confirmation with channel details
             channel_id = selected_channel['channel_id']
             channel_title = selected_channel['channel_title']
-            
+
             # Count documents to be deleted
             docs_to_delete = await movies_col.count_documents({"channel_id": channel_id})
-            
+
             confirmation_text = f"🗑️ **Channel Reset Confirmation**\n\n"
             confirmation_text += f"📺 **Channel:** {channel_title}\n"
             confirmation_text += f"🆔 **ID:** `{channel_id}`\n"
@@ -989,13 +989,13 @@ async def cmd_reset_channel(client, message: Message):
             confirmation_text += f"**To confirm, type:** `CONFIRM`\n"
             confirmation_text += f"**To cancel, type:** `CANCEL`\n\n"
             confirmation_text += f"⏰ **This prompt will timeout in 30 seconds.**"
-            
+
             confirmation_msg = await message.reply_text(confirmation_text)
-            
+
             # Step 5: Wait for final confirmation
             try:
                 final_response = await wait_for_user_input(message.chat.id, message.from_user.id, timeout=30)
-                
+
                 # Handle final cancellation
                 if not final_response or (final_response.text and final_response.text.upper().strip() != "CONFIRM"):
                     await confirmation_msg.edit_text(
@@ -1004,26 +1004,26 @@ async def cmd_reset_channel(client, message: Message):
                         f"📁 All movie data from {channel_title} remains safe."
                     )
                     return
-                
+
                 # Step 6: Proceed with channel reset
                 await confirmation_msg.edit_text(
                     f"🔄 **Resetting Channel Data...**\n\n"
                     f"📺 Channel: {channel_title}\n"
                     f"🗑️ Clearing indexed movie data..."
                 )
-                
+
                 try:
                     # Delete documents from movies collection for this channel
                     result = await movies_col.delete_many({"channel_id": channel_id})
                     deleted_count = result.deleted_count
-                    
+
                     # Log reset action with comprehensive details
                     await log_action("reset_channel", by=uid, target=channel_id, extra={
                         "channel_name": channel_title,
                         "deleted_count": deleted_count,
                         "success": True
                     })
-                    
+
                     # Update confirmation message with success
                     await confirmation_msg.edit_text(
                         f"✅ **Channel Reset Complete!**\n\n"
@@ -1035,9 +1035,9 @@ async def cmd_reset_channel(client, message: Message):
                         f"🔄 **The channel data has been cleared.**\n"
                         f"💡 Use `/index_channel` to re-index movie files for this channel."
                     )
-                    
+
                     print(f"🗑️ Channel reset completed by user {uid}. Deleted {deleted_count} movie entries from channel {channel_id} ({channel_title}).")
-                    
+
                 except Exception as e:
                     # Handle database error
                     await log_action("reset_channel", by=uid, target=channel_id, extra={
@@ -1045,16 +1045,16 @@ async def cmd_reset_channel(client, message: Message):
                         "success": False,
                         "error": str(e)
                     })
-                    
+
                     await confirmation_msg.edit_text(
                         f"❌ **Channel Reset Failed!**\n\n"
                         f"📺 **Channel:** {channel_title}\n"
                         f"**Error:** {str(e)}\n\n"
                         f"🔄 The database was not modified. Please try again later."
                     )
-                    
+
                     print(f"❌ Channel reset failed for user {uid}, channel {channel_id}: {e}")
-                    
+
             except asyncio.TimeoutError:
                 # Final timeout - auto cancel
                 await confirmation_msg.edit_text(
@@ -1063,7 +1063,7 @@ async def cmd_reset_channel(client, message: Message):
                     f"📁 All movie data from {channel_title} remains safe.\n"
                     f"🔄 You can try again later if needed."
                 )
-                
+
         except asyncio.TimeoutError:
             # Selection timeout
             await selection_msg.edit_text(
@@ -1071,7 +1071,7 @@ async def cmd_reset_channel(client, message: Message):
                 f"🛡️ The reset operation was cancelled due to timeout.\n"
                 f"🔄 You can try again later with /reset_channel."
             )
-            
+
     except Exception as e:
         # Unexpected error during channel listing
         await log_action("reset_channel_error", by=uid, extra={"error": str(e)})
@@ -1083,39 +1083,39 @@ async def cmd_reset_channel(client, message: Message):
 
 async def cmd_indexing_stats(client, message: Message):
     """Display indexing statistics to diagnose file skipping issues"""
-    
+
     # Check if user is admin
     if not await is_admin(message.from_user.id):
         await message.reply_text("🚫 Admins only.")
         return
-    
+
     # Create comprehensive statistics report
     stats_text = f"```\n"
     stats_text += f"📊 **INDEXING DIAGNOSTIC STATISTICS**\n\n"
-    
+
     # Basic statistics
     stats_text += f"🔢 Total indexing attempts: {indexing_stats['total_attempts']}\n"
     stats_text += f"✅ Successful insertions: {indexing_stats['successful_inserts']}\n"
     stats_text += f"🔄 Duplicate errors: {indexing_stats['duplicate_errors']}\n"
     stats_text += f"❌ Other errors: {indexing_stats['other_errors']}\n"
     stats_text += f"📈 Peak concurrent operations: {indexing_stats['concurrent_peak']}\n\n"
-    
+
     # Calculate success rate
     if indexing_stats['total_attempts'] > 0:
         success_rate = (indexing_stats['successful_inserts'] / indexing_stats['total_attempts']) * 100
         stats_text += f"📈 Success rate: {success_rate:.1f}%\n\n"
     else:
         stats_text += f"📈 Success rate: N/A (no attempts)\n\n"
-    
+
     # Error analysis
     if indexing_stats['duplicate_errors'] > 0:
         stats_text += f"⚠️ **RACE CONDITION DETECTED**: {indexing_stats['duplicate_errors']} duplicate key errors\n"
         stats_text += f"💡 This indicates concurrent indexing attempts on the same message\n\n"
-    
+
     if indexing_stats['other_errors'] > 0:
         stats_text += f"⚠️ **OTHER ERRORS**: {indexing_stats['other_errors']} database/processing errors\n"
         stats_text += f"💡 Check logs for specific error details\n\n"
-    
+
     # Concurrency analysis
     if indexing_stats['concurrent_peak'] > 1:
         stats_text += f"🔄 **CONCURRENCY ISSUES**: Peak of {indexing_stats['concurrent_peak']} simultaneous operations\n"
@@ -1123,37 +1123,37 @@ async def cmd_indexing_stats(client, message: Message):
         stats_text += f"🔧 Recommendation: Implement message queuing for better handling\n\n"
     else:
         stats_text += f"✅ **CONCURRENCY**: No significant concurrent activity detected\n\n"
-    
+
     # Queue status
     stats_text += f"📦 **QUEUE STATUS**: {len(message_queue)} messages pending\n\n"
-    
+
     # Recommendations
     stats_text += f"🛠️ **TROUBLESHOOTING RECOMMENDATIONS**:\n\n"
     stats_text += f"1. Use /indexing_stats to monitor real-time statistics\n"
     stats_text += f"2. Check [DIAGNOSTIC] logs in console for race conditions\n"
     stats_text += f"3. Monitor 'Duplicate key error' messages for concurrent indexing\n"
     stats_text += f"4. Consider implementing message queue for high-volume channels\n\n"
-    
+
     stats_text += f"🔄 **RESET STATISTICS**: Use /reset_stats to clear counters\n"
     stats_text += f"```"
-    
+
     await message.reply_text(stats_text, disable_web_page_preview=True)
-    
+
     # Log statistics viewing
     await log_action("indexing_stats_viewed", by=message.from_user.id, extra=indexing_stats)
 
 async def cmd_reset_stats(client, message: Message):
     """Reset indexing statistics counters"""
-    
+
     # Check if user is admin
     if not await is_admin(message.from_user.id):
         await message.reply_text("🚫 Admins only.")
         return
-    
+
     # Reset global statistics
     global indexing_stats
     old_stats = indexing_stats.copy()
-    
+
     indexing_stats = {
         'total_attempts': 0,
         'successful_inserts': 0,
@@ -1161,7 +1161,7 @@ async def cmd_reset_stats(client, message: Message):
         'other_errors': 0,
         'concurrent_peak': 0
     }
-    
+
     await message.reply_text(
         f"✅ **Indexing Statistics Reset**\n\n"
         f"📊 Previous stats:\n"
@@ -1172,73 +1172,369 @@ async def cmd_reset_stats(client, message: Message):
         f"• Peak concurrent: {old_stats['concurrent_peak']}\n\n"
         f"🔄 Counters reset to zero. Monitoring will continue.\n"
     )
-    
+
     await log_action("indexing_stats_reset", by=message.from_user.id, extra=old_stats)
 
-async def cmd_prune_orphans(client, message: Message):
+async def cmd_update_db(client, message: Message):
     """
-    Admin command to trigger immediate orphaned index reconciliation.
-    Usage: /prune_orphans [limit]
-    limit (optional) caps number of recent entries scanned (default 500).
+    Admin command to perform comprehensive database maintenance:
+    - Scan for and remove duplicate entries
+    - Remove orphaned index entries (missing fields)
+    - Verify and remove entries for deleted messages
+    Usage: /update_db [limit]
+    limit (optional) - number of entries to verify for deletion (default 1000)
     """
     if not await is_admin(message.from_user.id):
         await message.reply_text("🚫 Admins only.")
         return
 
+    uid = message.from_user.id
+
+    # Parse optional limit parameter
     parts = message.text.split()
-    limit = 500
+    verify_limit = 3000  # Default limit for message verification (increased from 1000)
     if len(parts) >= 2:
         try:
-            limit = int(parts[1])
+            verify_limit = int(parts[1])
+            if verify_limit < 1:
+                return await message.reply_text("❌ Limit must be at least 1. Usage: /update_db [limit]")
         except ValueError:
-            return await message.reply_text("❌ Invalid limit. Usage: /prune_orphans [limit]")
+            return await message.reply_text("❌ Invalid limit. Usage: /update_db [limit]")
 
-    start = datetime.now(timezone.utc).isoformat()
-    await message.reply_text(f"🔍 Starting orphan prune (limit {limit})...")
+    start_time = datetime.now(timezone.utc)
 
-    removed = 0
-    checked = 0
-    errors = 0
+    status_msg = await message.reply_text(
+        f"🔧 **Database Maintenance Started**\n\n"
+        f"🔍 Scanning for duplicates and orphaned entries...\n"
+        f"📊 Verification limit: {verify_limit} entries\n"
+        f"⏳ This may take a few moments..."
+    )
 
-    # Custom inline version of prune for user feedback (reuse core function but capture prints)
     try:
-        cursor = movies_col.find({}, {"channel_id": 1, "message_id": 1, "title": 1}).sort("indexed_at", -1).limit(limit)
+        # Step 1: Find and remove duplicate entries
+        duplicates_removed = 0
+        orphans_removed = 0
+        verified_orphans = 0
+        checked = 0
+        errors = 0
+
+        # Update status - Step 1
+        await status_msg.edit_text(
+            f"🔧 **Database Maintenance In Progress**\n\n"
+            f"📋 **Step 1/3:** Scanning for duplicates...\n"
+            f"⏳ Please wait..."
+        )
+
+        # Find duplicates based on channel_id + message_id
+        pipeline = [
+            {
+                "$group": {
+                    "_id": {
+                        "channel_id": "$channel_id",
+                        "message_id": "$message_id"
+                    },
+                    "count": {"$sum": 1},
+                    "ids": {"$push": "$_id"}
+                }
+            },
+            {
+                "$match": {
+                    "count": {"$gt": 1}
+                }
+            }
+        ]
+
+        duplicate_groups = await movies_col.aggregate(pipeline).to_list(length=None)
+
+        for group in duplicate_groups:
+            # Keep the first entry, remove the rest
+            ids_to_remove = group["ids"][1:]  # Skip first, remove rest
+            for doc_id in ids_to_remove:
+                try:
+                    await movies_col.delete_one({"_id": doc_id})
+                    duplicates_removed += 1
+                except Exception as e:
+                    errors += 1
+                    print(f"Error removing duplicate {doc_id}: {e}")
+
+        # Update status - Step 2
+        await status_msg.edit_text(
+            f"🔧 **Database Maintenance In Progress**\n\n"
+            f"✅ **Step 1/3:** Duplicates removed: {duplicates_removed}\n"
+            f"📋 **Step 2/3:** Removing orphaned entries (missing fields)...\n"
+            f"⏳ Please wait..."
+        )
+
+        # Step 2: Remove orphaned entries (entries with missing channel_id or message_id)
+        cursor = movies_col.find({
+            "$or": [
+                {"channel_id": None},
+                {"message_id": None},
+                {"channel_id": {"$exists": False}},
+                {"message_id": {"$exists": False}}
+            ]
+        })
+
+        async for doc in cursor:
+            try:
+                await movies_col.delete_one({"_id": doc["_id"]})
+                orphans_removed += 1
+            except Exception as e:
+                errors += 1
+                print(f"Error removing orphan {doc['_id']}: {e}")
+
+        # Update status - Step 3
+        await status_msg.edit_text(
+            f"🔧 **Database Maintenance In Progress**\n\n"
+            f"✅ **Step 1/3:** Duplicates removed: {duplicates_removed}\n"
+            f"✅ **Step 2/3:** Orphans removed: {orphans_removed}\n"
+            f"📋 **Step 3/3:** Verifying {verify_limit} entries for deleted messages...\n"
+            f"⏳ Please wait..."
+        )
+
+        # Step 3: Verify orphaned entries by checking if messages still exist
+        cursor = movies_col.find({}, {"channel_id": 1, "message_id": 1, "title": 1}).sort("indexed_at", -1).limit(verify_limit)
+
         async for doc in cursor:
             checked += 1
             channel_id = doc.get("channel_id")
             message_id = doc.get("message_id")
             doc_id = doc.get("_id")
+
             if channel_id is None or message_id is None:
-                try:
-                    await movies_col.delete_one({"_id": doc_id})
-                    removed += 1
-                except Exception:
-                    errors += 1
                 continue
+
             try:
                 msg = await client.get_messages(channel_id, message_id)
                 if not msg or getattr(msg, "empty", False):
                     await movies_col.delete_one({"_id": doc_id})
-                    removed += 1
+                    verified_orphans += 1
             except Exception:
+                # Message doesn't exist or can't be accessed
                 try:
                     await movies_col.delete_one({"_id": doc_id})
-                    removed += 1
-                except Exception:
+                    verified_orphans += 1
+                except Exception as e:
                     errors += 1
-        end = datetime.now(timezone.utc).isoformat()
-        await log_action("prune_orphans", by=message.from_user.id, extra={
+                    print(f"Error removing verified orphan {doc_id}: {e}")
+
+        end_time = datetime.now(timezone.utc)
+        duration = (end_time - start_time).total_seconds()
+        total_removed = duplicates_removed + orphans_removed + verified_orphans
+
+        # Log the maintenance action
+        await log_action("update_db", by=uid, extra={
+            "duplicates_removed": duplicates_removed,
+            "orphans_removed": orphans_removed,
+            "verified_orphans": verified_orphans,
             "checked": checked,
-            "removed": removed,
+            "total_removed": total_removed,
             "errors": errors,
-            "start": start,
-            "end": end
+            "verify_limit": verify_limit,
+            "duration_seconds": duration,
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat()
         })
-        await message.reply_text(
-            f"✅ Orphan prune complete\n"
-            f"Checked: {checked}\nRemoved: {removed}\nErrors: {errors}\n"
-            f"Window: {start} → {end}"
+
+        # Update status message with results
+        await status_msg.edit_text(
+            f"✅ **Database Maintenance Complete**\n\n"
+            f"📊 **Results:**\n"
+            f"• Duplicates removed: {duplicates_removed}\n"
+            f"• Orphaned entries removed: {orphans_removed}\n"
+            f"• Verified orphans removed: {verified_orphans}\n"
+            f"• Entries checked: {checked}/{verify_limit}\n"
+            f"• **Total cleaned: {total_removed}**\n"
+            f"• Errors: {errors}\n\n"
+            f"⏱️ **Duration:** {duration:.2f} seconds\n"
+            f"👤 **By:** {uid}\n"
+            f"🕒 **Completed:** {end_time.strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+            f"💡 Database is now optimized and clean.\n"
+            f"💬 Use `/update_db {verify_limit * 2}` to check more entries."
         )
+
+        print(f"✅ Database maintenance completed by user {uid}. "
+              f"Removed {duplicates_removed} duplicates, {orphans_removed} orphans, "
+              f"{verified_orphans} verified orphans (checked {checked}/{verify_limit}) in {duration:.2f}s")
+
     except Exception as e:
-        await log_action("prune_orphans_error", by=message.from_user.id, extra={"error": str(e)})
-        await message.reply_text(f"❌ Orphan prune failed: {e}")
+        # Handle unexpected errors
+        await log_action("update_db_error", by=uid, extra={
+            "error": str(e),
+            "error_type": type(e).__name__
+        })
+
+        await status_msg.edit_text(
+            f"❌ **Database Maintenance Failed**\n\n"
+            f"**Error:** {str(e)}\n\n"
+            f"🔄 Please try again later or contact support."
+        )
+
+        print(f"❌ Database maintenance failed for user {uid}: {e}")
+
+
+async def cmd_manual_deletion(client, message: Message):
+    """
+    Admin command to manually delete indexed entries by searching for title.
+
+    Workflow:
+    1. Get title from command argument or ask user
+    2. Search database for matching entries
+    3. Display results with selection buttons
+    4. Allow user to select one or more entries to delete
+    5. Confirm and delete selected entries
+
+    Usage: /manual_deletion [title]
+    Example: /manual_deletion Spider-Man
+    """
+    if not await is_admin(message.from_user.id):
+        await message.reply_text("🚫 Admins only.")
+        return
+
+    uid = message.from_user.id
+
+    # Step 1: Get title from command argument or ask user
+    parts = message.text.split(maxsplit=1)
+
+    if len(parts) > 1:
+        # Title provided as command argument
+        search_title = parts[1].strip()
+    else:
+        # Ask for title
+        prompt_msg = await message.reply_text(
+            "**Manual Deletion**\n\n"
+            "Please send the title (or part of the title) to search for.\n"
+            "Tip: You can send partial titles for broader search.\n"
+            "Timeout: 60 seconds"
+        )
+
+        try:
+            # Wait for user input
+            response = await wait_for_user_input(message.chat.id, message.from_user.id, timeout=60)
+
+            if not response or not response.text:
+                await prompt_msg.edit_text("**Cancelled**\n\nNo title provided.")
+                return
+
+            search_title = response.text.strip()
+
+            # Delete the prompt message
+            await prompt_msg.delete()
+        except asyncio.TimeoutError:
+            await prompt_msg.edit_text(
+                "**Timeout**\n\n"
+                "You took too long to respond. Please try again with /manual_deletion or /manual_deletion <title>."
+            )
+            return
+
+    # Step 2: Search database for matching entries
+    try:
+        search_msg = await message.reply_text(
+            f"**Searching for:** {search_title}\n"
+            f"Please wait..."
+        )
+
+        # Search using regex for partial matching (case-insensitive)
+        cursor = movies_col.find(
+            {"title": {"$regex": search_title, "$options": "i"}},
+            {"_id": 1, "title": 1, "channel_id": 1, "message_id": 1, "indexed_at": 1}
+        ).limit(50)  # Limit to 50 results to avoid overwhelming
+
+        results = await cursor.to_list(length=50)
+
+        if not results:
+            await search_msg.edit_text(
+                f"**No Results Found**\n\n"
+                f"Search: {search_title}\n"
+                f"Tip: Try a different search term or check spelling."
+            )
+            return
+
+        # Step 3: Display results with selection buttons
+        # Store results in a temporary dict for callback handling
+        deletion_session_id = str(uuid.uuid4())[:8]
+        temp_data_key = f"manual_deletion_{deletion_session_id}"
+
+        # Store in temp_data (we'll use a dict attribute)
+        if not hasattr(temp_data, 'deletion_sessions'):
+            temp_data.deletion_sessions = {}
+
+        temp_data.deletion_sessions[temp_data_key] = {
+            'results': results,
+            'selected': set(),
+            'user_id': uid,
+            'search_title': search_title
+        }
+
+        # Build message with results
+        results_text = f"**Found {len(results)} matching entries**\n"
+        results_text += f"Search: {search_title}\n\n"
+
+        for idx, doc in enumerate(results, 1):
+            title = doc.get('title', 'Unknown')
+            channel_id = doc.get('channel_id', 'N/A')
+            message_id = doc.get('message_id', 'N/A')
+            indexed_at = doc.get('indexed_at')
+
+            # Format indexed date
+            if indexed_at:
+                try:
+                    date_str = indexed_at.strftime('%Y-%m-%d')
+                except:
+                    date_str = 'Unknown'
+            else:
+                date_str = 'Unknown'
+
+            results_text += f"{idx}. {title} | Ch: {channel_id} | Msg: {message_id} | {date_str}\n"
+
+        results_text += f"\nSelect entries to delete using the buttons below."
+
+        # Create inline keyboard with selection buttons
+        # Show up to 10 results per page for now (simplified version)
+        buttons = []
+
+        # Add selection buttons (max 10 per row, 2 columns)
+        for idx in range(min(len(results), 20)):  # Limit to first 20 for button space
+            button_text = f"[ ] {idx + 1}"
+            callback_data = f"mdel#{deletion_session_id}#toggle#{idx}"
+
+            if idx % 2 == 0:
+                buttons.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+            else:
+                buttons[-1].append(InlineKeyboardButton(button_text, callback_data=callback_data))
+
+        # Add action buttons
+        buttons.append([
+            InlineKeyboardButton("Delete Selected", callback_data=f"mdel#{deletion_session_id}#confirm"),
+            InlineKeyboardButton("Cancel", callback_data=f"mdel#{deletion_session_id}#cancel")
+        ])
+
+        if len(results) > 20:
+            results_text += f"\n\nNote: Showing first 20 results. Use more specific search for fewer results."
+
+        await search_msg.edit_text(
+            results_text,
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+
+        # Log the action
+        await log_action("manual_deletion_search", by=uid, extra={
+            "search_title": search_title,
+            "results_count": len(results),
+            "session_id": deletion_session_id
+        })
+
+    except Exception as e:
+        await log_action("manual_deletion_error", by=uid, extra={
+            "error": str(e),
+            "error_type": type(e).__name__
+        })
+
+        await message.reply_text(
+            f"❌ **Error**\n\n"
+            f"An error occurred: {str(e)}\n\n"
+            f"Please try again later."
+        )
+
+        print(f"❌ Manual deletion error for user {uid}: {e}")
+
