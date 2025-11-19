@@ -335,6 +335,176 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 await callback_query.answer("🛑 Cancelling indexing...")
                 await callback_query.message.edit_text("❌ **Indexing Cancelled**\n\nThe indexing process has been cancelled by user request.")
 
+        elif data.startswith("mc#"):
+            # Handle manage_channel button callbacks - execute commands directly
+            from .commands import (
+                cmd_add_channel,
+                cmd_remove_channel,
+                cmd_index_channel,
+                cmd_rescan_channel,
+                cmd_reset_channel,
+                cmd_toggle_indexing,
+                cmd_manage_channel
+            )
+
+            parts = data.split("#")
+            action = parts[1]
+
+            # Check if user is admin
+            if not await is_admin(user_id):
+                await callback_query.answer("🚫 Admins only.", show_alert=True)
+                return
+
+            # Answer the callback to remove loading state
+            await callback_query.answer()
+
+            # Create a pseudo-message object that mimics a command message
+            # We need to set from_user to the callback query user
+            class PseudoMessage:
+                def __init__(self, original_message, user, command_text):
+                    self.chat = original_message.chat
+                    self.from_user = user
+                    self.text = command_text
+                    self._original = original_message
+
+                async def reply_text(self, *args, **kwargs):
+                    return await self._original.reply_text(*args, **kwargs)
+
+            # Map actions to command text
+            command_map = {
+                "add": "/add_channel",
+                "remove": "/remove_channel",
+                "index": "/index_channel",
+                "rescan": "/rescan_channel",
+                "reset": "/reset_channel",
+                "monitoring": "/toggle_indexing"
+            }
+
+            # Create pseudo message with proper from_user and command text
+            pseudo_msg = PseudoMessage(
+                callback_query.message,
+                callback_query.from_user,
+                command_map.get(action, "")
+            )
+
+            if action == "add":
+                await cmd_add_channel(client, pseudo_msg)
+
+            elif action == "remove":
+                await cmd_remove_channel(client, pseudo_msg)
+
+            elif action == "index":
+                await cmd_index_channel(client, pseudo_msg)
+
+            elif action == "rescan":
+                await cmd_rescan_channel(client, pseudo_msg)
+
+            elif action == "reset":
+                await cmd_reset_channel(client, pseudo_msg)
+
+            elif action == "monitoring":
+                # Toggle the auto-indexing setting
+                from .database import settings_col, channels_col, movies_col
+                from .config import AUTO_INDEX_DEFAULT
+                from .user_management import log_action
+
+                uid = callback_query.from_user.id
+                doc = await settings_col.find_one({"k": "auto_indexing"})
+                current = doc["v"] if doc else AUTO_INDEX_DEFAULT
+                new = not current
+                await settings_col.update_one({"k": "auto_indexing"}, {"$set": {"v": new}}, upsert=True)
+                await log_action("toggle_indexing", by=uid, extra={"new": new})
+
+                # Show confirmation
+                status = "enabled" if new else "disabled"
+                await callback_query.answer(f"Auto-indexing {status}", show_alert=False)
+
+                # Refresh the manage_channel display to show updated icon
+                # Get updated auto-indexing status
+                monitoring_icon = "🟢" if new else "🔴"
+
+                # Get all channels
+                channels = await channels_col.find({}).to_list(length=100)
+
+                if not channels:
+                    output = "CHANNEL MANAGEMENT\n\n"
+                    output += "No channels configured yet.\n\n"
+                    output += "QUICK ACTIONS\n"
+                    output += "Use the buttons below to manage channels.\n\n"
+                    output += "COMMAND GUIDE\n"
+                    output += "Add - Add a new channel to monitor\n"
+                    output += "Remove - Remove an existing channel\n"
+                    output += "Scan - Scan messages from a channel\n"
+                    output += "Rescan - Re-scan channel (legacy command)\n"
+                    output += "Reset - Clear indexed data from a channel\n"
+                    output += "Indexing - Toggle auto-indexing on/off"
+                else:
+                    # Build aggregation pipeline to get indexed counts per channel
+                    pipeline = [
+                        {"$group": {"_id": "$channel_id", "count": {"$sum": 1}}},
+                        {"$sort": {"count": -1}}
+                    ]
+                    indexed_counts = await movies_col.aggregate(pipeline).to_list(length=100)
+
+                    # Create a map of channel_id to count
+                    count_map = {item["_id"]: item["count"] for item in indexed_counts}
+
+                    # Build output
+                    output = "CHANNEL MANAGEMENT\n\n"
+                    output += "REGISTERED CHANNELS\n\n"
+
+                    for idx, ch in enumerate(channels, 1):
+                        channel_id = ch.get("channel_id")
+                        channel_title = ch.get("channel_title", "Unknown")
+                        enabled = ch.get("enabled", True)
+                        added_at = ch.get("added_at")
+                        indexed_count = count_map.get(channel_id, 0)
+
+                        # Format date
+                        date_str = "N/A"
+                        if added_at:
+                            date_str = added_at.strftime("%Y-%m-%d")
+
+                        # Build channel info with click-to-copy ID
+                        output += f"{idx}. {channel_title}\n"
+                        output += f"   ID: <code>{channel_id}</code>\n"
+                        output += f"   Indexed: {indexed_count} files\n"
+                        output += f"   Status: {'Enabled' if enabled else 'Disabled'}\n"
+                        output += f"   Added: {date_str}\n\n"
+
+                    output += "QUICK ACTIONS\n"
+                    output += "Use the buttons below to manage channels.\n\n"
+                    output += "COMMAND GUIDE\n"
+                    output += "Add - Add a new channel to monitor\n"
+                    output += "Remove - Remove an existing channel\n"
+                    output += "Scan - Scan messages from a channel\n"
+                    output += "Rescan - Re-scan channel (legacy command)\n"
+                    output += "Reset - Clear indexed data from a channel\n"
+                    output += "Indexing - Toggle auto-indexing on/off"
+
+                # Create updated buttons with new icon
+                from hydrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+                buttons = [
+                    [
+                        InlineKeyboardButton("Add", callback_data="mc#add"),
+                        InlineKeyboardButton("Remove", callback_data="mc#remove"),
+                        InlineKeyboardButton("Scan", callback_data="mc#index")
+                    ],
+                    [
+                        InlineKeyboardButton("Rescan", callback_data="mc#rescan"),
+                        InlineKeyboardButton("Reset", callback_data="mc#reset"),
+                        InlineKeyboardButton(f"{monitoring_icon} Indexing", callback_data="mc#monitoring")
+                    ]
+                ]
+
+                reply_markup = InlineKeyboardMarkup(buttons)
+
+                # Edit the message to update the display
+                await callback_query.edit_message_text(
+                    output,
+                    reply_markup=reply_markup
+                )
+
         elif data.startswith("bulk:"):
             # Handle bulk download request using stored data
             _, bulk_id = data.split(":", 1)

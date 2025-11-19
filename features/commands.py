@@ -78,15 +78,13 @@ async def handle_command(client, message: Message):
     elif command == 'my_prefs':
         await cmd_my_prefs(client, message)
     # Admin commands
+    elif command == 'manage_channel' or command == 'mc':
+        await cmd_manage_channel(client, message)
     elif command == 'add_channel':
         await cmd_add_channel(client, message)
     elif command == 'remove_channel':
         await cmd_remove_channel(client, message)
-    elif command == 'list_channels':
-        await cmd_list_channels(client, message)
-    elif command == 'channel_stats':
-        await cmd_channel_stats(client, message)
-    elif command == 'index_channel' or command == 'index':
+    elif command == 'index_channel':
         await cmd_index_channel(client, message)
     elif command == 'rescan_channel':
         await cmd_rescan_channel(client, message)
@@ -141,26 +139,31 @@ USER_HELP = """
 
 ADMIN_HELP = """
 👑 Admin Commands
+
+📡 Channel Management
+/manage_channel            - Unified channel management interface (alias: /mc)
 /add_channel <link|id>     - Add a channel (bot must be admin)
 /remove_channel <link|id>  - Remove a channel
-/list_channels             - List channels
-/channel_stats             - Counts per channel
 /index_channel             - Enhanced channel indexing (interactive)
-/index                     - Alias for /index_channel
 /rescan_channel            - Legacy command (redirects to /index_channel)
+/reset_channel             - Clear indexed data from a specific channel (requires confirmation)
 /toggle_indexing           - Toggle auto-indexing on/off
+
+👥 User Management
 /promote <user_id>         - Promote to admin
 /demote <user_id>          - Demote admin
 /ban_user <user_id>        - Ban a user
 /unban_user <user_id>      - Unban a user
+
+🗄️ Database Management
 /reset                     - Clear all indexed data from database (requires confirmation)
-/reset_channel             - Clear indexed data from a specific registered channel (requires confirmation)
 /indexing_stats            - Show indexing statistics (diagnose file skipping)
 /reset_stats               - Reset indexing statistics counters
 /update_db                 - Database maintenance: remove duplicates + orphaned entries (with limit option)
 /manual_deletion [title]   - Manually delete indexed entries by searching title
 
 🚀 Enhanced Features:
+• Unified channel management with /mc command
 • Interactive indexing with progress tracking
 • Cancellable operations
 • Better error handling
@@ -631,29 +634,6 @@ async def cmd_remove_channel(client, message: Message):
     except Exception as e:
         await message.reply_text(f"❌ Could not remove channel: {e}")
 
-async def cmd_list_channels(client, message: Message):
-    uid = message.from_user.id
-    if not await is_admin(uid):
-        return await message.reply_text("🚫 Admins only.")
-    docs = channels_col.find({})
-    items = []
-    async for d in docs:
-        items.append(f"{d.get('channel_title','?')} — `{d.get('channel_id')}` — enabled={d.get('enabled', True)}")
-    await message.reply_text("\n".join(items) or "No channels configured.")
-
-async def cmd_channel_stats(client, message: Message):
-    uid = message.from_user.id
-    if not await is_admin(uid):
-        return await message.reply_text("🚫 Admins only.")
-    pipeline = [{"$group": {"_id": "$channel_id", "count": {"$sum": 1}}}, {"$sort": {"count": -1}}, {"$limit": 50}]
-    rows = await movies_col.aggregate(pipeline).to_list(length=50)
-    parts = []
-    for r in rows:
-        ch = await channels_col.find_one({"channel_id": r["_id"]})
-        title = ch.get("channel_title") if ch else str(r["_id"])
-        parts.append(f"{title} ({r['_id']}): {r['count']}")
-    await message.reply_text("\n".join(parts) or "No data.")
-
 async def cmd_index_channel(client, message: Message):
     """Enhanced indexing command using iter_messages"""
     uid = message.from_user.id
@@ -734,16 +714,177 @@ async def cmd_index_channel(client, message: Message):
         await message.reply_text(f"❌ Error: {e}")
 
 async def cmd_rescan_channel(client, message: Message):
-    """Legacy rescan command - explains Bot API limitations"""
-    await message.reply_text(
-        "🔄 **Command Not Available**\n\n"
-        "❌ **Bot API Limitation:** Telegram bots cannot access chat history or rescan past messages.\n\n"
-        "✅ **Alternative:** Use real-time auto-indexing instead:\n"
-        "• Add bot to channels as admin\n"
-        "• Enable auto-indexing with `/toggle_indexing`\n"
-        "• New messages will be indexed automatically\n\n"
-        "For more details, use `/index_channel`"
-    )
+    """Rescan a channel - re-index all messages from a registered channel"""
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+
+    # Check if another indexing process is running
+    from .indexing import indexing_lock
+    if indexing_lock.locked():
+        return await message.reply_text("⏳ Another indexing process is already running. Please wait.")
+
+    # Get all registered channels
+    channels = await channels_col.find({}).to_list(length=100)
+
+    if not channels:
+        return await message.reply_text("❌ No channels registered yet. Use /add_channel first.")
+
+    # Display channel selection
+    channel_list = "🔄 **Select a channel to rescan:**\n\n"
+    for idx, ch in enumerate(channels, 1):
+        channel_title = ch.get("channel_title", "Unknown")
+        channel_id = ch.get("channel_id")
+        status = "✅" if ch.get("enabled", True) else "❌"
+        channel_list += f"{idx}. {status} {channel_title}\n"
+        channel_list += f"   ID: <code>{channel_id}</code>\n\n"
+
+    channel_list += "🔢 Send the number of the channel to rescan\n"
+    channel_list += "⏰ Timeout: 60 seconds"
+
+    selection_msg = await message.reply_text(channel_list)
+
+    try:
+        # Wait for user to select a channel
+        response = await wait_for_user_input(message.chat.id, uid, timeout=60)
+        await selection_msg.delete()
+
+        # Validate selection
+        try:
+            selection = int(response.text.strip())
+            if selection < 1 or selection > len(channels):
+                return await message.reply_text(f"❌ Invalid selection. Please choose a number between 1 and {len(channels)}.")
+        except ValueError:
+            return await message.reply_text("❌ Invalid input. Please send a number.")
+
+        # Get selected channel
+        selected_channel = channels[selection - 1]
+        channel_id = selected_channel.get("channel_id")
+        channel_title = selected_channel.get("channel_title", "Unknown")
+
+        # Confirm rescan
+        confirm_msg = await message.reply_text(
+            f"🔄 **Rescan Channel**\n\n"
+            f"📺 Channel: {channel_title}\n"
+            f"🆔 ID: <code>{channel_id}</code>\n\n"
+            f"⚠️ This will re-index all messages from this channel.\n\n"
+            f"⏳ Starting rescan..."
+        )
+
+        # Start the rescan using the same indexing process
+        from .indexing import start_indexing_process
+
+        # Get the last message ID from the channel
+        try:
+            chat = await client.get_chat(channel_id)
+            # Get a recent message to determine the last message ID
+            messages = await client.get_messages(channel_id, limit=1)
+            if messages and len(messages) > 0:
+                last_msg_id = messages[0].id
+            else:
+                return await confirm_msg.edit_text(f"❌ Could not access messages from {channel_title}. Make sure the bot is a member of the channel.")
+
+            # Start indexing from the beginning (skip=0)
+            await start_indexing_process(client, confirm_msg, channel_id, last_msg_id, skip=0)
+            await log_action("rescan_channel", by=uid, target=channel_id, extra={"channel": channel_title})
+
+        except Exception as e:
+            await confirm_msg.edit_text(f"❌ Error accessing channel: {e}")
+            print(f"❌ Rescan error for channel {channel_id}: {e}")
+
+    except asyncio.TimeoutError:
+        await selection_msg.delete()
+        await message.reply_text("⏰ Timeout! Please try again.")
+    except Exception as e:
+        await message.reply_text(f"❌ Error: {e}")
+
+async def cmd_manage_channel(client, message: Message):
+    """Unified channel management command - displays channels with stats and action buttons"""
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+
+    # Get auto-indexing status for the Monitoring button
+    auto_index_doc = await settings_col.find_one({"k": "auto_indexing"})
+    auto_indexing_enabled = auto_index_doc["v"] if auto_index_doc else AUTO_INDEX_DEFAULT
+    monitoring_icon = "🟢" if auto_indexing_enabled else "🔴"
+
+    # Get all channels
+    channels = await channels_col.find({}).to_list(length=100)
+
+    if not channels:
+        # No channels configured
+        output = "CHANNEL MANAGEMENT\n\n"
+        output += "No channels configured yet.\n\n"
+        output += "QUICK ACTIONS\n"
+        output += "Use the buttons below to manage channels.\n\n"
+        output += "COMMAND GUIDE\n"
+        output += "Add - Add a new channel to monitor\n"
+        output += "Remove - Remove an existing channel\n"
+        output += "Scan - Scan messages from a channel\n"
+        output += "Rescan - Re-scan channel (legacy command)\n"
+        output += "Reset - Clear indexed data from a channel\n"
+        output += "Indexing - Toggle auto-indexing on/off"
+    else:
+        # Build aggregation pipeline to get indexed counts per channel
+        pipeline = [
+            {"$group": {"_id": "$channel_id", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}}
+        ]
+        indexed_counts = await movies_col.aggregate(pipeline).to_list(length=100)
+
+        # Create a map of channel_id to count
+        count_map = {item["_id"]: item["count"] for item in indexed_counts}
+
+        # Build output
+        output = "CHANNEL MANAGEMENT\n\n"
+        output += "REGISTERED CHANNELS\n\n"
+
+        for idx, ch in enumerate(channels, 1):
+            channel_id = ch.get("channel_id")
+            channel_title = ch.get("channel_title", "Unknown")
+            enabled = ch.get("enabled", True)
+            added_at = ch.get("added_at")
+            indexed_count = count_map.get(channel_id, 0)
+
+            # Format date
+            date_str = "N/A"
+            if added_at:
+                date_str = added_at.strftime("%Y-%m-%d")
+
+            # Build channel info with click-to-copy ID
+            output += f"{idx}. {channel_title}\n"
+            output += f"   ID: <code>{channel_id}</code>\n"
+            output += f"   Indexed: {indexed_count} files\n"
+            output += f"   Status: {'Enabled' if enabled else 'Disabled'}\n"
+            output += f"   Added: {date_str}\n\n"
+
+        output += "QUICK ACTIONS\n"
+        output += "Use the buttons below to manage channels.\n\n"
+        output += "COMMAND GUIDE\n"
+        output += "Add - Add a new channel to monitor\n"
+        output += "Remove - Remove an existing channel\n"
+        output += "Scan - Scan messages from a channel\n"
+        output += "Rescan - Re-scan channel (legacy command)\n"
+        output += "Reset - Clear indexed data from a channel\n"
+        output += "Indexing - Toggle auto-indexing on/off"
+
+    # Create action buttons
+    buttons = [
+        [
+            InlineKeyboardButton("Add", callback_data="mc#add"),
+            InlineKeyboardButton("Remove", callback_data="mc#remove"),
+            InlineKeyboardButton("Scan", callback_data="mc#index")
+        ],
+        [
+            InlineKeyboardButton("Rescan", callback_data="mc#rescan"),
+            InlineKeyboardButton("Reset", callback_data="mc#reset"),
+            InlineKeyboardButton(f"{monitoring_icon} Indexing", callback_data="mc#monitoring")
+        ]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(buttons)
+    await message.reply_text(output, reply_markup=reply_markup)
 
 async def cmd_toggle_indexing(client, message: Message):
     uid = message.from_user.id
