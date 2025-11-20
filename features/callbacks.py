@@ -8,6 +8,7 @@ It handles file requests, pagination, bulk downloads, and other button interacti
 import asyncio
 import uuid
 from datetime import datetime, timezone
+from bson import ObjectId
 from hydrogram import Client, filters
 from hydrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from hydrogram.enums import ParseMode
@@ -784,7 +785,15 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 await callback_query.answer("🚫 Admins only.", show_alert=True)
                 return
 
-            _, req_id = data.split(":", 1)
+            _, req_id_str = data.split(":", 1)
+
+            # Convert string ID to ObjectId
+            try:
+                req_id = ObjectId(req_id_str)
+            except Exception as e:
+                await callback_query.answer("❌ Invalid request ID.", show_alert=True)
+                print(f"Error converting request ID: {e}")
+                return
 
             # Get request details before deletion
             request = await requests_col.find_one({"_id": req_id})

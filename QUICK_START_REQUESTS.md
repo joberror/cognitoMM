@@ -5,19 +5,26 @@
 ### How to Request a Movie or Series
 
 1. **Start the request**:
+
    ```
    /request
    ```
 
-2. **Follow the prompts**:
+2. **Read the warning**: Make sure to search the database first!
+
+3. **Follow the prompts**:
+
    - **Step 1**: Type `Movie` or `Series`
    - **Step 2**: Enter the title (e.g., `Inception`)
    - **Step 3**: Enter the year (e.g., `2010`)
-   - **Step 4**: Enter IMDB link or type `SKIP`
-     - Example: `https://www.imdb.com/title/tt1375666/`
-     - Or just: `tt1375666`
 
-3. **Receive confirmation**:
+4. **Select from TMDb results**:
+
+   - Bot searches TMDb and shows top 5 results
+   - Type the number (1-5) to select
+   - Or type `SKIP` to continue without IMDB link
+
+5. **Receive confirmation**:
    - Queue position
    - Remaining request slots
    - Notification when fulfilled
@@ -40,6 +47,7 @@
 ### How to View Requests
 
 1. **View the request list**:
+
    ```
    /request_list
    ```
@@ -51,16 +59,19 @@
 ### How to Fulfill Requests
 
 **Option 1: Mark Single Request**
+
 - Click the `Done [#]` button next to the request
 - User is automatically notified
 
 **Option 2: Mark All Requests**
+
 - Click the `Mark All Done` button
 - All users are automatically notified
 
 ### Request Information Displayed
 
 Each request shows:
+
 - `[M]` = Movie, `[S]` = Series
 - Title and year
 - Username and user ID
@@ -96,6 +107,7 @@ python tests/test_request_feature.py
 ```
 
 This validates:
+
 - IMDB link validation
 - Rate limiting
 - Duplicate detection
@@ -103,6 +115,7 @@ This validates:
 ### Manual Testing Checklist
 
 **User Tests**:
+
 - [ ] Submit a movie request
 - [ ] Submit a series request
 - [ ] Try to submit 4th request (should fail)
@@ -113,6 +126,7 @@ This validates:
 - [ ] Submit request without IMDB link
 
 **Admin Tests**:
+
 - [ ] View request list
 - [ ] Navigate between pages
 - [ ] Mark single request as done
@@ -125,28 +139,34 @@ This validates:
 ### User Issues
 
 **"Request Limit Reached"**
+
 - You have 3 pending requests
 - Wait for admin to fulfill some requests
 
 **"Daily Limit Reached"**
+
 - You already made a request today
 - Try again tomorrow (24 hours from last request)
 
 **"Global Daily Limit Reached"**
+
 - Bot has reached 20 requests for today
 - Try again tomorrow
 
 **"Request timeout"**
+
 - You took too long to respond
 - Start over with `/request`
 
 ### Admin Issues
 
 **"Request list expired"**
+
 - The pagination data expired
 - Use `/request_list` again
 
 **"Request not found"**
+
 - Request was already completed or deleted
 - Refresh with `/request_list`
 
@@ -170,34 +190,39 @@ if similarity >= 85:  # Change this threshold (0-100)
 ## Database Queries
 
 ### View all pending requests
+
 ```javascript
-db.requests.find({ status: "pending" })
+db.requests.find({ status: "pending" });
 ```
 
 ### View completed requests
+
 ```javascript
-db.requests.find({ status: "completed" })
+db.requests.find({ status: "completed" });
 ```
 
 ### View user's requests
+
 ```javascript
-db.requests.find({ user_id: 123456 })
+db.requests.find({ user_id: 123456 });
 ```
 
 ### Count pending requests
+
 ```javascript
-db.requests.countDocuments({ status: "pending" })
+db.requests.countDocuments({ status: "pending" });
 ```
 
 ### View user limits
+
 ```javascript
-db.user_request_limits.find({ user_id: 123456 })
+db.user_request_limits.find({ user_id: 123456 });
 ```
 
 ## Support
 
 For detailed documentation, see:
+
 - `REQUEST_FEATURE.md` - Complete feature documentation
 - `IMPLEMENTATION_SUMMARY.md` - Technical implementation details
 - `tests/test_request_feature.py` - Test examples
-

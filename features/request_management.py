@@ -46,17 +46,22 @@ async def check_rate_limits(user_id: int):
     # Check daily user limit
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    
+
     if limits_doc:
         last_request = limits_doc.get("last_request_date")
-        if last_request and last_request >= today_start:
-            # User already made a request today
-            next_request_time = (last_request + timedelta(days=1)).strftime("%Y-%m-%d %H:%M UTC")
-            return False, (
-                f"❌ **Daily Limit Reached**\n\n"
-                f"You can only submit {MAX_REQUESTS_PER_DAY_PER_USER} request per day.\n"
-                f"You can submit your next request after: {next_request_time}"
-            )
+        if last_request:
+            # Ensure last_request is timezone-aware for comparison
+            if last_request.tzinfo is None:
+                last_request = last_request.replace(tzinfo=timezone.utc)
+
+            if last_request >= today_start:
+                # User already made a request today
+                next_request_time = (last_request + timedelta(days=1)).strftime("%Y-%m-%d %H:%M UTC")
+                return False, (
+                    f"❌ **Daily Limit Reached**\n\n"
+                    f"You can only submit {MAX_REQUESTS_PER_DAY_PER_USER} request per day.\n"
+                    f"You can submit your next request after: {next_request_time}"
+                )
     
     # Check global daily limit
     global_today_count = await requests_col.count_documents({

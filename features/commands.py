@@ -26,6 +26,7 @@ from .file_deletion import track_file_for_deletion
 from .indexing import INDEX_EXTENSIONS, indexing_lock, start_indexing_process, save_file_to_db, index_message, message_queue, process_message_queue, indexing_stats, prune_orphaned_index_entries
 from .search import format_file_size, group_recent_content, format_recent_output, send_search_results
 from .request_management import check_rate_limits, update_user_limits, check_duplicate_request, validate_imdb_link, get_queue_position, MAX_PENDING_REQUESTS_PER_USER
+from .tmdb_integration import search_tmdb, format_tmdb_result
 
 # -------------------------
 # Command Handler
@@ -1788,18 +1789,25 @@ async def cmd_request(client, message: Message):
     username = message.from_user.username or message.from_user.first_name or str(uid)
 
     try:
-        # Check rate limits
-        can_request, error_msg = await check_rate_limits(uid)
-        if not can_request:
-            await message.reply_text(error_msg)
-            return
+        # Check if user is admin (admins bypass rate limits for testing)
+        user_is_admin = await is_admin(uid)
 
-        # Start interactive request flow
+        # Check rate limits (skip for admins)
+        if not user_is_admin:
+            can_request, error_msg = await check_rate_limits(uid)
+            if not can_request:
+                await message.reply_text(error_msg)
+                return
+
+        # Start interactive request flow with warning
         await message.reply_text(
             "📝 **Movie/Series Request**\n\n"
+            "⚠️ **IMPORTANT WARNING:**\n"
+            "Before requesting, please search the database using /search to ensure the content is not already available.\n"
+            "Requesting content that already exists may result in a ban from the bot.\n\n"
             "Let's gather the information for your request.\n"
             "You can type **CANCEL** at any step to abort.\n\n"
-            "**Step 1/4:** What type of content are you requesting?\n"
+            "**Step 1/3:** What type of content are you requesting?\n"
             "Reply with: **Movie** or **Series**"
         )
 
@@ -1829,7 +1837,7 @@ async def cmd_request(client, message: Message):
         # Step 2: Get title
         await message.reply_text(
             f"✅ Type: **{content_type}**\n\n"
-            f"**Step 2/4:** What is the title/name?\n"
+            f"**Step 2/3:** What is the title/name?\n"
             f"Reply with the {content_type.lower()} title."
         )
 
@@ -1856,7 +1864,7 @@ async def cmd_request(client, message: Message):
         # Step 3: Get year
         await message.reply_text(
             f"✅ Title: **{title}**\n\n"
-            f"**Step 3/4:** What is the release year?\n"
+            f"**Step 3/3:** What is the release year?\n"
             f"Reply with a 4-digit year (e.g., 2024)."
         )
 
@@ -1887,39 +1895,96 @@ async def cmd_request(client, message: Message):
             await message.reply_text(f"❌ Year must be between 1900 and {current_year + 2}. Start over with /request")
             return
 
-        # Step 4: Get IMDB link (optional)
-        await message.reply_text(
-            f"✅ Year: **{year}**\n\n"
-            f"**Step 4/4:** IMDB Link (optional but recommended)\n"
-            f"Reply with the IMDB link or type **SKIP** to skip this step.\n\n"
-            f"Example: https://www.imdb.com/title/tt1234567/"
+        # Search TMDb for matches
+        search_msg = await message.reply_text(
+            f"🔍 Searching TMDb for **{title}** ({year})...\n"
+            f"Please wait..."
         )
 
-        try:
-            imdb_msg = await wait_for_user_input(message.chat.id, uid, timeout=120)
-        except asyncio.TimeoutError:
-            await message.reply_text("⏰ Request timeout. Please start over with /request")
-            return
-
-        if not imdb_msg or not imdb_msg.text:
-            await message.reply_text("❌ Invalid input. Please start over with /request")
-            return
-
-        imdb_input = imdb_msg.text.strip()
-
-        if imdb_input.upper() == "CANCEL":
-            await message.reply_text("❌ Request cancelled.")
-            return
+        tmdb_results = await search_tmdb(title, year, content_type)
 
         imdb_link = None
-        if imdb_input.upper() != "SKIP":
-            if not await validate_imdb_link(imdb_input):
-                await message.reply_text(
-                    "⚠️ Invalid IMDB link format. Proceeding without IMDB link.\n"
-                    "Valid formats: https://www.imdb.com/title/tt1234567/ or tt1234567"
-                )
-            else:
-                imdb_link = imdb_input
+
+        if tmdb_results:
+            # Display results
+            results_text = f"✅ Found {len(tmdb_results)} result(s) on TMDb:\n\n"
+
+            for idx, result in enumerate(tmdb_results, 1):
+                result_title = result.get("title", "Unknown")
+                result_year = result.get("year", "N/A")
+                results_text += f"{idx}. {result_title} ({result_year})\n"
+
+            results_text += (
+                f"\n**Select a result** by replying with the number (1-{len(tmdb_results)})\n"
+                f"Or type **SKIP** to continue without IMDB link\n"
+                f"Or type **CANCEL** to abort"
+            )
+
+            await search_msg.edit_text(results_text)
+
+            # Wait for selection
+            try:
+                selection_msg = await wait_for_user_input(message.chat.id, uid, timeout=120)
+            except asyncio.TimeoutError:
+                await message.reply_text("⏰ Request timeout. Please start over with /request")
+                return
+
+            if not selection_msg or not selection_msg.text:
+                await message.reply_text("❌ Invalid input. Please start over with /request")
+                return
+
+            selection_input = selection_msg.text.strip().upper()
+
+            if selection_input == "CANCEL":
+                await message.reply_text("❌ Request cancelled.")
+                return
+
+            if selection_input != "SKIP":
+                # Validate selection
+                if not selection_input.isdigit():
+                    await message.reply_text("❌ Invalid selection. Please start over with /request")
+                    return
+
+                selection_idx = int(selection_input) - 1
+
+                if selection_idx < 0 or selection_idx >= len(tmdb_results):
+                    await message.reply_text(f"❌ Invalid selection. Please choose 1-{len(tmdb_results)}. Start over with /request")
+                    return
+
+                # Get IMDB link from selected result
+                selected_result = tmdb_results[selection_idx]
+                imdb_id = selected_result.get("imdb_id")
+
+                if imdb_id:
+                    imdb_link = f"https://www.imdb.com/title/{imdb_id}/"
+                    await message.reply_text(f"✅ Selected: {selected_result.get('title')} ({selected_result.get('year')})")
+                else:
+                    await message.reply_text("⚠️ IMDB ID not available for this selection. Proceeding without IMDB link.")
+        else:
+            # No TMDb results found, allow manual entry or skip
+            await search_msg.edit_text(
+                f"❌ No results found on TMDb for **{title}** ({year}).\n\n"
+                f"You can continue without an IMDB link.\n"
+                f"Type **CONTINUE** to proceed or **CANCEL** to abort."
+            )
+
+            try:
+                continue_msg = await wait_for_user_input(message.chat.id, uid, timeout=60)
+            except asyncio.TimeoutError:
+                await message.reply_text("⏰ Request timeout. Please start over with /request")
+                return
+
+            if not continue_msg or not continue_msg.text:
+                await message.reply_text("❌ Invalid input. Please start over with /request")
+                return
+
+            if continue_msg.text.strip().upper() == "CANCEL":
+                await message.reply_text("❌ Request cancelled.")
+                return
+
+            if continue_msg.text.strip().upper() != "CONTINUE":
+                await message.reply_text("❌ Invalid input. Please start over with /request")
+                return
 
         # Check for duplicate requests
         is_duplicate, similar_req = await check_duplicate_request(title, year, uid)
@@ -1960,8 +2025,9 @@ async def cmd_request(client, message: Message):
         # Insert into database
         result = await requests_col.insert_one(request_doc)
 
-        # Update user limits
-        await update_user_limits(uid)
+        # Update user limits (skip for admins)
+        if not user_is_admin:
+            await update_user_limits(uid)
 
         # Get queue position
         queue_position = await get_queue_position(uid)
@@ -1983,11 +2049,14 @@ async def cmd_request(client, message: Message):
         if imdb_link:
             confirmation_text += f"**IMDB:** {imdb_link}\n"
 
-        confirmation_text += (
-            f"\n📊 **Queue Position:** #{queue_position}\n"
-            f"📝 **Your Pending Requests:** {pending_count}/{MAX_PENDING_REQUESTS_PER_USER}\n\n"
-            f"You will be notified when your request is fulfilled."
-        )
+        confirmation_text += f"\n📊 **Queue Position:** #{queue_position}\n"
+
+        if user_is_admin:
+            confirmation_text += f"📝 **Your Pending Requests:** {pending_count} (Admin - No Limits)\n\n"
+        else:
+            confirmation_text += f"📝 **Your Pending Requests:** {pending_count}/{MAX_PENDING_REQUESTS_PER_USER}\n\n"
+
+        confirmation_text += "You will be notified when your request is fulfilled."
 
         await message.reply_text(confirmation_text)
 

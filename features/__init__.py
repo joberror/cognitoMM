@@ -49,6 +49,10 @@ from .request_management import (
     MAX_REQUESTS_PER_DAY_PER_USER, MAX_GLOBAL_REQUESTS_PER_DAY
 )
 
+from .tmdb_integration import (
+    search_tmdb, format_tmdb_result
+)
+
 __all__ = [
     # Config module exports
     'API_ID', 'API_HASH', 'BOT_TOKEN', 'BOT_ID', 'MONGO_URI', 'MONGO_DB',
@@ -81,7 +85,10 @@ __all__ = [
     # Request management module exports
     'check_rate_limits', 'update_user_limits', 'check_duplicate_request',
     'validate_imdb_link', 'get_queue_position', 'MAX_PENDING_REQUESTS_PER_USER',
-    'MAX_REQUESTS_PER_DAY_PER_USER', 'MAX_GLOBAL_REQUESTS_PER_DAY'
+    'MAX_REQUESTS_PER_DAY_PER_USER', 'MAX_GLOBAL_REQUESTS_PER_DAY',
+
+    # TMDb integration module exports
+    'search_tmdb', 'format_tmdb_result'
 ]
 
 __version__ = '1.0.0'

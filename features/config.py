@@ -28,6 +28,7 @@ ADMINS = [int(x) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 LOG_CHANNEL = os.getenv("LOG_CHANNEL")             # optional - e.g. -1001234567890
 FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", "68"))
 AUTO_INDEX_DEFAULT = os.getenv("AUTO_INDEXING", "True").lower() in ("1", "true", "yes")
+TMDB_API = os.getenv("TMDB_API", "")               # TMDb API key for request feature
 
 # -------------------------
 # Global Variables
