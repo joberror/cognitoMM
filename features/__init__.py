@@ -22,7 +22,8 @@ from .config import (
 
 from .database import (
     mongo, db, movies_col, users_col, channels_col,
-    settings_col, logs_col, ensure_indexes, get_user_doc,
+    settings_col, logs_col, requests_col, user_request_limits_col,
+    ensure_indexes, get_user_doc,
     is_admin, is_banned, has_accepted_terms, log_action
 )
 
@@ -42,6 +43,12 @@ from .metadata_parser import (
     parse_metadata, BRACKET_TAG_RE
 )
 
+from .request_management import (
+    check_rate_limits, update_user_limits, check_duplicate_request,
+    validate_imdb_link, get_queue_position, MAX_PENDING_REQUESTS_PER_USER,
+    MAX_REQUESTS_PER_DAY_PER_USER, MAX_GLOBAL_REQUESTS_PER_DAY
+)
+
 __all__ = [
     # Config module exports
     'API_ID', 'API_HASH', 'BOT_TOKEN', 'BOT_ID', 'MONGO_URI', 'MONGO_DB',
@@ -53,7 +60,8 @@ __all__ = [
     
     # Database module exports
     'mongo', 'db', 'movies_col', 'users_col', 'channels_col',
-    'settings_col', 'logs_col', 'ensure_indexes', 'get_user_doc',
+    'settings_col', 'logs_col', 'requests_col', 'user_request_limits_col',
+    'ensure_indexes', 'get_user_doc',
     'is_admin', 'is_banned', 'has_accepted_terms', 'log_action',
     
     # Utils module exports
@@ -68,7 +76,12 @@ __all__ = [
     'format_recent_output', 'resolve_chat_ref',
     
     # Metadata parser module exports
-    'parse_metadata', 'BRACKET_TAG_RE'
+    'parse_metadata', 'BRACKET_TAG_RE',
+
+    # Request management module exports
+    'check_rate_limits', 'update_user_limits', 'check_duplicate_request',
+    'validate_imdb_link', 'get_queue_position', 'MAX_PENDING_REQUESTS_PER_USER',
+    'MAX_REQUESTS_PER_DAY_PER_USER', 'MAX_GLOBAL_REQUESTS_PER_DAY'
 ]
 
 __version__ = '1.0.0'

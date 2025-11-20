@@ -28,6 +28,8 @@ users_col = db["users"]
 channels_col = db["channels"]
 settings_col = db["settings"]
 logs_col = db["logs"]
+requests_col = db["requests"]
+user_request_limits_col = db["user_request_limits"]
 
 async def ensure_indexes():
     """Create database indexes with error handling"""
@@ -47,11 +49,15 @@ async def ensure_indexes():
             (movies_col, [("channel_id", 1), ("message_id", 1)], "channel_message index"),
             (users_col, [("user_id", 1)], "user_id index"),
             (channels_col, [("channel_id", 1)], "channel_id index"),
+            (requests_col, [("user_id", 1)], "request user_id index"),
+            (requests_col, [("status", 1)], "request status index"),
+            (requests_col, [("request_date", 1)], "request date index"),
+            (user_request_limits_col, [("user_id", 1)], "limits user_id index"),
         ]
         
         for collection, index_spec, description in indexes_to_create:
             try:
-                if description == "user_id index" or description == "channel_id index":
+                if description in ["user_id index", "channel_id index", "limits user_id index"]:
                     await collection.create_index(index_spec, unique=True)
                 else:
                     await collection.create_index(index_spec)

@@ -18,13 +18,14 @@ from hydrogram.enums import ParseMode, ChatType
 
 # Import from our modules
 from .config import API_ID, API_HASH, BOT_TOKEN, BOT_ID, MONGO_URI, MONGO_DB, ADMINS, LOG_CHANNEL, FUZZY_THRESHOLD, AUTO_INDEX_DEFAULT, temp_data, user_input_events, bulk_downloads
-from .database import mongo, db, movies_col, users_col, channels_col, settings_col, logs_col, ensure_indexes
+from .database import mongo, db, movies_col, users_col, channels_col, settings_col, logs_col, requests_col, user_request_limits_col, ensure_indexes
 from .utils import get_readable_time, wait_for_user_input, set_user_input, cleanup_expired_bulk_downloads
 from .metadata_parser import parse_metadata
 from .user_management import get_user_doc, is_admin, is_banned, has_accepted_terms, load_terms_and_privacy, log_action, check_banned, check_terms_acceptance, should_process_command, require_not_banned
 from .file_deletion import track_file_for_deletion
 from .indexing import INDEX_EXTENSIONS, indexing_lock, start_indexing_process, save_file_to_db, index_message, message_queue, process_message_queue, indexing_stats, prune_orphaned_index_entries
 from .search import format_file_size, group_recent_content, format_recent_output, send_search_results
+from .request_management import check_rate_limits, update_user_limits, check_duplicate_request, validate_imdb_link, get_queue_position, MAX_PENDING_REQUESTS_PER_USER
 
 # -------------------------
 # Command Handler
@@ -77,7 +78,11 @@ async def handle_command(client, message: Message):
         await cmd_my_history(client, message)
     elif command == 'my_prefs':
         await cmd_my_prefs(client, message)
+    elif command == 'request':
+        await cmd_request(client, message)
     # Admin commands
+    elif command == 'request_list':
+        await cmd_request_list(client, message)
     elif command == 'manage_channel' or command == 'mc':
         await cmd_manage_channel(client, message)
     elif command == 'add_channel':
@@ -128,6 +133,7 @@ USER_HELP = """
 /recent                   - Show recently added content
 /my_history               - Show your search history
 /my_prefs                 - Show or set preferences
+/request                  - Request a movie or series
 /help                     - Show this message
 
 💡 Search Tips:
@@ -135,10 +141,18 @@ USER_HELP = """
 • Use -e for exact title matches
 • Normal search combines exact + fuzzy results
 • Exact search finds perfect title matches only
+
+📝 Request Feature:
+• Submit requests for movies/series not in the database
+• Maximum 3 pending requests per user
+• 1 request per day per user
 """
 
 ADMIN_HELP = """
 👑 Admin Commands
+
+📝 Request Management
+/request_list              - View and manage user requests
 
 📡 Channel Management
 /manage_channel            - Unified channel management interface (alias: /mc)
@@ -1767,3 +1781,392 @@ async def cmd_manual_deletion(client, message: Message):
 
         print(f"❌ Manual deletion error for user {uid}: {e}")
 
+
+async def cmd_request(client, message: Message):
+    """Handle /request command for movie/series requests"""
+    uid = message.from_user.id
+    username = message.from_user.username or message.from_user.first_name or str(uid)
+
+    try:
+        # Check rate limits
+        can_request, error_msg = await check_rate_limits(uid)
+        if not can_request:
+            await message.reply_text(error_msg)
+            return
+
+        # Start interactive request flow
+        await message.reply_text(
+            "📝 **Movie/Series Request**\n\n"
+            "Let's gather the information for your request.\n"
+            "You can type **CANCEL** at any step to abort.\n\n"
+            "**Step 1/4:** What type of content are you requesting?\n"
+            "Reply with: **Movie** or **Series**"
+        )
+
+        # Wait for content type
+        try:
+            type_msg = await wait_for_user_input(message.chat.id, uid, timeout=120)
+        except asyncio.TimeoutError:
+            await message.reply_text("⏰ Request timeout. Please start over with /request")
+            return
+
+        if not type_msg or not type_msg.text:
+            await message.reply_text("❌ Invalid input. Please start over with /request")
+            return
+
+        content_type_input = type_msg.text.strip().upper()
+
+        if content_type_input == "CANCEL":
+            await message.reply_text("❌ Request cancelled.")
+            return
+
+        if content_type_input not in ["MOVIE", "SERIES"]:
+            await message.reply_text("❌ Invalid type. Please use 'Movie' or 'Series'. Start over with /request")
+            return
+
+        content_type = "Movie" if content_type_input == "MOVIE" else "Series"
+
+        # Step 2: Get title
+        await message.reply_text(
+            f"✅ Type: **{content_type}**\n\n"
+            f"**Step 2/4:** What is the title/name?\n"
+            f"Reply with the {content_type.lower()} title."
+        )
+
+        try:
+            title_msg = await wait_for_user_input(message.chat.id, uid, timeout=120)
+        except asyncio.TimeoutError:
+            await message.reply_text("⏰ Request timeout. Please start over with /request")
+            return
+
+        if not title_msg or not title_msg.text:
+            await message.reply_text("❌ Invalid input. Please start over with /request")
+            return
+
+        title = title_msg.text.strip()
+
+        if title.upper() == "CANCEL":
+            await message.reply_text("❌ Request cancelled.")
+            return
+
+        if len(title) < 2:
+            await message.reply_text("❌ Title too short. Please start over with /request")
+            return
+
+        # Step 3: Get year
+        await message.reply_text(
+            f"✅ Title: **{title}**\n\n"
+            f"**Step 3/4:** What is the release year?\n"
+            f"Reply with a 4-digit year (e.g., 2024)."
+        )
+
+        try:
+            year_msg = await wait_for_user_input(message.chat.id, uid, timeout=120)
+        except asyncio.TimeoutError:
+            await message.reply_text("⏰ Request timeout. Please start over with /request")
+            return
+
+        if not year_msg or not year_msg.text:
+            await message.reply_text("❌ Invalid input. Please start over with /request")
+            return
+
+        year_input = year_msg.text.strip()
+
+        if year_input.upper() == "CANCEL":
+            await message.reply_text("❌ Request cancelled.")
+            return
+
+        # Validate year
+        if not year_input.isdigit() or len(year_input) != 4:
+            await message.reply_text("❌ Invalid year format. Please use a 4-digit year. Start over with /request")
+            return
+
+        year = year_input
+        current_year = datetime.now(timezone.utc).year
+        if int(year) < 1900 or int(year) > current_year + 2:
+            await message.reply_text(f"❌ Year must be between 1900 and {current_year + 2}. Start over with /request")
+            return
+
+        # Step 4: Get IMDB link (optional)
+        await message.reply_text(
+            f"✅ Year: **{year}**\n\n"
+            f"**Step 4/4:** IMDB Link (optional but recommended)\n"
+            f"Reply with the IMDB link or type **SKIP** to skip this step.\n\n"
+            f"Example: https://www.imdb.com/title/tt1234567/"
+        )
+
+        try:
+            imdb_msg = await wait_for_user_input(message.chat.id, uid, timeout=120)
+        except asyncio.TimeoutError:
+            await message.reply_text("⏰ Request timeout. Please start over with /request")
+            return
+
+        if not imdb_msg or not imdb_msg.text:
+            await message.reply_text("❌ Invalid input. Please start over with /request")
+            return
+
+        imdb_input = imdb_msg.text.strip()
+
+        if imdb_input.upper() == "CANCEL":
+            await message.reply_text("❌ Request cancelled.")
+            return
+
+        imdb_link = None
+        if imdb_input.upper() != "SKIP":
+            if not await validate_imdb_link(imdb_input):
+                await message.reply_text(
+                    "⚠️ Invalid IMDB link format. Proceeding without IMDB link.\n"
+                    "Valid formats: https://www.imdb.com/title/tt1234567/ or tt1234567"
+                )
+            else:
+                imdb_link = imdb_input
+
+        # Check for duplicate requests
+        is_duplicate, similar_req = await check_duplicate_request(title, year, uid)
+        if is_duplicate:
+            await message.reply_text(
+                f"⚠️ **Similar Request Found**\n\n"
+                f"You already have a similar pending request:\n"
+                f"**Title:** {similar_req.get('title')}\n"
+                f"**Year:** {similar_req.get('year')}\n"
+                f"**Type:** {similar_req.get('content_type')}\n\n"
+                f"Do you want to proceed anyway?\n"
+                f"Reply with **YES** to proceed or **NO** to cancel."
+            )
+
+            try:
+                confirm_msg = await wait_for_user_input(message.chat.id, uid, timeout=60)
+            except asyncio.TimeoutError:
+                await message.reply_text("⏰ Request timeout. Request cancelled.")
+                return
+
+            if not confirm_msg or not confirm_msg.text or confirm_msg.text.strip().upper() != "YES":
+                await message.reply_text("❌ Request cancelled.")
+                return
+
+        # Create request document
+        now = datetime.now(timezone.utc)
+        request_doc = {
+            "user_id": uid,
+            "username": username,
+            "content_type": content_type,
+            "title": title,
+            "year": year,
+            "imdb_link": imdb_link,
+            "request_date": now,
+            "status": "pending"
+        }
+
+        # Insert into database
+        result = await requests_col.insert_one(request_doc)
+
+        # Update user limits
+        await update_user_limits(uid)
+
+        # Get queue position
+        queue_position = await get_queue_position(uid)
+
+        # Get remaining quota
+        pending_count = await requests_col.count_documents({
+            "user_id": uid,
+            "status": "pending"
+        })
+
+        # Send confirmation
+        confirmation_text = (
+            f"✅ **Request Submitted Successfully!**\n\n"
+            f"**Type:** {content_type}\n"
+            f"**Title:** {title}\n"
+            f"**Year:** {year}\n"
+        )
+
+        if imdb_link:
+            confirmation_text += f"**IMDB:** {imdb_link}\n"
+
+        confirmation_text += (
+            f"\n📊 **Queue Position:** #{queue_position}\n"
+            f"📝 **Your Pending Requests:** {pending_count}/{MAX_PENDING_REQUESTS_PER_USER}\n\n"
+            f"You will be notified when your request is fulfilled."
+        )
+
+        await message.reply_text(confirmation_text)
+
+        # Log the request
+        await log_action("request_submitted", by=uid, extra={
+            "title": title,
+            "year": year,
+            "content_type": content_type,
+            "queue_position": queue_position
+        })
+
+    except Exception as e:
+        await log_action("request_error", by=uid, extra={"error": str(e)})
+        await message.reply_text(
+            f"❌ **Error**\n\n"
+            f"An error occurred while processing your request.\n"
+            f"Please try again later."
+        )
+        print(f"❌ Request error for user {uid}: {e}")
+
+
+async def cmd_request_list(client, message: Message):
+    """Handle /request_list command for admins to view and manage requests"""
+    uid = message.from_user.id
+
+    # Check if user is admin
+    if not await is_admin(uid):
+        await message.reply_text("🚫 Admins only.")
+        return
+
+    try:
+        # Get all pending requests sorted by request date
+        pending_requests = await requests_col.find(
+            {"status": "pending"}
+        ).sort("request_date", 1).to_list(length=1000)
+
+        if not pending_requests:
+            await message.reply_text(
+                "📝 **Request List**\n\n"
+                "No pending requests at the moment."
+            )
+            return
+
+        # Pagination settings
+        REQUESTS_PER_PAGE = 9
+        total_requests = len(pending_requests)
+        total_pages = (total_requests + REQUESTS_PER_PAGE - 1) // REQUESTS_PER_PAGE
+
+        # Store request list data for pagination
+        request_list_id = str(uuid.uuid4())[:8]
+        bulk_downloads[request_list_id] = {
+            'requests': pending_requests,
+            'created_at': datetime.now(timezone.utc),
+            'user_id': uid,
+            'type': 'request_list'
+        }
+
+        # Send first page
+        await send_request_list_page(client, message, pending_requests, request_list_id, page=1)
+
+        # Log the action
+        await log_action("request_list_viewed", by=uid, extra={
+            "total_requests": total_requests
+        })
+
+    except Exception as e:
+        await log_action("request_list_error", by=uid, extra={"error": str(e)})
+        await message.reply_text(
+            f"❌ **Error**\n\n"
+            f"An error occurred while fetching the request list.\n"
+            f"Please try again later."
+        )
+        print(f"❌ Request list error for admin {uid}: {e}")
+
+
+async def send_request_list_page(client, message, all_requests, request_list_id, page=1, edit=False):
+    """Send a paginated request list
+
+    Args:
+        client: The bot client
+        message: The message object to reply to or edit
+        all_requests: List of all requests
+        request_list_id: Unique ID for this request list session
+        page: Page number to display
+        edit: Whether to edit the message (True) or send new message (False)
+    """
+    REQUESTS_PER_PAGE = 9
+    total_requests = len(all_requests)
+    total_pages = (total_requests + REQUESTS_PER_PAGE - 1) // REQUESTS_PER_PAGE
+
+    # Ensure page is within valid range
+    page = max(1, min(page, total_pages))
+
+    # Calculate start and end indices for current page
+    start_idx = (page - 1) * REQUESTS_PER_PAGE
+    end_idx = min(start_idx + REQUESTS_PER_PAGE, total_requests)
+    page_requests = all_requests[start_idx:end_idx]
+
+    # Build request list text
+    list_text = "```\n"
+    list_text += f"Request List - Page {page}/{total_pages}\n"
+    list_text += f"Total Pending: {total_requests}\n"
+    list_text += "=" * 50 + "\n\n"
+
+    for idx, req in enumerate(page_requests, start=start_idx + 1):
+        req_type = "[M]" if req.get("content_type") == "Movie" else "[S]"
+        title = req.get("title", "Unknown")
+        year = req.get("year", "N/A")
+        username = req.get("username", "Unknown")
+        user_id = req.get("user_id", "N/A")
+        req_date = req.get("request_date")
+        date_str = req_date.strftime("%Y-%m-%d %H:%M") if req_date else "N/A"
+
+        list_text += f"#{idx} {req_type} {title} ({year})\n"
+        list_text += f"    User: {username} (ID: {user_id})\n"
+        list_text += f"    Date: {date_str}\n"
+
+        if req.get("imdb_link"):
+            list_text += f"    IMDB: {req.get('imdb_link')}\n"
+
+        list_text += "\n"
+
+    list_text += "```"
+
+    # Create buttons
+    buttons = []
+
+    # Individual Mark Done buttons (3 per row)
+    current_row = []
+    for idx, req in enumerate(page_requests, start=start_idx + 1):
+        req_id = str(req.get("_id"))
+        current_row.append(
+            InlineKeyboardButton(
+                f"Done [{idx}]",
+                callback_data=f"req_done:{req_id}"
+            )
+        )
+
+        if len(current_row) == 3 or idx == end_idx:
+            buttons.append(current_row)
+            current_row = []
+
+    # Navigation row
+    nav_row = []
+
+    # Previous button
+    if page > 1:
+        nav_row.append(
+            InlineKeyboardButton(
+                "← Prev",
+                callback_data=f"req_page:{request_list_id}:{page-1}"
+            )
+        )
+
+    # Mark All Done button
+    nav_row.append(
+        InlineKeyboardButton(
+            "Mark All Done",
+            callback_data=f"req_all_done:{request_list_id}"
+        )
+    )
+
+    # Next button
+    if page < total_pages:
+        nav_row.append(
+            InlineKeyboardButton(
+                "Next →",
+                callback_data=f"req_page:{request_list_id}:{page+1}"
+            )
+        )
+
+    if nav_row:
+        buttons.append(nav_row)
+
+    # Create keyboard
+    keyboard = InlineKeyboardMarkup(buttons) if buttons else None
+
+    # Send or edit message based on the edit parameter
+    if edit:
+        await message.edit_text(list_text, reply_markup=keyboard)
+    else:
+        await message.reply_text(list_text, reply_markup=keyboard)

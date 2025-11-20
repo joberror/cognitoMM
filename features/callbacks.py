@@ -13,8 +13,8 @@ from hydrogram.types import Message, InlineQuery, InlineQueryResultArticle, Inpu
 from hydrogram.enums import ParseMode
 
 # Import from our modules
-from .config import LOG_CHANNEL
-from .database import users_col, movies_col
+from .config import LOG_CHANNEL, client
+from .database import users_col, movies_col, requests_col
 from .config import bulk_downloads
 from .utils import cleanup_expired_bulk_downloads
 from .file_deletion import track_file_for_deletion
@@ -777,6 +777,152 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     "session_id": session_id,
                     "search_title": session['search_title']
                 })
+
+        elif data.startswith("req_done:"):
+            # Handle marking a single request as done
+            if not await is_admin(user_id):
+                await callback_query.answer("🚫 Admins only.", show_alert=True)
+                return
+
+            _, req_id = data.split(":", 1)
+
+            # Get request details before deletion
+            request = await requests_col.find_one({"_id": req_id})
+
+            if not request:
+                await callback_query.answer("❌ Request not found.", show_alert=True)
+                return
+
+            # Update request status to completed
+            await requests_col.update_one(
+                {"_id": req_id},
+                {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc), "completed_by": user_id}}
+            )
+
+            # Notify the user
+            try:
+                notification_text = (
+                    f"✅ **Request Fulfilled!**\n\n"
+                    f"Your request for **{request.get('title')}** ({request.get('year')}) has been fulfilled.\n\n"
+                    f"Thank you for using our service!"
+                )
+                await client.send_message(request.get("user_id"), notification_text)
+            except Exception as e:
+                print(f"Failed to notify user {request.get('user_id')}: {e}")
+
+            await callback_query.answer(f"✅ Request marked as done!")
+
+            # Log the action
+            await log_action("request_completed", by=user_id, target=request.get("user_id"), extra={
+                "title": request.get("title"),
+                "year": request.get("year"),
+                "request_id": req_id
+            })
+
+            # Refresh the request list
+            # Get the request_list_id from bulk_downloads to refresh the page
+            # For simplicity, just update the message text
+            await callback_query.message.edit_text(
+                f"✅ Request marked as done!\n\n"
+                f"Use /request_list to view updated list."
+            )
+
+        elif data.startswith("req_page:"):
+            # Handle request list pagination
+            if not await is_admin(user_id):
+                await callback_query.answer("🚫 Admins only.", show_alert=True)
+                return
+
+            _, request_list_id, page_str = data.split(":")
+            page = int(page_str)
+
+            # Retrieve request list data
+            if request_list_id not in bulk_downloads:
+                await callback_query.answer("❌ Request list expired. Use /request_list again.", show_alert=True)
+                return
+
+            list_data = bulk_downloads[request_list_id]
+
+            # Verify it's a request list
+            if list_data.get('type') != 'request_list':
+                await callback_query.answer("❌ Invalid data.", show_alert=True)
+                return
+
+            requests_list = list_data['requests']
+
+            await callback_query.answer(f"📄 Page {page}")
+
+            # Import send_request_list_page from commands
+            from .commands import send_request_list_page
+
+            # Update message with new page (edit=True for pagination)
+            await send_request_list_page(client, callback_query.message, requests_list, request_list_id, page, edit=True)
+
+        elif data.startswith("req_all_done:"):
+            # Handle marking all requests as done
+            if not await is_admin(user_id):
+                await callback_query.answer("🚫 Admins only.", show_alert=True)
+                return
+
+            _, request_list_id = data.split(":", 1)
+
+            # Retrieve request list data
+            if request_list_id not in bulk_downloads:
+                await callback_query.answer("❌ Request list expired. Use /request_list again.", show_alert=True)
+                return
+
+            list_data = bulk_downloads[request_list_id]
+
+            # Verify it's a request list
+            if list_data.get('type') != 'request_list':
+                await callback_query.answer("❌ Invalid data.", show_alert=True)
+                return
+
+            requests_list = list_data['requests']
+
+            # Confirm action
+            await callback_query.answer("⚠️ Marking all requests as done...", show_alert=True)
+
+            # Mark all as completed
+            completed_count = 0
+            notified_count = 0
+
+            for request in requests_list:
+                # Update status
+                await requests_col.update_one(
+                    {"_id": request.get("_id")},
+                    {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc), "completed_by": user_id}}
+                )
+                completed_count += 1
+
+                # Notify user
+                try:
+                    notification_text = (
+                        f"✅ **Request Fulfilled!**\n\n"
+                        f"Your request for **{request.get('title')}** ({request.get('year')}) has been fulfilled.\n\n"
+                        f"Thank you for using our service!"
+                    )
+                    await client.send_message(request.get("user_id"), notification_text)
+                    notified_count += 1
+                except Exception as e:
+                    print(f"Failed to notify user {request.get('user_id')}: {e}")
+
+            # Log the action
+            await log_action("request_all_completed", by=user_id, extra={
+                "completed_count": completed_count,
+                "notified_count": notified_count
+            })
+
+            # Update message
+            await callback_query.message.edit_text(
+                f"✅ **All Requests Marked as Done!**\n\n"
+                f"**Completed:** {completed_count} requests\n"
+                f"**Notified:** {notified_count} users\n\n"
+                f"Use /request_list to view updated list."
+            )
+
+            # Clean up bulk_downloads
+            del bulk_downloads[request_list_id]
 
         else:
             await callback_query.answer("❌ Unknown action.", show_alert=True)
