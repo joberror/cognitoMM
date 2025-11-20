@@ -1322,33 +1322,34 @@ async def cmd_update_db(client, message: Message):
     - Scan for and remove duplicate entries
     - Remove orphaned index entries (missing fields)
     - Verify and remove entries for deleted messages
+    - Scan for new unindexed files in all channels (up to 500 per channel)
     Usage: /update_db [limit]
-    limit (optional) - number of entries to verify for deletion (default 1000)
+    limit (optional) - number of entries to verify for deletion (default 3000)
     """
     if not await is_admin(message.from_user.id):
-        await message.reply_text("🚫 Admins only.")
+        await message.reply_text("Admins only.")
         return
 
     uid = message.from_user.id
 
     # Parse optional limit parameter
     parts = message.text.split()
-    verify_limit = 3000  # Default limit for message verification (increased from 1000)
+    verify_limit = 3000  # Default limit for message verification
     if len(parts) >= 2:
         try:
             verify_limit = int(parts[1])
             if verify_limit < 1:
-                return await message.reply_text("❌ Limit must be at least 1. Usage: /update_db [limit]")
+                return await message.reply_text("Limit must be at least 1. Usage: /update_db [limit]")
         except ValueError:
-            return await message.reply_text("❌ Invalid limit. Usage: /update_db [limit]")
+            return await message.reply_text("Invalid limit. Usage: /update_db [limit]")
 
     start_time = datetime.now(timezone.utc)
 
     status_msg = await message.reply_text(
-        f"🔧 **Database Maintenance Started**\n\n"
-        f"🔍 Scanning for duplicates and orphaned entries...\n"
-        f"📊 Verification limit: {verify_limit} entries\n"
-        f"⏳ This may take a few moments..."
+        f"**Database Maintenance Started**\n\n"
+        f"Scanning for duplicates and orphaned entries...\n"
+        f"Verification limit: {verify_limit} entries\n"
+        f"This may take a few moments..."
     )
 
     try:
@@ -1358,12 +1359,13 @@ async def cmd_update_db(client, message: Message):
         verified_orphans = 0
         checked = 0
         errors = 0
+        new_files_indexed = 0
 
         # Update status - Step 1
         await status_msg.edit_text(
-            f"🔧 **Database Maintenance In Progress**\n\n"
-            f"📋 **Step 1/3:** Scanning for duplicates...\n"
-            f"⏳ Please wait..."
+            f"**Database Maintenance In Progress**\n\n"
+            f"Step 1/4: Scanning for duplicates...\n"
+            f"Please wait..."
         )
 
         # Find duplicates based on channel_id + message_id
@@ -1400,10 +1402,10 @@ async def cmd_update_db(client, message: Message):
 
         # Update status - Step 2
         await status_msg.edit_text(
-            f"🔧 **Database Maintenance In Progress**\n\n"
-            f"✅ **Step 1/3:** Duplicates removed: {duplicates_removed}\n"
-            f"📋 **Step 2/3:** Removing orphaned entries (missing fields)...\n"
-            f"⏳ Please wait..."
+            f"**Database Maintenance In Progress**\n\n"
+            f"Step 1/4: Duplicates removed: {duplicates_removed}\n"
+            f"Step 2/4: Removing orphaned entries (missing fields)...\n"
+            f"Please wait..."
         )
 
         # Step 2: Remove orphaned entries (entries with missing channel_id or message_id)
@@ -1426,11 +1428,11 @@ async def cmd_update_db(client, message: Message):
 
         # Update status - Step 3
         await status_msg.edit_text(
-            f"🔧 **Database Maintenance In Progress**\n\n"
-            f"✅ **Step 1/3:** Duplicates removed: {duplicates_removed}\n"
-            f"✅ **Step 2/3:** Orphans removed: {orphans_removed}\n"
-            f"📋 **Step 3/3:** Verifying {verify_limit} entries for deleted messages...\n"
-            f"⏳ Please wait..."
+            f"**Database Maintenance In Progress**\n\n"
+            f"Step 1/4: Duplicates removed: {duplicates_removed}\n"
+            f"Step 2/4: Orphans removed: {orphans_removed}\n"
+            f"Step 3/4: Verifying {verify_limit} entries for deleted messages...\n"
+            f"Please wait..."
         )
 
         # Step 3: Verify orphaned entries by checking if messages still exist
@@ -1459,6 +1461,89 @@ async def cmd_update_db(client, message: Message):
                     errors += 1
                     print(f"Error removing verified orphan {doc_id}: {e}")
 
+        # Update status - Step 4
+        await status_msg.edit_text(
+            f"**Database Maintenance In Progress**\n\n"
+            f"Step 1/4: Duplicates removed: {duplicates_removed}\n"
+            f"Step 2/4: Orphans removed: {orphans_removed}\n"
+            f"Step 3/4: Verified orphans removed: {verified_orphans}\n"
+            f"Step 4/4: Scanning for new unindexed files...\n"
+            f"Please wait..."
+        )
+
+        # Step 4: Scan for new unindexed files in all channels
+        from .indexing import index_message
+
+        # Get all enabled channels
+        channels_cursor = channels_col.find({"enabled": True})
+        channels = await channels_cursor.to_list(length=100)
+
+        if channels:
+            for channel in channels:
+                channel_id = channel.get('channel_id')
+                channel_title = channel.get('channel_title', 'Unknown')
+
+                if not channel_id:
+                    continue
+
+                try:
+                    # Update status with current channel
+                    await status_msg.edit_text(
+                        f"**Database Maintenance In Progress**\n\n"
+                        f"Step 1/4: Duplicates removed: {duplicates_removed}\n"
+                        f"Step 2/4: Orphans removed: {orphans_removed}\n"
+                        f"Step 3/4: Verified orphans removed: {verified_orphans}\n"
+                        f"Step 4/4: Scanning {channel_title}...\n"
+                        f"New files indexed: {new_files_indexed}"
+                    )
+
+                    # Scan up to 500 recent messages from this channel
+                    scanned = 0
+                    async for msg in client.iter_messages(channel_id, limit=500):
+                        scanned += 1
+
+                        # Check if message has video content
+                        has_video = getattr(msg, "video", None) is not None
+                        has_doc = getattr(msg, "document", None) is not None and \
+                                 getattr(msg.document, "mime_type", "").startswith("video")
+
+                        if not (has_video or has_doc):
+                            continue
+
+                        # Check if already indexed
+                        existing = await movies_col.find_one({
+                            "channel_id": channel_id,
+                            "message_id": msg.id
+                        })
+
+                        if existing:
+                            continue
+
+                        # Index this new file
+                        try:
+                            await index_message(msg)
+                            new_files_indexed += 1
+
+                            # Update progress every 10 new files
+                            if new_files_indexed % 10 == 0:
+                                await status_msg.edit_text(
+                                    f"**Database Maintenance In Progress**\n\n"
+                                    f"Step 1/4: Duplicates removed: {duplicates_removed}\n"
+                                    f"Step 2/4: Orphans removed: {orphans_removed}\n"
+                                    f"Step 3/4: Verified orphans removed: {verified_orphans}\n"
+                                    f"Step 4/4: Scanning {channel_title}...\n"
+                                    f"New files indexed: {new_files_indexed}"
+                                )
+                        except Exception as idx_err:
+                            errors += 1
+                            print(f"Error indexing message {msg.id} from {channel_title}: {idx_err}")
+
+                    print(f"Scanned {scanned} messages from {channel_title}, indexed {new_files_indexed} new files")
+
+                except Exception as ch_err:
+                    errors += 1
+                    print(f"Error scanning channel {channel_title}: {ch_err}")
+
         end_time = datetime.now(timezone.utc)
         duration = (end_time - start_time).total_seconds()
         total_removed = duplicates_removed + orphans_removed + verified_orphans
@@ -1470,6 +1555,7 @@ async def cmd_update_db(client, message: Message):
             "verified_orphans": verified_orphans,
             "checked": checked,
             "total_removed": total_removed,
+            "new_files_indexed": new_files_indexed,
             "errors": errors,
             "verify_limit": verify_limit,
             "duration_seconds": duration,
@@ -1479,24 +1565,26 @@ async def cmd_update_db(client, message: Message):
 
         # Update status message with results
         await status_msg.edit_text(
-            f"✅ **Database Maintenance Complete**\n\n"
-            f"📊 **Results:**\n"
-            f"• Duplicates removed: {duplicates_removed}\n"
-            f"• Orphaned entries removed: {orphans_removed}\n"
-            f"• Verified orphans removed: {verified_orphans}\n"
-            f"• Entries checked: {checked}/{verify_limit}\n"
-            f"• **Total cleaned: {total_removed}**\n"
-            f"• Errors: {errors}\n\n"
-            f"⏱️ **Duration:** {duration:.2f} seconds\n"
-            f"👤 **By:** {uid}\n"
-            f"🕒 **Completed:** {end_time.strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
-            f"💡 Database is now optimized and clean.\n"
-            f"💬 Use `/update_db {verify_limit * 2}` to check more entries."
+            f"**Database Maintenance Complete**\n\n"
+            f"Results:\n"
+            f"Duplicates removed: {duplicates_removed}\n"
+            f"Orphaned entries removed: {orphans_removed}\n"
+            f"Verified orphans removed: {verified_orphans}\n"
+            f"New files indexed: {new_files_indexed}\n"
+            f"Entries checked: {checked}/{verify_limit}\n"
+            f"Total cleaned: {total_removed}\n"
+            f"Errors: {errors}\n\n"
+            f"Duration: {duration:.2f} seconds\n"
+            f"By: {uid}\n"
+            f"Completed: {end_time.strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+            f"Database is now optimized and clean.\n"
+            f"Use /update_db {verify_limit * 2} to check more entries."
         )
 
-        print(f"✅ Database maintenance completed by user {uid}. "
+        print(f"Database maintenance completed by user {uid}. "
               f"Removed {duplicates_removed} duplicates, {orphans_removed} orphans, "
-              f"{verified_orphans} verified orphans (checked {checked}/{verify_limit}) in {duration:.2f}s")
+              f"{verified_orphans} verified orphans (checked {checked}/{verify_limit}), "
+              f"indexed {new_files_indexed} new files in {duration:.2f}s")
 
     except Exception as e:
         # Handle unexpected errors
@@ -1506,12 +1594,12 @@ async def cmd_update_db(client, message: Message):
         })
 
         await status_msg.edit_text(
-            f"❌ **Database Maintenance Failed**\n\n"
-            f"**Error:** {str(e)}\n\n"
-            f"🔄 Please try again later or contact support."
+            f"**Database Maintenance Failed**\n\n"
+            f"Error: {str(e)}\n\n"
+            f"Please try again later or contact support."
         )
 
-        print(f"❌ Database maintenance failed for user {uid}: {e}")
+        print(f"Database maintenance failed for user {uid}: {e}")
 
 
 async def cmd_manual_deletion(client, message: Message):
