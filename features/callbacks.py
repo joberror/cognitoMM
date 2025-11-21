@@ -484,7 +484,6 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     output += "Indexing - Toggle auto-indexing on/off"
 
                 # Create updated buttons with new icon
-                from hydrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
                 buttons = [
                     [
                         InlineKeyboardButton("Add", callback_data="mc#add"),

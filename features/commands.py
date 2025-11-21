@@ -1912,7 +1912,13 @@ async def cmd_request(client, message: Message):
             for idx, result in enumerate(tmdb_results, 1):
                 result_title = result.get("title", "Unknown")
                 result_year = result.get("year", "N/A")
-                results_text += f"{idx}. {result_title} ({result_year})\n"
+                result_imdb = result.get("imdb_id", "N/A")
+
+                # Format: 1. Title (Year) - IMDB: tt1234567
+                results_text += f"{idx}. {result_title} ({result_year})"
+                if result_imdb and result_imdb != "N/A":
+                    results_text += f" - IMDB: {result_imdb}"
+                results_text += "\n"
 
             results_text += (
                 f"\n**Select a result** by replying with the number (1-{len(tmdb_results)})\n"
