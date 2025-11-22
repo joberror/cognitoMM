@@ -420,21 +420,33 @@ async def send_search_results(client, message: Message, results, query, page=1):
 
         # Get All button (for all results, not just current page)
         if total_results > 1:
-            # Generate bulk download ID for all results
-            bulk_id = str(uuid.uuid4())[:8]
-            bulk_downloads[bulk_id] = {
-                'files': [{'channel_id': r.get('channel_id'), 'message_id': r.get('message_id')}
-                         for r in results if r.get('channel_id') and r.get('message_id')][:10],
-                'created_at': datetime.now(timezone.utc),
-                'user_id': message.from_user.id
-            }
+            # Check if Get All is premium-only
+            from .premium_management import is_feature_premium_only, is_premium_user
+            from .user_management import is_admin
 
-            nav_row.append(
-                InlineKeyboardButton(
-                    f"Get All ({total_results})",
-                    callback_data=f"bulk:{bulk_id}"
+            show_get_all = True
+            if await is_feature_premium_only("get_all"):
+                # Only show if user is premium or admin
+                uid = message.from_user.id
+                if not await is_admin(uid) and not await is_premium_user(uid):
+                    show_get_all = False
+
+            if show_get_all:
+                # Generate bulk download ID for all results
+                bulk_id = str(uuid.uuid4())[:8]
+                bulk_downloads[bulk_id] = {
+                    'files': [{'channel_id': r.get('channel_id'), 'message_id': r.get('message_id')}
+                             for r in results if r.get('channel_id') and r.get('message_id')][:10],
+                    'created_at': datetime.now(timezone.utc),
+                    'user_id': message.from_user.id
+                }
+
+                nav_row.append(
+                    InlineKeyboardButton(
+                        f"Get All ({total_results})",
+                        callback_data=f"bulk:{bulk_id}"
+                    )
                 )
-            )
 
         # Next button
         if page < total_pages:

@@ -18,7 +18,7 @@ from hydrogram.enums import ParseMode, ChatType
 
 # Import from our modules
 from .config import API_ID, API_HASH, BOT_TOKEN, BOT_ID, MONGO_URI, MONGO_DB, ADMINS, LOG_CHANNEL, FUZZY_THRESHOLD, AUTO_INDEX_DEFAULT, temp_data, user_input_events, bulk_downloads
-from .database import mongo, db, movies_col, users_col, channels_col, settings_col, logs_col, requests_col, user_request_limits_col, ensure_indexes
+from .database import mongo, db, movies_col, users_col, channels_col, settings_col, logs_col, requests_col, user_request_limits_col, premium_users_col, premium_features_col, ensure_indexes
 from .utils import get_readable_time, wait_for_user_input, set_user_input, cleanup_expired_bulk_downloads
 from .metadata_parser import parse_metadata
 from .user_management import get_user_doc, is_admin, is_banned, has_accepted_terms, load_terms_and_privacy, log_action, check_banned, check_terms_acceptance, should_process_command, require_not_banned
@@ -27,6 +27,7 @@ from .indexing import INDEX_EXTENSIONS, indexing_lock, start_indexing_process, s
 from .search import format_file_size, group_recent_content, format_recent_output, send_search_results
 from .request_management import check_rate_limits, update_user_limits, check_duplicate_request, validate_imdb_link, get_queue_position, MAX_PENDING_REQUESTS_PER_USER
 from .tmdb_integration import search_tmdb, format_tmdb_result
+from .premium_management import is_premium_user, get_premium_user, add_premium_user, edit_premium_user, remove_premium_user, get_days_remaining, is_feature_premium_only, toggle_feature, add_premium_feature, get_all_premium_features, get_all_premium_users
 
 # -------------------------
 # Command Handler
@@ -118,6 +119,8 @@ async def handle_command(client, message: Message):
         await cmd_update_db(client, message)
     elif command == 'manual_deletion':
         await cmd_manual_deletion(client, message)
+    elif command == 'premium':
+        await cmd_premium(client, message)
     else:
         # Unknown command
         await message.reply_text("❓ Unknown command. Use /help to see available commands.")
@@ -155,6 +158,13 @@ ADMIN_HELP = """
 📝 Request Management
 /request_list              - View and manage user requests
 
+⭐ Premium Management
+/premium                   - Manage premium users and features
+  • Add Users: Grant premium access with duration
+  • Edit Users: Modify premium duration (add/remove days)
+  • Remove Users: Revoke premium access
+  • Manage Features: Control which features are premium-only
+
 📡 Channel Management
 /manage_channel            - Unified channel management interface (alias: /mc)
 /add_channel <link|id>     - Add a channel (bot must be admin)
@@ -186,6 +196,7 @@ ADMIN_HELP = """
 • Safe database & per-channel reset with confirmation
 • Orphan/duplicate cleanup utilities
 • Diagnostic logging for troubleshooting file indexing issues
+• Premium system for feature access control
 
 ⚠️ Important: Add bot as admin to channels for monitoring and file access
 """
@@ -530,6 +541,17 @@ async def cmd_recent(client, message: Message):
     # Check if user is banned
     if await check_banned(message):
         return
+
+    # Check if feature is premium-only
+    uid = message.from_user.id
+    if await is_feature_premium_only("recent"):
+        # Check if user is premium or admin
+        if not await is_admin(uid) and not await is_premium_user(uid):
+            return await message.reply_text(
+                "⭐ **Premium Feature**\n\n"
+                "The /recent command is a premium-only feature.\n\n"
+                "Contact an admin to get premium access."
+            )
 
     try:
         # Database query with error handling
@@ -1792,6 +1814,16 @@ async def cmd_request(client, message: Message):
         # Check if user is admin (admins bypass rate limits for testing)
         user_is_admin = await is_admin(uid)
 
+        # Check if feature is premium-only
+        if await is_feature_premium_only("request"):
+            # Check if user is premium or admin
+            if not user_is_admin and not await is_premium_user(uid):
+                return await message.reply_text(
+                    "⭐ **Premium Feature**\n\n"
+                    "The /request command is a premium-only feature.\n\n"
+                    "Contact an admin to get premium access."
+                )
+
         # Check rate limits (skip for admins)
         if not user_is_admin:
             can_request, error_msg = await check_rate_limits(uid)
@@ -2245,3 +2277,36 @@ async def send_request_list_page(client, message, all_requests, request_list_id,
         await message.edit_text(list_text, reply_markup=keyboard)
     else:
         await message.reply_text(list_text, reply_markup=keyboard)
+
+
+# -------------------------
+# Premium Management Commands
+# -------------------------
+async def cmd_premium(client, message: Message):
+    """Handle /premium command - Premium management interface"""
+    uid = message.from_user.id
+
+    # Check if user is admin
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+
+    # Create button interface
+    buttons = [
+        [InlineKeyboardButton("Add Users", callback_data="premium:add_users")],
+        [InlineKeyboardButton("Edit Users", callback_data="premium:edit_users")],
+        [InlineKeyboardButton("Remove Users", callback_data="premium:remove_users")],
+        [InlineKeyboardButton("Manage Features", callback_data="premium:manage_features")]
+    ]
+
+    keyboard = InlineKeyboardMarkup(buttons)
+
+    help_text = (
+        "**Premium Management System**\n\n"
+        "**Add Users:** Add users to premium with specified duration\n"
+        "**Edit Users:** Modify premium duration for existing users\n"
+        "**Remove Users:** Remove users from premium\n"
+        "**Manage Features:** Control which features are premium-only\n\n"
+        "Select an option below:"
+    )
+
+    await message.reply_text(help_text, reply_markup=keyboard)

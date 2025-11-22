@@ -394,6 +394,20 @@ async def on_message(client, message):
     # Check for user input waiting (replacement for client.listen)
     if message.chat and message.from_user:
         from .utils import set_user_input
+        from .config import user_input_events
+
+        # Check if this is a premium management input
+        key = f"{message.chat.id}_{message.from_user.id}"
+        if key in user_input_events:
+            input_data = user_input_events[key]
+            # Check if there's a pending premium input type
+            if 'input_type' in input_data and input_data['input_type'].startswith('premium_'):
+                from .premium_commands import handle_premium_user_input
+                await handle_premium_user_input(client, message, input_data['input_type'])
+                # Clean up the event
+                del user_input_events[key]
+                return
+
         set_user_input(message.chat.id, message.from_user.id, message)
 
     # DIAGNOSTIC: Check if this is a command message

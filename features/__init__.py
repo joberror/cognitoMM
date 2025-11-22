@@ -23,6 +23,7 @@ from .config import (
 from .database import (
     mongo, db, movies_col, users_col, channels_col,
     settings_col, logs_col, requests_col, user_request_limits_col,
+    premium_users_col, premium_features_col,
     ensure_indexes, get_user_doc,
     is_admin, is_banned, has_accepted_terms, log_action
 )
@@ -53,6 +54,14 @@ from .tmdb_integration import (
     search_tmdb, format_tmdb_result
 )
 
+from .premium_management import (
+    initialize_premium_features, is_premium_user, get_premium_user,
+    add_premium_user, edit_premium_user, remove_premium_user,
+    get_days_remaining, is_feature_premium_only, toggle_feature,
+    add_premium_feature, get_all_premium_features, get_all_premium_users,
+    cleanup_expired_premium
+)
+
 __all__ = [
     # Config module exports
     'API_ID', 'API_HASH', 'BOT_TOKEN', 'BOT_ID', 'MONGO_URI', 'MONGO_DB',
@@ -65,6 +74,7 @@ __all__ = [
     # Database module exports
     'mongo', 'db', 'movies_col', 'users_col', 'channels_col',
     'settings_col', 'logs_col', 'requests_col', 'user_request_limits_col',
+    'premium_users_col', 'premium_features_col',
     'ensure_indexes', 'get_user_doc',
     'is_admin', 'is_banned', 'has_accepted_terms', 'log_action',
     
@@ -88,7 +98,14 @@ __all__ = [
     'MAX_REQUESTS_PER_DAY_PER_USER', 'MAX_GLOBAL_REQUESTS_PER_DAY',
 
     # TMDb integration module exports
-    'search_tmdb', 'format_tmdb_result'
+    'search_tmdb', 'format_tmdb_result',
+
+    # Premium management module exports
+    'initialize_premium_features', 'is_premium_user', 'get_premium_user',
+    'add_premium_user', 'edit_premium_user', 'remove_premium_user',
+    'get_days_remaining', 'is_feature_premium_only', 'toggle_feature',
+    'add_premium_feature', 'get_all_premium_features', 'get_all_premium_users',
+    'cleanup_expired_premium'
 ]
 
 __version__ = '1.0.0'

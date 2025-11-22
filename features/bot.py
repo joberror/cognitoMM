@@ -84,6 +84,12 @@ async def main():
     await ensure_indexes()
     print("✅ Database indexes ready")
 
+    # Initialize premium features
+    print("🔧 Initializing premium features...")
+    from .premium_management import initialize_premium_features
+    await initialize_premium_features()
+    print("✅ Premium features initialized")
+
     # Create client configuration
     try:
         # Validate required environment variables

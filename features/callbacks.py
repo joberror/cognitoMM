@@ -15,12 +15,13 @@ from hydrogram.enums import ParseMode
 
 # Import from our modules
 from .config import LOG_CHANNEL, client
-from .database import users_col, movies_col, requests_col
-from .config import bulk_downloads
-from .utils import cleanup_expired_bulk_downloads
+from .database import users_col, movies_col, requests_col, premium_users_col, premium_features_col
+from .config import bulk_downloads, temp_data, user_input_events
+from .utils import cleanup_expired_bulk_downloads, wait_for_user_input, set_user_input
 from .file_deletion import track_file_for_deletion
 from .search import format_file_size, send_search_results
 from .user_management import should_process_command_for_user, has_accepted_terms, is_admin, log_action
+from .premium_management import is_premium_user, get_premium_user, add_premium_user, edit_premium_user, remove_premium_user, get_days_remaining, toggle_feature, add_premium_feature, get_all_premium_features, get_all_premium_users
 
 async def callback_handler(client, callback_query: CallbackQuery):
     """Handle inline button callbacks"""
@@ -279,19 +280,28 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
                 # Get All button
                 if total_results > 1:
-                    bulk_id = str(uuid.uuid4())[:8]
-                    bulk_downloads[bulk_id] = {
-                        'files': [{'channel_id': r.get('channel_id'), 'message_id': r.get('message_id')}
-                                 for r in results if r.get('channel_id') and r.get('message_id')][:10],
-                        'created_at': datetime.now(timezone.utc),
-                        'user_id': callback_query.from_user.id
-                    }
-                    nav_row.append(
-                        InlineKeyboardButton(
-                            f"Get All ({total_results})",
-                            callback_data=f"bulk:{bulk_id}"
+                    # Check if Get All is premium-only
+                    show_get_all = True
+                    if await is_feature_premium_only("get_all"):
+                        # Only show if user is premium or admin
+                        uid = callback_query.from_user.id
+                        if not await is_admin(uid) and not await is_premium_user(uid):
+                            show_get_all = False
+
+                    if show_get_all:
+                        bulk_id = str(uuid.uuid4())[:8]
+                        bulk_downloads[bulk_id] = {
+                            'files': [{'channel_id': r.get('channel_id'), 'message_id': r.get('message_id')}
+                                     for r in results if r.get('channel_id') and r.get('message_id')][:10],
+                            'created_at': datetime.now(timezone.utc),
+                            'user_id': callback_query.from_user.id
+                        }
+                        nav_row.append(
+                            InlineKeyboardButton(
+                                f"Get All ({total_results})",
+                                callback_data=f"bulk:{bulk_id}"
+                            )
                         )
-                    )
 
                 # Next button
                 if page < total_pages:
@@ -930,6 +940,205 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
             # Clean up bulk_downloads
             del bulk_downloads[request_list_id]
+
+        # -------------------------
+        # Premium Management Callbacks
+        # -------------------------
+        elif data.startswith("premium:"):
+            # Check if user is admin
+            if not await is_admin(user_id):
+                await callback_query.answer("🚫 Admins only.", show_alert=True)
+                return
+
+            action = data.split(":")[1]
+
+            if action == "add_users":
+                await callback_query.answer()
+                await callback_query.message.edit_text(
+                    "**Add Premium User**\n\n"
+                    "Please send the User ID or Username of the user you want to add to premium.\n\n"
+                    "You can type **CANCEL** to abort."
+                )
+
+                # Set user input event with input_type
+                from .config import user_input_events
+                key = f"{callback_query.message.chat.id}_{user_id}"
+                user_input_events[key] = {'input_type': 'premium_add_user_id', 'event': None, 'message': None}
+
+            elif action == "edit_users":
+                await callback_query.answer()
+                await callback_query.message.edit_text(
+                    "**Edit Premium User**\n\n"
+                    "Please send the User ID or Username of the premium user you want to edit.\n\n"
+                    "You can type **CANCEL** to abort."
+                )
+
+                # Set user input event with input_type
+                from .config import user_input_events
+                key = f"{callback_query.message.chat.id}_{user_id}"
+                user_input_events[key] = {'input_type': 'premium_edit_user_id', 'event': None, 'message': None}
+
+            elif action == "remove_users":
+                await callback_query.answer()
+                await callback_query.message.edit_text(
+                    "**Remove Premium User**\n\n"
+                    "Please send the User ID or Username of the premium user you want to remove.\n\n"
+                    "You can type **CANCEL** to abort."
+                )
+
+                # Set user input event with input_type
+                from .config import user_input_events
+                key = f"{callback_query.message.chat.id}_{user_id}"
+                user_input_events[key] = {'input_type': 'premium_remove_user_id', 'event': None, 'message': None}
+
+            elif action == "manage_features":
+                await callback_query.answer()
+
+                # Get all premium features
+                features = await get_all_premium_features()
+
+                if not features:
+                    await callback_query.message.edit_text(
+                        "❌ No premium features found.\n\n"
+                        "Use /premium to go back."
+                    )
+                    return
+
+                # Create feature list with buttons
+                feature_text = "**Premium Features Management**\n\n"
+                feature_text += "Features marked as ON are premium-only.\n"
+                feature_text += "Features marked as OFF are available to all users.\n\n"
+
+                buttons = []
+                for feature in features:
+                    feature_name = feature.get("feature_name")
+                    description = feature.get("description", feature_name)
+                    enabled = feature.get("enabled", False)
+                    status = "ON" if enabled else "OFF"
+
+                    feature_text += f"**{description}:** {status}\n"
+
+                    button_text = f"[{status}] {description}"
+                    buttons.append([
+                        InlineKeyboardButton(
+                            button_text,
+                            callback_data=f"premium_toggle:{feature_name}"
+                        )
+                    ])
+
+                # Add "Add Feature" button
+                buttons.append([
+                    InlineKeyboardButton(
+                        "Add New Feature",
+                        callback_data="premium:add_feature"
+                    )
+                ])
+
+                # Add back button
+                buttons.append([
+                    InlineKeyboardButton(
+                        "← Back",
+                        callback_data="premium:back"
+                    )
+                ])
+
+                keyboard = InlineKeyboardMarkup(buttons)
+                await callback_query.message.edit_text(feature_text, reply_markup=keyboard)
+
+            elif action == "add_feature":
+                await callback_query.answer()
+                await callback_query.message.edit_text(
+                    "**Add New Premium Feature**\n\n"
+                    "Please send the feature name (e.g., 'bulk_download', 'advanced_search').\n\n"
+                    "You can type **CANCEL** to abort."
+                )
+
+                # Set user input event with input_type
+                from .config import user_input_events
+                key = f"{callback_query.message.chat.id}_{user_id}"
+                user_input_events[key] = {'input_type': 'premium_add_feature_name', 'event': None, 'message': None}
+
+            elif action == "back":
+                await callback_query.answer()
+                # Recreate the main premium menu
+                buttons = [
+                    [InlineKeyboardButton("Add Users", callback_data="premium:add_users")],
+                    [InlineKeyboardButton("Edit Users", callback_data="premium:edit_users")],
+                    [InlineKeyboardButton("Remove Users", callback_data="premium:remove_users")],
+                    [InlineKeyboardButton("Manage Features", callback_data="premium:manage_features")]
+                ]
+
+                keyboard = InlineKeyboardMarkup(buttons)
+
+                help_text = (
+                    "**Premium Management System**\n\n"
+                    "**Add Users:** Add users to premium with specified duration\n"
+                    "**Edit Users:** Modify premium duration for existing users\n"
+                    "**Remove Users:** Remove users from premium\n"
+                    "**Manage Features:** Control which features are premium-only\n\n"
+                    "Select an option below:"
+                )
+
+                await callback_query.message.edit_text(help_text, reply_markup=keyboard)
+
+        elif data.startswith("premium_toggle:"):
+            # Check if user is admin
+            if not await is_admin(user_id):
+                await callback_query.answer("🚫 Admins only.", show_alert=True)
+                return
+
+            feature_name = data.split(":")[1]
+
+            # Toggle the feature
+            success, message, new_state = await toggle_feature(feature_name, user_id)
+
+            if success:
+                await callback_query.answer(f"✅ {message}")
+
+                # Refresh the feature list
+                features = await get_all_premium_features()
+
+                feature_text = "**Premium Features Management**\n\n"
+                feature_text += "Features marked as ON are premium-only.\n"
+                feature_text += "Features marked as OFF are available to all users.\n\n"
+
+                buttons = []
+                for feature in features:
+                    fname = feature.get("feature_name")
+                    description = feature.get("description", fname)
+                    enabled = feature.get("enabled", False)
+                    status = "ON" if enabled else "OFF"
+
+                    feature_text += f"**{description}:** {status}\n"
+
+                    button_text = f"[{status}] {description}"
+                    buttons.append([
+                        InlineKeyboardButton(
+                            button_text,
+                            callback_data=f"premium_toggle:{fname}"
+                        )
+                    ])
+
+                # Add "Add Feature" button
+                buttons.append([
+                    InlineKeyboardButton(
+                        "Add New Feature",
+                        callback_data="premium:add_feature"
+                    )
+                ])
+
+                # Add back button
+                buttons.append([
+                    InlineKeyboardButton(
+                        "← Back",
+                        callback_data="premium:back"
+                    )
+                ])
+
+                keyboard = InlineKeyboardMarkup(buttons)
+                await callback_query.message.edit_text(feature_text, reply_markup=keyboard)
+            else:
+                await callback_query.answer(f"❌ {message}", show_alert=True)
 
         else:
             await callback_query.answer("❌ Unknown action.", show_alert=True)
