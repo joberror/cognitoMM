@@ -407,7 +407,6 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 # Toggle the auto-indexing setting
                 from .database import settings_col, channels_col, movies_col
                 from .config import AUTO_INDEX_DEFAULT
-                from .user_management import log_action
 
                 uid = callback_query.from_user.id
                 doc = await settings_col.find_one({"k": "auto_indexing"})
