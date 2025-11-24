@@ -30,6 +30,12 @@ FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", "68"))
 AUTO_INDEX_DEFAULT = os.getenv("AUTO_INDEXING", "True").lower() in ("1", "true", "yes")
 TMDB_API = os.getenv("TMDB_API", "")               # TMDb API key for request feature
 
+# Broadcast Configuration
+BROADCAST_RATE_LIMIT = int(os.getenv("BROADCAST_RATE_LIMIT", "25"))  # messages per second
+BROADCAST_PROGRESS_INTERVAL = int(os.getenv("BROADCAST_PROGRESS_INTERVAL", "100"))  # users
+BROADCAST_TEST_MODE = os.getenv("BROADCAST_TEST_MODE", "False").lower() in ("1", "true", "yes")
+BROADCAST_TEST_USERS = [int(x) for x in os.getenv("BROADCAST_TEST_USERS", "").split(",") if x.strip()]
+
 # -------------------------
 # Global Variables
 # -------------------------

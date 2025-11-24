@@ -28,6 +28,7 @@ from .search import format_file_size, group_recent_content, format_recent_output
 from .request_management import check_rate_limits, update_user_limits, check_duplicate_request, validate_imdb_link, get_queue_position, MAX_PENDING_REQUESTS_PER_USER
 from .tmdb_integration import search_tmdb, format_tmdb_result
 from .premium_management import is_premium_user, get_premium_user, add_premium_user, edit_premium_user, remove_premium_user, get_days_remaining, is_feature_premium_only, toggle_feature, add_premium_feature, get_all_premium_features, get_all_premium_users
+from .broadcast import cmd_broadcast
 
 # -------------------------
 # Command Handler
@@ -121,6 +122,8 @@ async def handle_command(client, message: Message):
         await cmd_manual_deletion(client, message)
     elif command == 'premium':
         await cmd_premium(client, message)
+    elif command == 'broadcast':
+        await cmd_broadcast(client, message)
     else:
         # Unknown command
         await message.reply_text("❓ Unknown command. Use /help to see available commands.")
@@ -154,6 +157,13 @@ USER_HELP = """
 
 ADMIN_HELP = """
 👑 Admin Commands
+
+📢 Broadcasting
+/broadcast [message]       - Send message to all eligible users
+  • Interactive mode if no message provided
+  • Shows progress and statistics
+  • Logs all broadcasts for audit
+  • Rate limited to prevent API bans
 
 📝 Request Management
 /request_list              - View and manage user requests

@@ -32,6 +32,7 @@ requests_col = db["requests"]
 user_request_limits_col = db["user_request_limits"]
 premium_users_col = db["premium_users"]
 premium_features_col = db["premium_features"]
+broadcasts_col = db["broadcasts"]
 
 async def ensure_indexes():
     """Create database indexes with error handling"""
@@ -57,11 +58,15 @@ async def ensure_indexes():
             (user_request_limits_col, [("user_id", 1)], "limits user_id index"),
             (premium_users_col, [("user_id", 1)], "premium user_id index"),
             (premium_features_col, [("feature_name", 1)], "premium feature_name index"),
+            (broadcasts_col, [("broadcast_id", 1)], "broadcast_id index"),
+            (broadcasts_col, [("admin_id", 1)], "broadcast admin_id index"),
+            (broadcasts_col, [("started_at", -1)], "broadcast started_at index"),
+            (broadcasts_col, [("status", 1)], "broadcast status index"),
         ]
         
         for collection, index_spec, description in indexes_to_create:
             try:
-                if description in ["user_id index", "channel_id index", "limits user_id index", "premium user_id index", "premium feature_name index"]:
+                if description in ["user_id index", "channel_id index", "limits user_id index", "premium user_id index", "premium feature_name index", "broadcast_id index"]:
                     await collection.create_index(index_spec, unique=True)
                 else:
                     await collection.create_index(index_spec)
