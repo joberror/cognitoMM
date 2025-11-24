@@ -21,7 +21,7 @@ from .utils import cleanup_expired_bulk_downloads, wait_for_user_input, set_user
 from .file_deletion import track_file_for_deletion
 from .search import format_file_size, send_search_results
 from .user_management import should_process_command_for_user, has_accepted_terms, is_admin, log_action
-from .premium_management import is_premium_user, get_premium_user, add_premium_user, edit_premium_user, remove_premium_user, get_days_remaining, toggle_feature, add_premium_feature, get_all_premium_features, get_all_premium_users
+from .premium_management import is_premium_user, get_premium_user, add_premium_user, edit_premium_user, remove_premium_user, get_days_remaining, is_feature_premium_only, toggle_feature, add_premium_feature, get_all_premium_features, get_all_premium_users
 
 async def callback_handler(client, callback_query: CallbackQuery):
     """Handle inline button callbacks"""
