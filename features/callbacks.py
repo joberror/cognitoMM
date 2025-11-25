@@ -1081,6 +1081,85 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
                 await callback_query.message.edit_text(help_text, reply_markup=keyboard)
 
+        elif data.startswith("stats_export:"):
+            # Handle statistics export callbacks
+            if not await is_admin(user_id):
+                await callback_query.answer("🚫 Admins only.", show_alert=True)
+                return
+            
+            parts = data.split(":")
+            export_format = parts[1]  # json or csv
+            stats_id = parts[2]
+            
+            # Retrieve stats data
+            if stats_id not in bulk_downloads:
+                await callback_query.answer("❌ Statistics expired. Use /stat again.", show_alert=True)
+                return
+            
+            stats_data = bulk_downloads[stats_id]
+            
+            # Verify it's a stats export
+            if stats_data.get('type') != 'stats_export':
+                await callback_query.answer("❌ Invalid data.", show_alert=True)
+                return
+            
+            stats = stats_data['stats']
+            
+            await callback_query.answer(f"📥 Generating {export_format.upper()} export...")
+            
+            try:
+                if export_format == 'json':
+                    from .statistics import export_stats_json
+                    export_data = await export_stats_json(stats)
+                    
+                    if export_data:
+                        # Create filename
+                        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                        filename = f"bot_stats_{timestamp}.json"
+                        
+                        # Send as document
+                        await client.send_document(
+                            chat_id=callback_query.from_user.id,
+                            document=export_data.encode('utf-8'),
+                            file_name=filename,
+                            caption=f"📊 **Bot Statistics Export**\n\nFormat: JSON\nGenerated: {timestamp}"
+                        )
+                        
+                        await callback_query.message.reply_text("✅ JSON export sent successfully!")
+                    else:
+                        await callback_query.answer("❌ Failed to generate JSON export.", show_alert=True)
+                
+                elif export_format == 'csv':
+                    from .statistics import export_stats_csv
+                    export_data = await export_stats_csv(stats)
+                    
+                    if export_data:
+                        # Create filename
+                        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                        filename = f"bot_stats_{timestamp}.csv"
+                        
+                        # Send as document
+                        await client.send_document(
+                            chat_id=callback_query.from_user.id,
+                            document=export_data.encode('utf-8'),
+                            file_name=filename,
+                            caption=f"📊 **Bot Statistics Export**\n\nFormat: CSV\nGenerated: {timestamp}"
+                        )
+                        
+                        await callback_query.message.reply_text("✅ CSV export sent successfully!")
+                    else:
+                        await callback_query.answer("❌ Failed to generate CSV export.", show_alert=True)
+                
+                # Log export action
+                await log_action("stats_exported", by=user_id, extra={
+                    "format": export_format,
+                    "stats_id": stats_id
+                })
+                
+            except Exception as e:
+                print(f"❌ Export error: {e}")
+                await callback_query.answer("❌ Export failed. Please try again.", show_alert=True)
+        
         elif data.startswith("premium_toggle:"):
             # Check if user is admin
             if not await is_admin(user_id):

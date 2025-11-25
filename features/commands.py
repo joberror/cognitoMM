@@ -29,6 +29,14 @@ from .request_management import check_rate_limits, update_user_limits, check_dup
 from .tmdb_integration import search_tmdb, format_tmdb_result
 from .premium_management import is_premium_user, get_premium_user, add_premium_user, edit_premium_user, remove_premium_user, get_days_remaining, is_feature_premium_only, toggle_feature, add_premium_feature, get_all_premium_features, get_all_premium_users
 from .broadcast import cmd_broadcast
+from .statistics import (
+    collect_comprehensive_stats,
+    collect_quick_stats,
+    format_stats_output,
+    format_quick_stats_output,
+    export_stats_json,
+    export_stats_csv
+)
 
 # -------------------------
 # Command Handler
@@ -124,6 +132,10 @@ async def handle_command(client, message: Message):
         await cmd_premium(client, message)
     elif command == 'broadcast':
         await cmd_broadcast(client, message)
+    elif command == 'stat':
+        await cmd_stat(client, message)
+    elif command == 'quickstat':
+        await cmd_quickstat(client, message)
     else:
         # Unknown command
         await message.reply_text("❓ Unknown command. Use /help to see available commands.")
@@ -157,6 +169,16 @@ USER_HELP = """
 
 ADMIN_HELP = """
 👑 Admin Commands
+
+📊 Statistics & Analytics
+/stat                      - Comprehensive bot statistics dashboard
+  • User analytics (total, active, premium, banned)
+  • Content breakdown (movies, series, quality distribution)
+  • Channel performance metrics
+  • System health and indexing stats
+  • Activity trends and top searches
+  • Export to JSON/CSV formats
+/quickstat                 - Quick summary of key metrics
 
 📢 Broadcasting
 /broadcast [message]       - Send message to all eligible users
@@ -2287,6 +2309,137 @@ async def send_request_list_page(client, message, all_requests, request_list_id,
         await message.edit_text(list_text, reply_markup=keyboard)
     else:
         await message.reply_text(list_text, reply_markup=keyboard)
+
+
+# -------------------------
+# Statistics Commands
+# -------------------------
+async def cmd_stat(client, message: Message):
+    """Display comprehensive bot statistics dashboard"""
+    uid = message.from_user.id
+    
+    # Admin check
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+    
+    try:
+        # Show loading message
+        loading_msg = await message.reply_text(
+            "📊 **Generating Statistics Dashboard...**\n\n"
+            "⏳ Collecting data from database...\n"
+            "Please wait, this may take a moment."
+        )
+        
+        # Set timeout for data collection (30 seconds)
+        try:
+            stats = await asyncio.wait_for(collect_comprehensive_stats(admin_id=uid), timeout=30.0)
+        except asyncio.TimeoutError:
+            await loading_msg.edit_text(
+                "⏰ **Timeout**\n\n"
+                "Statistics collection took too long.\n"
+                "Try using /quickstat for a faster summary."
+            )
+            return
+        
+        if not stats:
+            await loading_msg.edit_text(
+                "❌ **Error**\n\n"
+                "Failed to collect statistics.\n"
+                "Please try again later."
+            )
+            return
+        
+        # Format and send statistics
+        output = format_stats_output(stats)
+        
+        # Store stats for export
+        stats_id = str(uuid.uuid4())[:8]
+        bulk_downloads[stats_id] = {
+            'type': 'stats_export',
+            'stats': stats,
+            'created_at': datetime.now(timezone.utc),
+            'user_id': uid
+        }
+        
+        # Create export buttons
+        buttons = [
+            [
+                InlineKeyboardButton("📥 Export JSON", callback_data=f"stats_export:json:{stats_id}"),
+                InlineKeyboardButton("📥 Export CSV", callback_data=f"stats_export:csv:{stats_id}")
+            ]
+        ]
+        keyboard = InlineKeyboardMarkup(buttons)
+        
+        # Send statistics
+        await loading_msg.edit_text(output, reply_markup=keyboard, disable_web_page_preview=True)
+        
+        # Log action
+        await log_action("stat_command", by=uid, extra={
+            "stats_id": stats_id,
+            "total_users": stats.get('total_users', 0),
+            "total_content": stats.get('total_content', 0)
+        })
+        
+    except Exception as e:
+        await log_action("stat_command_error", by=uid, extra={"error": str(e)})
+        await message.reply_text(
+            "❌ **Error**\n\n"
+            "An error occurred while generating statistics.\n"
+            "Please try again later."
+        )
+        print(f"❌ Statistics error for user {uid}: {e}")
+
+
+async def cmd_quickstat(client, message: Message):
+    """Display quick statistics summary"""
+    uid = message.from_user.id
+    
+    # Admin check
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+    
+    try:
+        # Show loading message
+        loading_msg = await message.reply_text("📊 **Generating Quick Stats...**")
+        
+        # Collect quick stats with timeout
+        try:
+            stats = await asyncio.wait_for(collect_quick_stats(), timeout=10.0)
+        except asyncio.TimeoutError:
+            await loading_msg.edit_text(
+                "⏰ **Timeout**\n\n"
+                "Statistics collection took too long.\n"
+                "Please try again later."
+            )
+            return
+        
+        if not stats:
+            await loading_msg.edit_text(
+                "❌ **Error**\n\n"
+                "Failed to collect statistics.\n"
+                "Please try again later."
+            )
+            return
+        
+        # Format and send quick stats
+        output = format_quick_stats_output(stats)
+        
+        await loading_msg.edit_text(output, disable_web_page_preview=True)
+        
+        # Log action
+        await log_action("quickstat_command", by=uid, extra={
+            "total_users": stats.get('total_users', 0),
+            "total_content": stats.get('total_content', 0)
+        })
+        
+    except Exception as e:
+        await log_action("quickstat_command_error", by=uid, extra={"error": str(e)})
+        await message.reply_text(
+            "❌ **Error**\n\n"
+            "An error occurred while generating statistics.\n"
+            "Please try again later."
+        )
+        print(f"❌ Quick statistics error for user {uid}: {e}")
 
 
 # -------------------------

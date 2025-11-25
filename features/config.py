@@ -7,6 +7,7 @@ and initialization code for the Movie Bot application.
 
 import os
 import sys
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -14,6 +15,9 @@ load_dotenv()
 
 print(f"🐍 Python {sys.version}")
 print("🎬 MovieBot - Bot Session")
+
+# Bot start time for uptime tracking
+BOT_START_TIME = datetime.now(timezone.utc)
 
 # -------------------------
 # CONFIG / ENV
