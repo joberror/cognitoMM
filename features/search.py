@@ -554,13 +554,25 @@ async def cmd_recent(client, message: Message):
 async def inline_handler(client, inline_query):
     """Handle inline queries for the bot"""
     from .config import FUZZY_THRESHOLD
-    from .database import movies_col
+    from .database import movies_col, users_col
     from fuzzywuzzy import fuzz
     from hydrogram.types import InlineQueryResultArticle, InputTextMessageContent
+    from datetime import datetime, timezone
     
     query = inline_query.query.strip()
     if not query:
         return
+    
+    # Track inline search
+    user_id = inline_query.from_user.id
+    try:
+        await users_col.update_one(
+            {"user_id": user_id},
+            {"$inc": {"inline_search_count": 1}},
+            upsert=True
+        )
+    except Exception as e:
+        print(f"⚠️ Failed to track inline search for user {user_id}: {e}")
     
     # Search for movies matching the query
     results = []

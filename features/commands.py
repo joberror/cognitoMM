@@ -35,7 +35,9 @@ from .statistics import (
     format_stats_output,
     format_quick_stats_output,
     export_stats_json,
-    export_stats_csv
+    export_stats_csv,
+    collect_user_stats,
+    format_user_stats_output
 )
 
 # -------------------------
@@ -89,6 +91,8 @@ async def handle_command(client, message: Message):
         await cmd_my_history(client, message)
     elif command == 'my_prefs':
         await cmd_my_prefs(client, message)
+    elif command == 'my_stat':
+        await cmd_my_stat(client, message)
     elif command == 'request':
         await cmd_request(client, message)
     # Admin commands
@@ -152,6 +156,7 @@ USER_HELP = """
 /recent                   - Show recently added content
 /my_history               - Show your search history
 /my_prefs                 - Show or set preferences
+/my_stat                  - View your personal statistics
 /request                  - Request a movie or series
 /help                     - Show this message
 
@@ -160,6 +165,11 @@ USER_HELP = """
 • Use -e for exact title matches
 • Normal search combines exact + fuzzy results
 • Exact search finds perfect title matches only
+
+📊 Personal Stats:
+• View your searches, downloads, and activity level
+• Track your premium status and expiry date
+• Monitor your request history
 
 📝 Request Feature:
 • Submit requests for movies/series not in the database
@@ -565,7 +575,43 @@ async def cmd_my_prefs(client, message: Message):
         key = parts[1]
         value = " ".join(parts[2:])
         await users_col.update_one({"user_id": uid}, {"$set": {f"preferences.{key}": value}}, upsert=True)
-        await message.reply_text(f"Set preference `{key}` = `{value}`")
+
+async def cmd_my_stat(client, message: Message):
+    """Display comprehensive user statistics"""
+    uid = message.from_user.id
+    
+    # Send "loading" message
+    status_msg = await message.reply_text("📊 Collecting your statistics...")
+    
+    try:
+        # Collect user statistics
+        stats = await collect_user_stats(uid)
+        
+        if not stats:
+            await status_msg.edit_text(
+                "❌ **Unable to retrieve statistics**\n\n"
+                "Your user profile might not be fully initialized yet.\n"
+                "Try using the bot for a while and check back later!"
+            )
+            return
+        
+        # Format and send statistics
+        output = format_user_stats_output(stats)
+        await status_msg.edit_text(output, parse_mode=ParseMode.HTML)
+        
+        # Log the action
+        await log_action("my_stat_viewed", by=uid)
+        
+    except Exception as e:
+        print(f"❌ Error in cmd_my_stat: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        await status_msg.edit_text(
+            "❌ **Error retrieving statistics**\n\n"
+            "An error occurred while collecting your statistics.\n"
+            "Please try again later or contact an admin if the issue persists."
+        )
 
 async def cmd_recent(client, message: Message):
     """Handle /recent command to display recently added content"""

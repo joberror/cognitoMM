@@ -197,6 +197,10 @@ async def collect_comprehensive_stats(admin_id=None):
         for pu in premium_users:
             expires_at = pu.get('expires_at')
             if expires_at:
+                # Ensure expires_at is timezone-aware
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                
                 days_remaining = (expires_at - datetime.now(timezone.utc)).days
                 days_remaining = max(0, days_remaining)
                 premium_details.append({
@@ -693,3 +697,254 @@ async def export_stats_csv(stats):
     except Exception as e:
         print(f"❌ Error exporting to CSV: {e}")
         return None
+
+
+async def collect_user_stats(user_id: int):
+    """
+    Collect comprehensive statistics for a specific user
+    
+    Args:
+        user_id: Telegram user ID
+        
+    Returns:
+        Dictionary containing all user statistics
+    """
+    try:
+        stats = {}
+        
+        # Get user document
+        user_doc = await users_col.find_one({"user_id": user_id})
+        if not user_doc:
+            return None
+            
+        # Basic user information
+        stats['user_id'] = user_id
+        stats['username'] = user_doc.get('username', 'N/A')
+        stats['first_name'] = user_doc.get('first_name', 'User')
+        stats['role'] = user_doc.get('role', 'user')
+        
+        # Join date (terms_accepted_at or first document creation)
+        stats['joined_date'] = user_doc.get('terms_accepted_at') or user_doc.get('_id').generation_time if hasattr(user_doc.get('_id'), 'generation_time') else None
+        stats['last_seen'] = user_doc.get('last_seen')
+        
+        # Premium information
+        premium_doc = await premium_users_col.find_one({"user_id": user_id})
+        if premium_doc:
+            stats['is_premium'] = True
+            stats['premium_since'] = premium_doc.get('granted_at')
+            stats['premium_expires'] = premium_doc.get('expires_at')
+            stats['premium_granted_by'] = premium_doc.get('granted_by')
+            
+            # Calculate days remaining
+            if stats['premium_expires']:
+                # Ensure premium_expires is timezone-aware
+                premium_expires = stats['premium_expires']
+                if premium_expires.tzinfo is None:
+                    premium_expires = premium_expires.replace(tzinfo=timezone.utc)
+                
+                days_left = (premium_expires - datetime.now(timezone.utc)).days
+                stats['premium_days_remaining'] = max(0, days_left)
+            else:
+                stats['premium_days_remaining'] = 0
+        else:
+            stats['is_premium'] = False
+            stats['premium_since'] = None
+            stats['premium_expires'] = None
+            stats['premium_days_remaining'] = 0
+        
+        # Search statistics
+        search_history = user_doc.get('search_history', [])
+        stats['total_searches'] = len(search_history)
+        stats['unique_searches'] = len(set([s.get('q', '').lower() for s in search_history if s.get('q')]))
+        
+        # Get recent searches (last 5)
+        recent_searches = sorted(search_history, key=lambda x: x.get('ts', datetime.min.replace(tzinfo=timezone.utc)), reverse=True)[:5]
+        stats['recent_searches'] = [{'query': s.get('q'), 'timestamp': s.get('ts')} for s in recent_searches]
+        
+        # Download statistics
+        stats['total_downloads'] = user_doc.get('download_count', 0)
+        download_history = user_doc.get('download_history', [])
+        stats['download_history_count'] = len(download_history)
+        
+        # Inline search statistics
+        stats['inline_searches'] = user_doc.get('inline_search_count', 0)
+        
+        # Request statistics
+        total_requests = await requests_col.count_documents({"user_id": user_id})
+        pending_requests = await requests_col.count_documents({"user_id": user_id, "status": "pending"})
+        completed_requests = await requests_col.count_documents({"user_id": user_id, "status": "completed"})
+        
+        stats['total_requests'] = total_requests
+        stats['pending_requests'] = pending_requests
+        stats['completed_requests'] = completed_requests
+        
+        # Activity calculation
+        # Activity is based on: searches, downloads, requests, and recency
+        activity_score = 0
+        
+        # Search activity (max 30 points)
+        if stats['total_searches'] > 0:
+            activity_score += min(30, stats['total_searches'] * 2)
+        
+        # Download activity (max 30 points)
+        if stats['total_downloads'] > 0:
+            activity_score += min(30, stats['total_downloads'] * 3)
+        
+        # Request activity (max 20 points)
+        if stats['total_requests'] > 0:
+            activity_score += min(20, stats['total_requests'] * 5)
+        
+        # Recency bonus (max 20 points)
+        if stats['last_seen']:
+            # Ensure last_seen is timezone-aware
+            last_seen = stats['last_seen']
+            if last_seen.tzinfo is None:
+                # If naive, assume it's UTC
+                last_seen = last_seen.replace(tzinfo=timezone.utc)
+            
+            days_since_last_seen = (datetime.now(timezone.utc) - last_seen).days
+            if days_since_last_seen == 0:
+                activity_score += 20
+            elif days_since_last_seen <= 7:
+                activity_score += 15
+            elif days_since_last_seen <= 30:
+                activity_score += 10
+            elif days_since_last_seen <= 90:
+                activity_score += 5
+        
+        stats['activity_percentage'] = min(100, activity_score)
+        
+        # Account age in days
+        if stats['joined_date']:
+            # Ensure joined_date is timezone-aware
+            joined_date = stats['joined_date']
+            if joined_date.tzinfo is None:
+                joined_date = joined_date.replace(tzinfo=timezone.utc)
+            
+            account_age = (datetime.now(timezone.utc) - joined_date).days
+            stats['account_age_days'] = account_age
+        else:
+            stats['account_age_days'] = 0
+            
+        return stats
+        
+    except Exception as e:
+        print(f"❌ Error collecting user stats: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def format_user_stats_output(stats):
+    """
+    Format user statistics into a beautiful, readable HTML/markdown output
+    
+    Args:
+        stats: Dictionary containing user statistics
+        
+    Returns:
+        Formatted HTML string with user statistics for Telegram
+    """
+    if not stats:
+        return "❌ Unable to retrieve your statistics."
+    
+    output = []
+    
+    # Header with user info
+    username_display = f"@{stats['username']}" if stats['username'] and stats['username'] != 'N/A' else f"<code>{stats['user_id']}</code>"
+    output.append(f"<b>📊 {stats['first_name']}'s Statistics</b>")
+    output.append(f"{username_display}")
+    output.append("")
+    
+    # Role badge
+    role = stats['role']
+    if role == 'admin':
+        role_badge = "⭐ Admin"
+    elif role == 'banned':
+        role_badge = "🚫 Banned"
+    else:
+        role_badge = "✅ Active"
+    output.append(f"<b>Status:</b> {role_badge}")
+    output.append("")
+    
+    # Account info
+    output.append("<b>📅 Account Overview</b>")
+    
+    # Membership info
+    if stats['joined_date']:
+        joined_str = stats['joined_date'].strftime("%b %d, %Y")
+        output.append(f"<b>Joined:</b> {joined_str} <i>({stats['account_age_days']}d ago)</i>")
+    else:
+        output.append(f"<b>Joined:</b> Unknown")
+    
+    if stats['last_seen']:
+        # Ensure last_seen is timezone-aware for comparison
+        last_seen = stats['last_seen']
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        
+        days_ago = (datetime.now(timezone.utc) - last_seen).days
+        if days_ago == 0:
+            last_seen_display = "Today"
+        elif days_ago == 1:
+            last_seen_display = "Yesterday"
+        else:
+            last_seen_display = f"{days_ago}d ago"
+        output.append(f"<b>Last Seen:</b> {last_seen_display}")
+    else:
+        output.append(f"<b>Last Seen:</b> Unknown")
+    output.append("")
+    
+    # Premium status
+    output.append("<b>💎 Premium Status</b>")
+    if stats['is_premium']:
+        days_left = stats['premium_days_remaining']
+        if stats['premium_expires']:
+            expires_str = stats['premium_expires'].strftime("%b %d, %Y")
+            # Status indicator based on days remaining
+            if days_left > 30:
+                status_sym = "🟢"
+            elif days_left > 7:
+                status_sym = "🟡"
+            else:
+                status_sym = "🔴"
+            output.append(f"{status_sym} <b>Active</b> - Expires: <code>{expires_str}</code>")
+            output.append(f"<b>Days Remaining:</b> {days_left}")
+        else:
+            output.append(f"♾️ <b>Lifetime Premium</b>")
+    else:
+        output.append(f"🆓 Free User")
+    output.append("")
+    
+    # Activity section with progress bar
+    output.append("<b>📈 Activity Level</b>")
+    activity = stats['activity_percentage']
+    bar_length = 20
+    filled = int(activity / 5)  # 20 bars for 100%
+    bar = "█" * filled + "░" * (bar_length - filled)
+    output.append(f"<code>[{bar}] {activity}%</code>")
+    output.append("")
+    
+    # Stats summary in simple format
+    output.append("<b>📊 Usage Statistics</b>")
+    output.append(f"<b>Searches:</b> {stats['total_searches']} <i>({stats['unique_searches']} unique)</i>")
+    output.append(f"<b>Requests:</b> {stats['total_requests']} total")
+    output.append(f"  • Completed: {stats['completed_requests']}")
+    output.append(f"  • Pending: {stats['pending_requests']}")
+    output.append("")
+    
+    # Recent searches in compact list
+    if stats['recent_searches']:
+        output.append("<b>🔍 Recent Searches</b>")
+        for i, search in enumerate(stats['recent_searches'][:5], 1):
+            query = search['query']
+            if len(query) > 40:
+                query = query[:37] + "..."
+            output.append(f"{i}. <code>{query}</code>")
+        output.append("")
+    
+    # Footer
+    output.append("─" * 30)
+    output.append("<i>Keep using the bot to boost your activity!</i>")
+    
+    return "\n".join(output)

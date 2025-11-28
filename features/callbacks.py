@@ -97,6 +97,23 @@ async def callback_handler(client, callback_query: CallbackQuery):
             message_id = int(message_id)
 
             await callback_query.answer("📥 Fetching file...")
+            
+            # Track download
+            try:
+                await users_col.update_one(
+                    {"user_id": user_id},
+                    {
+                        "$inc": {"download_count": 1},
+                        "$push": {"download_history": {
+                            "channel_id": channel_id,
+                            "message_id": message_id,
+                            "ts": datetime.now(timezone.utc)
+                        }}
+                    },
+                    upsert=True
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to track download for user {user_id}: {e}")
 
             try:
                 # Get the message from the channel to extract media
@@ -532,6 +549,23 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
             files = bulk_data['files']
             await callback_query.answer(f"📦 Fetching {len(files)} files...")
+            
+            # Track bulk download
+            try:
+                await users_col.update_one(
+                    {"user_id": user_id},
+                    {
+                        "$inc": {"download_count": len(files)},
+                        "$push": {"download_history": {
+                            "bulk": True,
+                            "file_count": len(files),
+                            "ts": datetime.now(timezone.utc)
+                        }}
+                    },
+                    upsert=True
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to track bulk download for user {user_id}: {e}")
 
             success_count = 0
             failed_files = []
