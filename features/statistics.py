@@ -389,51 +389,55 @@ def format_file_size_stat(bytes_size):
 
 
 def format_stats_output(stats):
-    """Format statistics into a beautiful dashboard"""
-    output = "```\n"
-    output += "╔════════════════════════════════════════════════╗\n"
-    output += "║       🎬 BOT STATISTICS DASHBOARD 📊          ║\n"
-    output += "╚════════════════════════════════════════════════╝\n\n"
+    """Format statistics into a beautiful dashboard with HTML formatting"""
+    output = []
+    
+    output.append("📊 <b>BOT STATISTICS DASHBOARD</b>")
+    output.append("")
     
     # === BOT INFORMATION ===
     bot_info = stats.get('bot_info', {})
     if bot_info:
-        output += "┌─────────────────────────────────────────────┐\n"
-        output += "│  🤖 BOT INFORMATION                         │\n"
-        output += "└─────────────────────────────────────────────┘\n\n"
+        output.append("<b>BOT INFORMATION</b>")
+        output.append("")
         
-        output += f"Bot Name:           {bot_info.get('bot_name', 'Unknown')}\n"
-        output += f"Username:           @{bot_info.get('bot_username', 'Unknown')}\n"
-        output += f"Bot ID:             {bot_info.get('bot_id', 'Unknown')}\n"
+        output.append(f"┎ <b>Bot Name:</b> {bot_info.get('bot_name', 'Unknown')}")
+        output.append(f"┠ <b>Username:</b> @{bot_info.get('bot_username', 'Unknown')}")
+        output.append(f"┠ <b>Bot ID:</b> <code>{bot_info.get('bot_id', 'Unknown')}</code>")
         
         if bot_info.get('bot_dc_id'):
-            output += f"Data Center:        DC-{bot_info.get('bot_dc_id')}\n"
+            output.append(f"┠ <b>Data Center:</b> DC-{bot_info.get('bot_dc_id')}")
         
-        output += f"\nUptime:             {bot_info.get('uptime_formatted', 'Unknown')}\n"
+        output.append("")
+        output.append(f"┠ <b>Uptime:</b> {bot_info.get('uptime_formatted', 'Unknown')}")
         
         start_time = bot_info.get('start_time', '')
         if start_time:
             try:
                 start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
                 start_formatted = start_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-                output += f"Started:            {start_formatted}\n"
+                output.append(f"┠ <b>Started:</b> <code>{start_formatted}</code>")
             except:
                 pass
         
-        output += f"\nPython:             {bot_info.get('python_version', 'Unknown')}\n"
-        output += f"Platform:           {bot_info.get('platform', 'Unknown')} {bot_info.get('platform_release', '')}\n"
-        output += f"Architecture:       {bot_info.get('architecture', 'Unknown')}\n"
+        output.append("")
+        output.append(f"┠ <b>Python:</b> {bot_info.get('python_version', 'Unknown')}")
+        output.append(f"┠ <b>Platform:</b> {bot_info.get('platform', 'Unknown')} {bot_info.get('platform_release', '')}")
+        output.append(f"┠ <b>Architecture:</b> {bot_info.get('architecture', 'Unknown')}")
         
         # Admin who invoked
         if bot_info.get('invoked_by_admin_id'):
-            output += f"\nInvoked by:         {bot_info.get('invoked_by_username', 'Unknown')} (ID: {bot_info.get('invoked_by_admin_id')})\n"
+            output.append("")
+            output.append(f"┖ <b>Invoked by:</b> {bot_info.get('invoked_by_username', 'Unknown')} <i>(ID: {bot_info.get('invoked_by_admin_id')})</i>")
+        else:
+            # If no invoked_by, close the last line
+            output[-1] = output[-1].replace("┠", "┖", 1)
         
-        output += "\n"
+        output.append("")
     
     # === USER STATISTICS ===
-    output += "┌─────────────────────────────────────────────┐\n"
-    output += "│  👥 USER STATISTICS                         │\n"
-    output += "└─────────────────────────────────────────────┘\n\n"
+    output.append("<b>USER STATISTICS</b>")
+    output.append("")
     
     total_users = stats.get('total_users', 0)
     active_users = stats.get('active_users_7d', 0)
@@ -441,158 +445,187 @@ def format_stats_output(stats):
     admin_users = stats.get('admin_users', 0)
     premium_users = stats.get('premium_users', 0)
     
-    output += f"Total Users:        {format_number(total_users)}\n"
-    output += f"Active (7d):        {format_number(active_users)} ({format_percentage(active_users, total_users)})\n"
-    output += f"Premium Users:      {format_number(premium_users)} ({format_percentage(premium_users, total_users)})\n"
-    output += f"Admin Users:        {format_number(admin_users)}\n"
-    output += f"Banned Users:       {format_number(banned_users)}\n\n"
+    output.append(f"┎ <b>Total Users:</b> {format_number(total_users)}")
+    output.append(f"┠ <b>Active (7d):</b> {format_number(active_users)} <i>({format_percentage(active_users, total_users)})</i>")
+    output.append(f"┠ <b>Premium Users:</b> {format_number(premium_users)} <i>({format_percentage(premium_users, total_users)})</i>")
+    output.append(f"┠ <b>Admin Users:</b> {format_number(admin_users)}")
+    output.append(f"┠ <b>Banned Users:</b> {format_number(banned_users)}")
+    output.append("")
     
     # Activity bar
     if total_users > 0:
         active_pct = (active_users / total_users) * 100
-        output += f"Activity: {create_progress_bar(active_pct)}\n\n"
+        output.append(f"┖ <b>Activity:</b> <code>{create_progress_bar(active_pct)}</code>")
+        output.append("")
     
     # === CONTENT STATISTICS ===
-    output += "┌─────────────────────────────────────────────┐\n"
-    output += "│  🎥 CONTENT STATISTICS                      │\n"
-    output += "└─────────────────────────────────────────────┘\n\n"
+    output.append("<b>CONTENT STATISTICS</b>")
+    output.append("")
     
     total_content = stats.get('total_content', 0)
     total_movies = stats.get('total_movies', 0)
     total_series = stats.get('total_series', 0)
     
-    output += f"Total Files:        {format_number(total_content)}\n"
-    output += f"Movies:             {format_number(total_movies)} ({format_percentage(total_movies, total_content)})\n"
-    output += f"Series/TV:          {format_number(total_series)} ({format_percentage(total_series, total_content)})\n\n"
+    output.append(f"┎ <b>Total Files:</b> {format_number(total_content)}")
+    output.append(f"┠ <b>Movies:</b> {format_number(total_movies)} <i>({format_percentage(total_movies, total_content)})</i>")
+    output.append(f"┠ <b>Series/TV:</b> {format_number(total_series)} <i>({format_percentage(total_series, total_content)})</i>")
+    output.append("")
     
     # Top qualities with progress bars
     quality_dist = stats.get('quality_distribution', [])
     if quality_dist:
-        output += "Top Qualities:\n"
+        output.append("┠ <b>Top Qualities:</b>")
         for idx, q in enumerate(quality_dist[:5], 1):
             quality = q['_id'] or 'Unknown'
             count = q['count']
             pct = (count / total_content * 100) if total_content > 0 else 0
             bar = create_progress_bar(pct, length=8)
-            output += f"  {idx}. {quality:12s} {bar}\n"
-        output += "\n"
+            if idx == len(quality_dist[:5]):
+                output.append(f"   {idx}. <b>{quality}</b> - <code>{bar}</code>")
+            else:
+                output.append(f"   {idx}. <b>{quality}</b> - <code>{bar}</code>")
+        output.append("")
     
     # Top years with progress bars
     year_dist = stats.get('year_distribution', [])
     if year_dist:
-        output += "Top Years:\n"
+        output.append("┠ <b>Top Years:</b>")
         for idx, y in enumerate(year_dist[:5], 1):
             year = y['_id']
             count = y['count']
             pct = (count / total_content * 100) if total_content > 0 else 0
             bar = create_progress_bar(pct, length=8)
-            output += f"  {idx}. {year:6d}       {bar}\n"
-        output += "\n"
+            if idx == len(year_dist[:5]):
+                output.append(f"┖  {idx}. <b>{year}</b> - <code>{bar}</code>")
+            else:
+                output.append(f"   {idx}. <b>{year}</b> - <code>{bar}</code>")
+        output.append("")
+    else:
+        # Close the last item if no years
+        if quality_dist:
+            output[-2] = output[-2].replace("   ", "┖  ", 1)
+        else:
+            output[-2] = output[-2].replace("┠", "┖", 1)
     
     # === CHANNEL STATISTICS ===
-    output += "┌─────────────────────────────────────────────┐\n"
-    output += "│  📡 CHANNEL STATISTICS                      │\n"
-    output += "└─────────────────────────────────────────────┘\n\n"
+    output.append("<b>CHANNEL STATISTICS</b>")
+    output.append("")
     
     total_channels = stats.get('total_channels', 0)
     enabled_channels = stats.get('enabled_channels', 0)
     
-    output += f"Total Channels:     {format_number(total_channels)}\n"
-    output += f"Enabled:            {format_number(enabled_channels)}\n"
-    output += f"Disabled:           {format_number(total_channels - enabled_channels)}\n\n"
+    output.append(f"┎ <b>Total Channels:</b> {format_number(total_channels)}")
+    output.append(f"┠ <b>Enabled:</b> {format_number(enabled_channels)}")
+    output.append(f"┠ <b>Disabled:</b> {format_number(total_channels - enabled_channels)}")
+    output.append("")
     
     # Top channels
     channel_dist = stats.get('channel_distribution', [])
     channel_titles = stats.get('channel_titles', {})
     if channel_dist:
-        output += "Top Channels (by files):\n"
+        output.append("┠ <b>Top Channels (by files):</b>")
         for idx, ch in enumerate(channel_dist[:5], 1):
             ch_id = ch['_id']
             ch_name = channel_titles.get(ch_id, f"ID:{ch_id}")
             count = ch['count']
             # Add trophy icon for channel with most files (index 1)
             trophy = "🏆 " if idx == 1 else ""
-            output += f"  {idx}. {trophy}{ch_name[:25]}: {format_number(count)}\n"
-        output += "\n"
+            if idx == len(channel_dist[:5]):
+                output.append(f"┖  {idx}. {trophy}<b>{ch_name[:25]}</b>: {format_number(count)}")
+            else:
+                output.append(f"   {idx}. {trophy}<b>{ch_name[:25]}</b>: {format_number(count)}")
+        output.append("")
+    else:
+        # Close the last item if no channels
+        output[-2] = output[-2].replace("┠", "┖", 1)
     
     # === SYSTEM STATISTICS ===
-    output += "┌─────────────────────────────────────────────┐\n"
-    output += "│  ⚙️  SYSTEM STATISTICS                       │\n"
-    output += "└─────────────────────────────────────────────┘\n\n"
+    output.append("<b>SYSTEM STATISTICS</b>")
+    output.append("")
     
     db_size = stats.get('db_estimated_size', 0)
     indexing_stats_data = stats.get('indexing_stats', {})
     
-    output += f"DB Est. Size:       {format_file_size_stat(db_size)}\n"
-    output += f"Total Logs:         {format_number(stats.get('total_logs', 0))}\n\n"
+    output.append(f"┎ <b>DB Est. Size:</b> {format_file_size_stat(db_size)}")
+    output.append(f"┠ <b>Total Logs:</b> {format_number(stats.get('total_logs', 0))}")
+    output.append("")
     
-    output += "Indexing Performance:\n"
-    output += f"  Total Attempts:   {format_number(indexing_stats_data.get('total_attempts', 0))}\n"
-    output += f"  Successful:       {format_number(indexing_stats_data.get('successful_inserts', 0))}\n"
-    output += f"  Duplicates:       {format_number(indexing_stats_data.get('duplicate_errors', 0))}\n"
-    output += f"  Errors:           {format_number(indexing_stats_data.get('other_errors', 0))}\n\n"
+    output.append("┠ <b>Indexing Performance:</b>")
+    output.append(f"┠  • Total Attempts: {format_number(indexing_stats_data.get('total_attempts', 0))}")
+    output.append(f"┠  • Successful: {format_number(indexing_stats_data.get('successful_inserts', 0))}")
+    output.append(f"┠  • Duplicates: {format_number(indexing_stats_data.get('duplicate_errors', 0))}")
+    output.append(f"┖  • Errors: {format_number(indexing_stats_data.get('other_errors', 0))}")
+    output.append("")
     
     # === ACTIVITY STATISTICS ===
-    output += "┌─────────────────────────────────────────────┐\n"
-    output += "│  🔍 ACTIVITY STATISTICS                     │\n"
-    output += "└─────────────────────────────────────────────┘\n\n"
+    output.append("<b>ACTIVITY STATISTICS</b>")
+    output.append("")
     
     pending_requests = stats.get('pending_requests', 0)
     completed_requests = stats.get('completed_requests', 0)
     total_searches = stats.get('total_searches', 0)
     avg_searches_per_day = stats.get('avg_searches_per_day', 0)
     
-    output += f"Total Searches:     {format_number(total_searches)}\n"
-    output += f"Avg Searches/Day:   {avg_searches_per_day:.1f}\n\n"
+    output.append(f"┎ <b>Total Searches:</b> {format_number(total_searches)}")
+    output.append(f"┠ <b>Avg Searches/Day:</b> {avg_searches_per_day:.1f}")
+    output.append("")
     
-    output += f"Pending Requests:   {format_number(pending_requests)}\n"
-    output += f"Completed Requests: {format_number(completed_requests)}\n\n"
+    output.append(f"┠ <b>Pending Requests:</b> {format_number(pending_requests)}")
+    output.append(f"┠ <b>Completed Requests:</b> {format_number(completed_requests)}")
+    output.append("")
     
     # Top searches
     top_searches = stats.get('top_searches', [])
     if top_searches:
-        output += "Top Searches:\n"
+        output.append("┠ <b>Top Searches:</b>")
         for idx, search in enumerate(top_searches[:5], 1):
             query = search['_id']
             count = search['count']
-            output += f"  {idx}. {query[:30]}: {count}x\n"
-        output += "\n"
+            if idx == len(top_searches[:5]):
+                output.append(f"┖  {idx}. <code>{query[:30]}</code>: {count}x")
+            else:
+                output.append(f"   {idx}. <code>{query[:30]}</code>: {count}x")
+        output.append("")
+    else:
+        # Close the last item if no searches
+        output[-2] = output[-2].replace("┠", "┖", 1)
     
     # === PREMIUM STATISTICS ===
-    output += "┌─────────────────────────────────────────────┐\n"
-    output += "│  ⭐ PREMIUM STATISTICS                      │\n"
-    output += "└─────────────────────────────────────────────┘\n\n"
+    output.append("<b>⭐ PREMIUM STATISTICS</b>")
+    output.append("")
     
     premium_details = stats.get('premium_details', [])
     premium_less_30 = stats.get('premium_less_30_days', 0)
     premium_more_30 = stats.get('premium_more_30_days', 0)
     
-    output += f"Total Premium:      {format_number(len(premium_details))}\n"
-    output += f"≤ 30 Days:          {format_number(premium_less_30)}\n"
-    output += f"> 30 Days:          {format_number(premium_more_30)}\n"
+    output.append(f"┎ <b>Total Premium:</b> {format_number(len(premium_details))}")
+    output.append(f"┠ <b>≤ 30 Days:</b> {format_number(premium_less_30)}")
+    output.append(f"┠ <b>> 30 Days:</b> {format_number(premium_more_30)}")
     
     if premium_details:
         # Calculate average days remaining
         avg_days = sum(p['days_remaining'] for p in premium_details) / len(premium_details)
-        output += f"\nAvg Days Left:      {avg_days:.1f} days\n"
+        output.append("")
+        output.append(f"┠ <b>Avg Days Left:</b> {avg_days:.1f} days")
         
         # Group by days remaining
         expiring_soon = len([p for p in premium_details if p['days_remaining'] <= 7])
         expiring_month = len([p for p in premium_details if 7 < p['days_remaining'] <= 30])
         
-        output += f"Expiring (7d):      {format_number(expiring_soon)}\n"
-        output += f"Expiring (30d):     {format_number(expiring_month)}\n"
+        output.append(f"┠ <b>Expiring (7d):</b> {format_number(expiring_soon)}")
+        output.append(f"┖ <b>Expiring (30d):</b> {format_number(expiring_month)}")
+    else:
+        # Close the last item if no premium details
+        output[-1] = output[-1].replace("┠", "┖", 1)
     
-    output += "\n"
+    output.append("")
     
     # === FOOTER ===
-    output += "╔════════════════════════════════════════════════╗\n"
+    output.append("─" * 45)
     gen_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    output += f"║  Generated: {gen_time}           ║\n"
-    output += "╚════════════════════════════════════════════════╝\n"
-    output += "```"
+    output.append(f"<i>Generated: {gen_time}</i>")
     
-    return output
+    return "\n".join(output)
 
 
 def format_quick_stats_output(stats):
@@ -851,9 +884,10 @@ def format_user_stats_output(stats):
     output = []
     
     # Header with user info
-    username_display = f"@{stats['username']}" if stats['username'] and stats['username'] != 'N/A' else f"<code>{stats['user_id']}</code>"
-    output.append(f"<b>📊 {stats['first_name']}'s Statistics</b>")
-    output.append(f"{username_display}")
+    username_display = f"@{stats['username']}" if stats['username'] and stats['username'] != 'N/A' else ""
+    output.append(f"📊 <b>{stats['first_name'].upper()}'S STATISTICS : {stats['user_id']}</b>")
+    if username_display:
+        output.append(f"{username_display}")
     output.append("")
     
     # Role badge
@@ -868,14 +902,15 @@ def format_user_stats_output(stats):
     output.append("")
     
     # Account info
-    output.append("<b>📅 Account Overview</b>")
+    output.append("<b>ACCOUNT OVERVIEW</b>")
+    output.append("")
     
     # Membership info
     if stats['joined_date']:
         joined_str = stats['joined_date'].strftime("%b %d, %Y")
-        output.append(f"<b>Joined:</b> {joined_str} <i>({stats['account_age_days']}d ago)</i>")
+        output.append(f"┎ <b>Joined:</b> {joined_str} <i>({stats['account_age_days']}d ago)</i>")
     else:
-        output.append(f"<b>Joined:</b> Unknown")
+        output.append(f"┎ <b>Joined:</b> Unknown")
     
     if stats['last_seen']:
         # Ensure last_seen is timezone-aware for comparison
@@ -890,13 +925,14 @@ def format_user_stats_output(stats):
             last_seen_display = "Yesterday"
         else:
             last_seen_display = f"{days_ago}d ago"
-        output.append(f"<b>Last Seen:</b> {last_seen_display}")
+        output.append(f"┖ <b>Last Seen:</b> {last_seen_display}")
     else:
-        output.append(f"<b>Last Seen:</b> Unknown")
+        output.append(f"┖ <b>Last Seen:</b> Unknown")
     output.append("")
     
     # Premium status
-    output.append("<b>💎 Premium Status</b>")
+    output.append("<b>⭐ PREMIUM STATUS</b>")
+    output.append("")
     if stats['is_premium']:
         days_left = stats['premium_days_remaining']
         if stats['premium_expires']:
@@ -908,43 +944,49 @@ def format_user_stats_output(stats):
                 status_sym = "🟡"
             else:
                 status_sym = "🔴"
-            output.append(f"{status_sym} <b>Active</b> - Expires: <code>{expires_str}</code>")
-            output.append(f"<b>Days Remaining:</b> {days_left}")
+            output.append(f"┎ {status_sym} <b>Active</b> - Expires: <code>{expires_str}</code>")
+            output.append(f"┖ <b>Days Remaining:</b> {days_left}")
         else:
-            output.append(f"♾️ <b>Lifetime Premium</b>")
+            output.append(f"┖ ♾️ <b>Lifetime Premium</b>")
     else:
-        output.append(f"🆓 Free User")
+        output.append(f"┖ 🆓 Free User")
     output.append("")
     
     # Activity section with progress bar
-    output.append("<b>📈 Activity Level</b>")
+    output.append("<b>ACTIVITY LEVEL</b>")
+    output.append("")
     activity = stats['activity_percentage']
     bar_length = 20
     filled = int(activity / 5)  # 20 bars for 100%
     bar = "█" * filled + "░" * (bar_length - filled)
-    output.append(f"<code>[{bar}] {activity}%</code>")
+    output.append(f"┖ <code>[{bar}] {activity}%</code>")
     output.append("")
     
     # Stats summary in simple format
-    output.append("<b>📊 Usage Statistics</b>")
-    output.append(f"<b>Searches:</b> {stats['total_searches']} <i>({stats['unique_searches']} unique)</i>")
-    output.append(f"<b>Requests:</b> {stats['total_requests']} total")
-    output.append(f"  • Completed: {stats['completed_requests']}")
-    output.append(f"  • Pending: {stats['pending_requests']}")
+    output.append("<b>USAGE STATISTICS</b>")
+    output.append("")
+    output.append(f"┎ <b>Searches:</b> {stats['total_searches']} <i>({stats['unique_searches']} unique)</i>")
+    output.append(f"┠ <b>Requests:</b> {stats['total_requests']} total")
+    output.append(f"┠  • Completed: {stats['completed_requests']}")
+    output.append(f"┖  • Pending: {stats['pending_requests']}")
     output.append("")
     
     # Recent searches in compact list
     if stats['recent_searches']:
-        output.append("<b>🔍 Recent Searches</b>")
+        output.append("<b>RECENT SEARCHES</b>")
+        output.append("")
         for i, search in enumerate(stats['recent_searches'][:5], 1):
             query = search['query']
             if len(query) > 40:
                 query = query[:37] + "..."
-            output.append(f"{i}. <code>{query}</code>")
+            if i == len(stats['recent_searches'][:5]):
+                output.append(f"┖ {i}. <code>{query}</code>")
+            else:
+                output.append(f"┠ {i}. <code>{query}</code>")
         output.append("")
     
     # Footer
-    output.append("─" * 30)
+    output.append("─" * 45)
     output.append("<i>Keep using the bot to boost your activity!</i>")
     
     return "\n".join(output)

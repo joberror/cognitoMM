@@ -2417,7 +2417,7 @@ async def cmd_stat(client, message: Message):
         keyboard = InlineKeyboardMarkup(buttons)
         
         # Send statistics
-        await loading_msg.edit_text(output, reply_markup=keyboard, disable_web_page_preview=True)
+        await loading_msg.edit_text(output, reply_markup=keyboard, disable_web_page_preview=True, parse_mode=ParseMode.HTML)
         
         # Log action
         await log_action("stat_command", by=uid, extra={
