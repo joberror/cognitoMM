@@ -114,47 +114,23 @@ async def main():
             from . import config
             config.client = app
 
-            # DIAGNOSTIC: Show what handlers are being registered
-            print("[DIAGNOSTIC] Registering handlers:")
-            print("  - MessageHandler: handle_command (commands via regex ^/)")
-            print("  - MessageHandler: on_message (indexing)")
-            print("  - InlineQueryHandler: inline_handler")
-            print("  - CallbackQueryHandler: callback_handler")
-            print("  - RawUpdateHandler: handle_raw_update (real-time deletion heuristic)")
-            print("[DIAGNOSTIC] FIXED: Command handler now registered with regex filter (avoid filters.command misuse)")
-            
-            # Register handlers manually since decorators can't be used with async context
-            # IMPORTANT: Register command handler FIRST so it gets priority
-            # Using filters.regex(\"^/\") instead of filters.command to avoid AttributeError caused by incorrect usage
+            # Register handlers
             app.add_handler(MessageHandler(handle_command, filters.regex(r"^/")))
             app.add_handler(MessageHandler(on_message))
             app.add_handler(InlineQueryHandler(inline_handler))
             app.add_handler(CallbackQueryHandler(callback_handler))
-            
-            # Attempt to register RawUpdateHandler for real-time deletions
+
+            # Register RawUpdateHandler for real-time deletions (if available)
             try:
                 from hydrogram.handlers import RawUpdateHandler
                 app.add_handler(RawUpdateHandler(handle_raw_update))
-                print("[DIAGNOSTIC] RawUpdateHandler registered for real-time deletions")
-            except Exception as e:
-                # Handler not available or library version lacks it; fallback remains periodic prune
-                print(f"[DIAGNOSTIC] RawUpdateHandler unavailable ({e}); relying on periodic orphan monitor")
+            except Exception:
+                pass  # Handler not available in this version
 
             # Start deletion monitor background task
             asyncio.create_task(start_deletion_monitor())
-            print("✅ Auto-delete monitor started")
 
-            # Start orphaned index reconciliation monitor (periodic prune of deleted channel messages)
-            try:
-                from .indexing import start_orphan_monitor
-                asyncio.create_task(start_orphan_monitor())
-                print("✅ Orphan index monitor started")
-            except Exception as e:
-                print(f"⚠️ Failed to start orphan monitor: {e}")
-
-            print("✅ Bot session started successfully")
-            print("✅ MovieBot running with Hydrogram!")
-            print("📱 Bot is ready to receive commands and monitor channels!")
+            print("✅ MovieBot is running!")
             print("🛑 Press Ctrl+C to stop")
 
             # Keep the program running

@@ -369,7 +369,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 cmd_add_channel,
                 cmd_remove_channel,
                 cmd_index_channel,
-                cmd_rescan_channel,
+                cmd_update_db,
                 cmd_reset_channel,
                 cmd_toggle_indexing,
                 cmd_manage_channel
@@ -403,7 +403,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 "add": "/add_channel",
                 "remove": "/remove_channel",
                 "index": "/index_channel",
-                "rescan": "/rescan_channel",
+                "update": "/update_db",
                 "reset": "/reset_channel",
                 "monitoring": "/toggle_indexing"
             }
@@ -424,8 +424,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
             elif action == "index":
                 await cmd_index_channel(client, pseudo_msg)
 
-            elif action == "rescan":
-                await cmd_rescan_channel(client, pseudo_msg)
+            elif action == "update":
+                await cmd_update_db(client, pseudo_msg)
 
             elif action == "reset":
                 await cmd_reset_channel(client, pseudo_msg)
@@ -462,7 +462,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     output += "Add - Add a new channel to monitor\n"
                     output += "Remove - Remove an existing channel\n"
                     output += "Scan - Scan messages from a channel\n"
-                    output += "Rescan - Re-scan channel (legacy command)\n"
+                    output += "Update - Sync DB with channel (detect new/deleted files)\n"
                     output += "Reset - Clear indexed data from a channel\n"
                     output += "Indexing - Toggle auto-indexing on/off"
                 else:
@@ -505,7 +505,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     output += "Add - Add a new channel to monitor\n"
                     output += "Remove - Remove an existing channel\n"
                     output += "Scan - Scan messages from a channel\n"
-                    output += "Rescan - Re-scan channel (legacy command)\n"
+                    output += "Update - Sync DB with channel (detect new/deleted files)\n"
                     output += "Reset - Clear indexed data from a channel\n"
                     output += "Indexing - Toggle auto-indexing on/off"
 
@@ -517,7 +517,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                         InlineKeyboardButton("Scan", callback_data="mc#index")
                     ],
                     [
-                        InlineKeyboardButton("Rescan", callback_data="mc#rescan"),
+                        InlineKeyboardButton("Update", callback_data="mc#update"),
                         InlineKeyboardButton("Reset", callback_data="mc#reset"),
                         InlineKeyboardButton(f"{monitoring_icon} Indexing", callback_data="mc#monitoring")
                     ]

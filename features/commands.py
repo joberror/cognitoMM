@@ -23,7 +23,7 @@ from .utils import get_readable_time, wait_for_user_input, set_user_input, clean
 from .metadata_parser import parse_metadata
 from .user_management import get_user_doc, is_admin, is_banned, has_accepted_terms, load_terms_and_privacy, log_action, check_banned, check_terms_acceptance, should_process_command, require_not_banned
 from .file_deletion import track_file_for_deletion
-from .indexing import INDEX_EXTENSIONS, indexing_lock, start_indexing_process, save_file_to_db, index_message, message_queue, process_message_queue, indexing_stats, prune_orphaned_index_entries
+from .indexing import INDEX_EXTENSIONS, indexing_lock, start_indexing_process, save_file_to_db, index_message, message_queue, process_message_queue, indexing_stats
 from .search import format_file_size, group_recent_content, format_recent_output, send_search_results
 from .request_management import check_rate_limits, update_user_limits, check_duplicate_request, validate_imdb_link, get_queue_position, MAX_PENDING_REQUESTS_PER_USER
 from .tmdb_integration import search_tmdb, format_tmdb_result
@@ -106,8 +106,6 @@ async def handle_command(client, message: Message):
         await cmd_remove_channel(client, message)
     elif command == 'index_channel':
         await cmd_index_channel(client, message)
-    elif command == 'rescan_channel':
-        await cmd_rescan_channel(client, message)
     elif command == 'toggle_indexing':
         await cmd_toggle_indexing(client, message)
     elif command == 'promote':
@@ -212,7 +210,6 @@ ADMIN_HELP = """
 /add_channel <link|id>     - Add a channel (bot must be admin)
 /remove_channel <link|id>  - Remove a channel
 /index_channel             - Enhanced channel indexing (interactive)
-/rescan_channel            - Legacy command (redirects to /index_channel)
 /reset_channel             - Clear indexed data from a specific channel (requires confirmation)
 /toggle_indexing           - Toggle auto-indexing on/off
 
@@ -828,90 +825,6 @@ async def cmd_index_channel(client, message: Message):
     except Exception as e:
         await message.reply_text(f"❌ Error: {e}")
 
-async def cmd_rescan_channel(client, message: Message):
-    """Rescan a channel - re-index all messages from a registered channel"""
-    uid = message.from_user.id
-    if not await is_admin(uid):
-        return await message.reply_text("🚫 Admins only.")
-
-    # Check if another indexing process is running
-    from .indexing import indexing_lock
-    if indexing_lock.locked():
-        return await message.reply_text("⏳ Another indexing process is already running. Please wait.")
-
-    # Get all registered channels
-    channels = await channels_col.find({}).to_list(length=100)
-
-    if not channels:
-        return await message.reply_text("❌ No channels registered yet. Use /add_channel first.")
-
-    # Display channel selection
-    channel_list = "🔄 **Select a channel to rescan:**\n\n"
-    for idx, ch in enumerate(channels, 1):
-        channel_title = ch.get("channel_title", "Unknown")
-        channel_id = ch.get("channel_id")
-        status = "✅" if ch.get("enabled", True) else "❌"
-        channel_list += f"{idx}. {status} {channel_title}\n"
-        channel_list += f"   ID: <code>{channel_id}</code>\n\n"
-
-    channel_list += "🔢 Send the number of the channel to rescan\n"
-    channel_list += "⏰ Timeout: 60 seconds"
-
-    selection_msg = await message.reply_text(channel_list)
-
-    try:
-        # Wait for user to select a channel
-        response = await wait_for_user_input(message.chat.id, uid, timeout=60)
-        await selection_msg.delete()
-
-        # Validate selection
-        try:
-            selection = int(response.text.strip())
-            if selection < 1 or selection > len(channels):
-                return await message.reply_text(f"❌ Invalid selection. Please choose a number between 1 and {len(channels)}.")
-        except ValueError:
-            return await message.reply_text("❌ Invalid input. Please send a number.")
-
-        # Get selected channel
-        selected_channel = channels[selection - 1]
-        channel_id = selected_channel.get("channel_id")
-        channel_title = selected_channel.get("channel_title", "Unknown")
-
-        # Confirm rescan
-        confirm_msg = await message.reply_text(
-            f"🔄 **Rescan Channel**\n\n"
-            f"📺 Channel: {channel_title}\n"
-            f"🆔 ID: <code>{channel_id}</code>\n\n"
-            f"⚠️ This will re-index all messages from this channel.\n\n"
-            f"⏳ Starting rescan..."
-        )
-
-        # Start the rescan using the same indexing process
-        from .indexing import start_indexing_process
-
-        # Get the last message ID from the channel
-        try:
-            chat = await client.get_chat(channel_id)
-            # Get a recent message to determine the last message ID
-            messages = await client.get_messages(channel_id, limit=1)
-            if messages and len(messages) > 0:
-                last_msg_id = messages[0].id
-            else:
-                return await confirm_msg.edit_text(f"❌ Could not access messages from {channel_title}. Make sure the bot is a member of the channel.")
-
-            # Start indexing from the beginning (skip=0)
-            await start_indexing_process(client, confirm_msg, channel_id, last_msg_id, skip=0)
-            await log_action("rescan_channel", by=uid, target=channel_id, extra={"channel": channel_title})
-
-        except Exception as e:
-            await confirm_msg.edit_text(f"❌ Error accessing channel: {e}")
-            print(f"❌ Rescan error for channel {channel_id}: {e}")
-
-    except asyncio.TimeoutError:
-        await selection_msg.delete()
-        await message.reply_text("⏰ Timeout! Please try again.")
-    except Exception as e:
-        await message.reply_text(f"❌ Error: {e}")
 
 async def cmd_manage_channel(client, message: Message):
     """Unified channel management command - displays channels with stats and action buttons"""
@@ -937,7 +850,7 @@ async def cmd_manage_channel(client, message: Message):
         output += "Add - Add a new channel to monitor\n"
         output += "Remove - Remove an existing channel\n"
         output += "Scan - Scan messages from a channel\n"
-        output += "Rescan - Re-scan channel (legacy command)\n"
+        output += "Update - Sync DB with channel (detect new/deleted files)\n"
         output += "Reset - Clear indexed data from a channel\n"
         output += "Indexing - Toggle auto-indexing on/off"
     else:
@@ -980,7 +893,7 @@ async def cmd_manage_channel(client, message: Message):
         output += "Add - Add a new channel to monitor\n"
         output += "Remove - Remove an existing channel\n"
         output += "Scan - Scan messages from a channel\n"
-        output += "Rescan - Re-scan channel (legacy command)\n"
+        output += "Update - Sync DB with channel (detect new/deleted files)\n"
         output += "Reset - Clear indexed data from a channel\n"
         output += "Indexing - Toggle auto-indexing on/off"
 
@@ -992,7 +905,7 @@ async def cmd_manage_channel(client, message: Message):
             InlineKeyboardButton("Scan", callback_data="mc#index")
         ],
         [
-            InlineKeyboardButton("Rescan", callback_data="mc#rescan"),
+            InlineKeyboardButton("Update", callback_data="mc#update"),
             InlineKeyboardButton("Reset", callback_data="mc#reset"),
             InlineKeyboardButton(f"{monitoring_icon} Indexing", callback_data="mc#monitoring")
         ]
