@@ -1433,268 +1433,435 @@ async def cmd_reset_stats(client, message: Message):
 
 async def cmd_update_db(client, message: Message):
     """
-    Admin command to perform comprehensive database maintenance:
-    - Scan for and remove duplicate entries
-    - Remove orphaned index entries (missing fields)
-    - Verify and remove entries for deleted messages
-    - Scan for new unindexed files in all channels (up to 500 per channel)
-    Usage: /update_db [limit]
-    limit (optional) - number of entries to verify for deletion (default 3000)
+    Admin command to update database by scanning a specific message range:
+    - Compares messages in the specified range with indexed entries
+    - Removes orphaned entries (deleted files from channel)
+    - Indexes new/missed files in the range
+
+    Usage: /update_db
+    Interactive flow: Select channel → Provide message range (IDs or links)
     """
     if not await is_admin(message.from_user.id):
-        await message.reply_text("Admins only.")
+        await message.reply_text("🚫 Admins only.")
         return
 
     uid = message.from_user.id
 
-    # Parse optional limit parameter
-    parts = message.text.split()
-    verify_limit = 3000  # Default limit for message verification
-    if len(parts) >= 2:
-        try:
-            verify_limit = int(parts[1])
-            if verify_limit < 1:
-                return await message.reply_text("Limit must be at least 1. Usage: /update_db [limit]")
-        except ValueError:
-            return await message.reply_text("Invalid limit. Usage: /update_db [limit]")
+    # Check if another indexing process is running
+    from .indexing import indexing_lock
+    if indexing_lock.locked():
+        return await message.reply_text("⏳ Another indexing process is already running. Please wait.")
 
-    start_time = datetime.now(timezone.utc)
+    # Step 1: Get all registered channels
+    channels = await channels_col.find({}).to_list(length=100)
 
-    status_msg = await message.reply_text(
-        f"**Database Maintenance Started**\n\n"
-        f"Scanning for duplicates and orphaned entries...\n"
-        f"Verification limit: {verify_limit} entries\n"
-        f"This may take a few moments..."
-    )
+    if not channels:
+        return await message.reply_text("❌ No channels registered yet. Use /add_channel first.")
+
+    # Step 2: Display channel selection with indexed counts
+    pipeline = [
+        {"$group": {"_id": "$channel_id", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}}
+    ]
+    indexed_counts = await movies_col.aggregate(pipeline).to_list(length=100)
+    count_map = {item["_id"]: item["count"] for item in indexed_counts}
+
+    channel_list = "🔄 **Database Update - Select Channel**\n\n"
+    for idx, ch in enumerate(channels, 1):
+        channel_title = ch.get("channel_title", "Unknown")
+        channel_id = ch.get("channel_id")
+        status = "✅" if ch.get("enabled", True) else "❌"
+        indexed = count_map.get(channel_id, 0)
+        channel_list += f"{idx}. {status} **{channel_title}**\n"
+        channel_list += f"   📊 Indexed: `{indexed}` | ID: `{channel_id}`\n\n"
+
+    channel_list += "🔢 Send the **number** of the channel to update\n"
+    channel_list += "⏰ Timeout: 60 seconds | Send **CANCEL** to abort"
+
+    selection_msg = await message.reply_text(channel_list)
 
     try:
-        # Step 1: Find and remove duplicate entries
-        duplicates_removed = 0
+        # Wait for channel selection
+        response = await wait_for_user_input(message.chat.id, uid, timeout=60)
+
+        if not response or (response.text and response.text.upper().strip() == "CANCEL"):
+            await selection_msg.delete()
+            return await message.reply_text("❌ **Database Update Cancelled**")
+
+        # Validate selection
+        try:
+            selection = int(response.text.strip())
+            if selection < 1 or selection > len(channels):
+                await selection_msg.delete()
+                return await message.reply_text(f"❌ Invalid selection. Please choose a number between 1 and {len(channels)}.")
+        except ValueError:
+            await selection_msg.delete()
+            return await message.reply_text("❌ Invalid input. Please send a number.")
+
+        selected_channel = channels[selection - 1]
+        channel_id = selected_channel.get("channel_id")
+        channel_title = selected_channel.get("channel_title", "Unknown")
+        await selection_msg.delete()
+
+        # Step 3: Ask for message range
+        range_msg = await message.reply_text(
+            f"📺 **Channel Selected:** {channel_title}\n\n"
+            f"📍 **Provide Message Range**\n\n"
+            f"Send the **start** and **end** message IDs or links.\n"
+            f"Format options:\n"
+            f"• `13617 13638` (space-separated IDs)\n"
+            f"• `13617-13638` (hyphen-separated IDs)\n"
+            f"• Paste two Telegram message links (one per line):\n"
+            f"  `https://t.me/c/2465144431/13617`\n"
+            f"  `https://t.me/c/2465144431/13638`\n\n"
+            f"⏰ Timeout: 120 seconds | Send **CANCEL** to abort"
+        )
+
+        # Wait for range input
+        range_response = await wait_for_user_input(message.chat.id, uid, timeout=120)
+
+        if not range_response or (range_response.text and range_response.text.upper().strip() == "CANCEL"):
+            await range_msg.delete()
+            return await message.reply_text("❌ **Database Update Cancelled**")
+
+        await range_msg.delete()
+        range_text = range_response.text.strip()
+
+        # Parse the range input
+        start_id, end_id = None, None
+
+        # Try parsing as links (check for t.me URLs)
+        import re
+        link_pattern = r'https?://t\.me/c/\d+/(\d+)'
+        links = re.findall(link_pattern, range_text)
+
+        if len(links) >= 2:
+            start_id = int(links[0])
+            end_id = int(links[1])
+        elif len(links) == 1:
+            # Only one link provided, try to parse second as ID
+            remaining = re.sub(link_pattern, '', range_text).strip()
+            if remaining:
+                try:
+                    second_id = int(remaining.replace('-', ' ').split()[0])
+                    start_id = int(links[0])
+                    end_id = second_id
+                except ValueError:
+                    pass
+        else:
+            # Try parsing as IDs (space or hyphen separated)
+            # Handle formats: "13617 13638", "13617-13638", "13617 - 13638"
+            range_text = range_text.replace('-', ' ').replace(',', ' ')
+            parts = range_text.split()
+
+            if len(parts) >= 2:
+                try:
+                    start_id = int(parts[0])
+                    end_id = int(parts[-1])
+                except ValueError:
+                    pass
+
+        if start_id is None or end_id is None:
+            return await message.reply_text(
+                "❌ **Invalid Range Format**\n\n"
+                "Please provide a valid range using:\n"
+                "• Space-separated IDs: `13617 13638`\n"
+                "• Hyphen-separated IDs: `13617-13638`\n"
+                "• Telegram links (one per line)"
+            )
+
+        # Ensure start_id <= end_id
+        if start_id > end_id:
+            start_id, end_id = end_id, start_id
+
+        total_range = end_id - start_id + 1
+
+        # Confirmation before starting
+        confirm_msg = await message.reply_text(
+            f"🔄 **Database Update Confirmation**\n\n"
+            f"📺 **Channel:** {channel_title}\n"
+            f"🆔 **Channel ID:** `{channel_id}`\n\n"
+            f"📍 **Message Range:**\n"
+            f"   Start: `{start_id}`\n"
+            f"   End: `{end_id}`\n"
+            f"   Total: `{total_range}` messages\n\n"
+            f"This will:\n"
+            f"• 🔍 Check each message in the range\n"
+            f"• 🗑️ Remove orphaned entries (deleted files)\n"
+            f"• ➕ Index new/missed files\n\n"
+            f"Send **CONFIRM** to proceed or **CANCEL** to abort\n"
+            f"⏰ Timeout: 30 seconds"
+        )
+
+        # Wait for confirmation
+        confirm_response = await wait_for_user_input(message.chat.id, uid, timeout=30)
+
+        if not confirm_response or confirm_response.text.upper().strip() != "CONFIRM":
+            await confirm_msg.delete()
+            return await message.reply_text("❌ **Database Update Cancelled**")
+
+        await confirm_msg.delete()
+
+        # Step 4: Start the update process
+        start_time = datetime.now(timezone.utc)
+
+        status_msg = await message.reply_text(
+            f"🔄 **Database Update Started**\n\n"
+            f"📺 Channel: {channel_title}\n"
+            f"📍 Range: `{start_id}` → `{end_id}` ({total_range} messages)\n\n"
+            f"⏳ Initializing scan...\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔍 Scanned: 0/{total_range}\n"
+            f"🗑️ Orphans Removed: 0\n"
+            f"➕ New Files Indexed: 0\n"
+            f"⚠️ Errors: 0"
+        )
+
+        print(f"\n{'='*60}")
+        print(f"[UPDATE_DB] Starting database update for {channel_title}")
+        print(f"[UPDATE_DB] Channel ID: {channel_id}")
+        print(f"[UPDATE_DB] Range: {start_id} → {end_id} ({total_range} messages)")
+        print(f"[UPDATE_DB] Initiated by: User {uid}")
+        print(f"{'='*60}\n")
+
+        # Statistics
+        scanned = 0
         orphans_removed = 0
-        verified_orphans = 0
-        checked = 0
+        new_indexed = 0
         errors = 0
-        new_files_indexed = 0
+        skipped_no_media = 0
+        already_indexed = 0
 
-        # Update status - Step 1
-        await status_msg.edit_text(
-            f"**Database Maintenance In Progress**\n\n"
-            f"Step 1/4: Scanning for duplicates...\n"
-            f"Please wait..."
-        )
-
-        # Find duplicates based on channel_id + message_id
-        pipeline = [
-            {
-                "$group": {
-                    "_id": {
-                        "channel_id": "$channel_id",
-                        "message_id": "$message_id"
-                    },
-                    "count": {"$sum": 1},
-                    "ids": {"$push": "$_id"}
-                }
-            },
-            {
-                "$match": {
-                    "count": {"$gt": 1}
-                }
-            }
-        ]
-
-        duplicate_groups = await movies_col.aggregate(pipeline).to_list(length=None)
-
-        for group in duplicate_groups:
-            # Keep the first entry, remove the rest
-            ids_to_remove = group["ids"][1:]  # Skip first, remove rest
-            for doc_id in ids_to_remove:
-                try:
-                    await movies_col.delete_one({"_id": doc_id})
-                    duplicates_removed += 1
-                except Exception as e:
-                    errors += 1
-                    print(f"Error removing duplicate {doc_id}: {e}")
-
-        # Update status - Step 2
-        await status_msg.edit_text(
-            f"**Database Maintenance In Progress**\n\n"
-            f"Step 1/4: Duplicates removed: {duplicates_removed}\n"
-            f"Step 2/4: Removing orphaned entries (missing fields)...\n"
-            f"Please wait..."
-        )
-
-        # Step 2: Remove orphaned entries (entries with missing channel_id or message_id)
-        cursor = movies_col.find({
-            "$or": [
-                {"channel_id": None},
-                {"message_id": None},
-                {"channel_id": {"$exists": False}},
-                {"message_id": {"$exists": False}}
-            ]
-        })
-
-        async for doc in cursor:
-            try:
-                await movies_col.delete_one({"_id": doc["_id"]})
-                orphans_removed += 1
-            except Exception as e:
-                errors += 1
-                print(f"Error removing orphan {doc['_id']}: {e}")
-
-        # Update status - Step 3
-        await status_msg.edit_text(
-            f"**Database Maintenance In Progress**\n\n"
-            f"Step 1/4: Duplicates removed: {duplicates_removed}\n"
-            f"Step 2/4: Orphans removed: {orphans_removed}\n"
-            f"Step 3/4: Verifying {verify_limit} entries for deleted messages...\n"
-            f"Please wait..."
-        )
-
-        # Step 3: Verify orphaned entries by checking if messages still exist
-        cursor = movies_col.find({}, {"channel_id": 1, "message_id": 1, "title": 1}).sort("indexed_at", -1).limit(verify_limit)
-
-        async for doc in cursor:
-            checked += 1
-            channel_id = doc.get("channel_id")
-            message_id = doc.get("message_id")
-            doc_id = doc.get("_id")
-
-            if channel_id is None or message_id is None:
-                continue
-
-            try:
-                msg = await client.get_messages(channel_id, message_id)
-                if not msg or getattr(msg, "empty", False):
-                    await movies_col.delete_one({"_id": doc_id})
-                    verified_orphans += 1
-            except Exception:
-                # Message doesn't exist or can't be accessed
-                try:
-                    await movies_col.delete_one({"_id": doc_id})
-                    verified_orphans += 1
-                except Exception as e:
-                    errors += 1
-                    print(f"Error removing verified orphan {doc_id}: {e}")
-
-        # Update status - Step 4
-        await status_msg.edit_text(
-            f"**Database Maintenance In Progress**\n\n"
-            f"Step 1/4: Duplicates removed: {duplicates_removed}\n"
-            f"Step 2/4: Orphans removed: {orphans_removed}\n"
-            f"Step 3/4: Verified orphans removed: {verified_orphans}\n"
-            f"Step 4/4: Scanning for new unindexed files...\n"
-            f"Please wait..."
-        )
-
-        # Step 4: Scan for new unindexed files in all channels
         from .indexing import index_message
 
-        # Get all enabled channels
-        channels_cursor = channels_col.find({"enabled": True})
-        channels = await channels_cursor.to_list(length=100)
+        async with indexing_lock:
+            try:
+                # Step 4a: Get all indexed entries for this channel in the range
+                existing_entries = await movies_col.find({
+                    "channel_id": channel_id,
+                    "message_id": {"$gte": start_id, "$lte": end_id}
+                }, {"message_id": 1, "_id": 1, "title": 1}).to_list(length=None)
 
-        if channels:
-            for channel in channels:
-                channel_id = channel.get('channel_id')
-                channel_title = channel.get('channel_title', 'Unknown')
+                existing_map = {doc["message_id"]: doc for doc in existing_entries}
+                existing_ids = set(existing_map.keys())
 
-                if not channel_id:
-                    continue
+                print(f"[UPDATE_DB] Found {len(existing_ids)} indexed entries in the specified range")
 
-                try:
-                    # Update status with current channel
-                    await status_msg.edit_text(
-                        f"**Database Maintenance In Progress**\n\n"
-                        f"Step 1/4: Duplicates removed: {duplicates_removed}\n"
-                        f"Step 2/4: Orphans removed: {orphans_removed}\n"
-                        f"Step 3/4: Verified orphans removed: {verified_orphans}\n"
-                        f"Step 4/4: Scanning {channel_title}...\n"
-                        f"New files indexed: {new_files_indexed}"
-                    )
+                # Track which messages actually exist in channel
+                channel_message_ids = set()
 
-                    # Scan up to 500 recent messages from this channel
-                    scanned = 0
-                    async for msg in client.iter_messages(channel_id, limit=500):
-                        scanned += 1
+                # Step 4b: Iterate through messages in the range
+                last_update = 0
+                scan_start_time = datetime.now(timezone.utc).timestamp()
 
-                        # Check if message has video content
-                        has_video = getattr(msg, "video", None) is not None
-                        has_doc = getattr(msg, "document", None) is not None and \
-                                 getattr(msg.document, "mime_type", "").startswith("video")
+                for msg_id in range(start_id, end_id + 1):
+                    scanned += 1
 
-                        if not (has_video or has_doc):
+                    # Update progress every 10 messages or at least every 3 seconds
+                    current_time = datetime.now(timezone.utc).timestamp()
+                    if scanned % 10 == 0 or (current_time - last_update) >= 3:
+                        last_update = current_time
+                        progress_pct = (scanned / total_range) * 100
+
+                        # Calculate ETA
+                        elapsed = current_time - scan_start_time
+                        if scanned > 0 and elapsed > 0:
+                            rate = scanned / elapsed  # messages per second
+                            remaining = total_range - scanned
+                            eta_seconds = remaining / rate if rate > 0 else 0
+                            if eta_seconds < 60:
+                                eta_str = f"{int(eta_seconds)}s"
+                            elif eta_seconds < 3600:
+                                eta_str = f"{int(eta_seconds // 60)}m {int(eta_seconds % 60)}s"
+                            else:
+                                eta_str = f"{int(eta_seconds // 3600)}h {int((eta_seconds % 3600) // 60)}m"
+                        else:
+                            eta_str = "calculating..."
+
+                        # Progress bar (20 chars wide)
+                        filled = int(progress_pct / 5)  # 20 segments = 100/5
+                        bar = "█" * filled + "░" * (20 - filled)
+
+                        try:
+                            await status_msg.edit_text(
+                                f"🔄 **Database Update In Progress**\n\n"
+                                f"📺 Channel: {channel_title}\n"
+                                f"📍 Range: `{start_id}` → `{end_id}`\n\n"
+                                f"`[{bar}]` {progress_pct:.1f}%\n"
+                                f"⏳ ETA: {eta_str}\n"
+                                f"━━━━━━━━━━━━━━━━━━━━\n"
+                                f"🔍 Scanned: {scanned}/{total_range}\n"
+                                f"🗑️ Orphans Removed: {orphans_removed}\n"
+                                f"➕ New Files Indexed: {new_indexed}\n"
+                                f"📁 Already Indexed: {already_indexed}\n"
+                                f"📭 No Media: {skipped_no_media}\n"
+                                f"⚠️ Errors: {errors}"
+                            )
+                        except Exception:
+                            pass  # Ignore edit errors (rate limit, etc.)
+
+                        # Terminal progress log every 50 messages
+                        if scanned % 50 == 0:
+                            print(f"[UPDATE_DB] Progress: {scanned}/{total_range} ({progress_pct:.1f}%) | "
+                                  f"Orphans: {orphans_removed} | New: {new_indexed} | ETA: {eta_str}")
+
+                    try:
+                        # Fetch the message from channel
+                        msg = await client.get_messages(channel_id, msg_id)
+
+                        if not msg or getattr(msg, "empty", False):
+                            # Message doesn't exist - check if we have it indexed
+                            if msg_id in existing_ids:
+                                # Remove orphaned entry
+                                doc = existing_map[msg_id]
+                                await movies_col.delete_one({"_id": doc["_id"]})
+                                orphans_removed += 1
+                                print(f"[UPDATE_DB] 🗑️ Removed orphan: {doc.get('title', 'Unknown')} (msg_id: {msg_id})")
                             continue
 
-                        # Check if already indexed
-                        existing = await movies_col.find_one({
-                            "channel_id": channel_id,
-                            "message_id": msg.id
-                        })
+                        # Message exists - check if it has video content
+                        has_video = getattr(msg, "video", None) is not None
+                        has_doc = getattr(msg, "document", None) is not None and \
+                                 (getattr(getattr(msg, "document", None), "mime_type", "") or "").startswith("video")
 
-                        if existing:
+                        if not (has_video or has_doc):
+                            skipped_no_media += 1
+                            # If this non-media message is indexed, remove it (shouldn't happen but safety check)
+                            if msg_id in existing_ids:
+                                doc = existing_map[msg_id]
+                                await movies_col.delete_one({"_id": doc["_id"]})
+                                orphans_removed += 1
+                                print(f"[UPDATE_DB] 🗑️ Removed non-media entry: {doc.get('title', 'Unknown')} (msg_id: {msg_id})")
+                            continue
+
+                        channel_message_ids.add(msg_id)
+
+                        # Check if already indexed
+                        if msg_id in existing_ids:
+                            already_indexed += 1
                             continue
 
                         # Index this new file
                         try:
                             await index_message(msg)
-                            new_files_indexed += 1
+                            new_indexed += 1
 
-                            # Update progress every 10 new files
-                            if new_files_indexed % 10 == 0:
-                                await status_msg.edit_text(
-                                    f"**Database Maintenance In Progress**\n\n"
-                                    f"Step 1/4: Duplicates removed: {duplicates_removed}\n"
-                                    f"Step 2/4: Orphans removed: {orphans_removed}\n"
-                                    f"Step 3/4: Verified orphans removed: {verified_orphans}\n"
-                                    f"Step 4/4: Scanning {channel_title}...\n"
-                                    f"New files indexed: {new_files_indexed}"
-                                )
+                            # Get filename for logging
+                            if has_video and msg.video:
+                                filename = getattr(msg.video, "file_name", None) or "Video"
+                            elif has_doc and msg.document:
+                                filename = getattr(msg.document, "file_name", None) or "Document"
+                            else:
+                                filename = "Unknown"
+
+                            print(f"[UPDATE_DB] ➕ Indexed new file: {filename} (msg_id: {msg_id})")
+
                         except Exception as idx_err:
-                            errors += 1
-                            print(f"Error indexing message {msg.id} from {channel_title}: {idx_err}")
+                            # Check if it's a duplicate error (already indexed by race condition)
+                            if "duplicate key" in str(idx_err).lower():
+                                already_indexed += 1
+                            else:
+                                errors += 1
+                                print(f"[UPDATE_DB] ⚠️ Error indexing msg {msg_id}: {idx_err}")
 
-                    print(f"Scanned {scanned} messages from {channel_title}, indexed {new_files_indexed} new files")
+                    except Exception as e:
+                        # Error fetching message - might be deleted or inaccessible
+                        if msg_id in existing_ids:
+                            doc = existing_map[msg_id]
+                            try:
+                                await movies_col.delete_one({"_id": doc["_id"]})
+                                orphans_removed += 1
+                                print(f"[UPDATE_DB] 🗑️ Removed inaccessible entry: {doc.get('title', 'Unknown')} (msg_id: {msg_id})")
+                            except Exception as del_err:
+                                errors += 1
+                                print(f"[UPDATE_DB] ⚠️ Error removing orphan {msg_id}: {del_err}")
+                        else:
+                            # Log the error but continue
+                            if "MESSAGE_ID_INVALID" not in str(e):
+                                print(f"[UPDATE_DB] ⚠️ Error accessing msg {msg_id}: {e}")
 
-                except Exception as ch_err:
-                    errors += 1
-                    print(f"Error scanning channel {channel_title}: {ch_err}")
+                end_time = datetime.now(timezone.utc)
+                duration = (end_time - start_time).total_seconds()
 
-        end_time = datetime.now(timezone.utc)
-        duration = (end_time - start_time).total_seconds()
-        total_removed = duplicates_removed + orphans_removed + verified_orphans
+                # Log the update action
+                await log_action("update_db", by=uid, extra={
+                    "channel_id": channel_id,
+                    "channel_title": channel_title,
+                    "range_start": start_id,
+                    "range_end": end_id,
+                    "total_range": total_range,
+                    "scanned": scanned,
+                    "orphans_removed": orphans_removed,
+                    "new_indexed": new_indexed,
+                    "already_indexed": already_indexed,
+                    "skipped_no_media": skipped_no_media,
+                    "errors": errors,
+                    "duration_seconds": duration,
+                    "start_time": start_time.isoformat(),
+                    "end_time": end_time.isoformat()
+                })
 
-        # Log the maintenance action
-        await log_action("update_db", by=uid, extra={
-            "duplicates_removed": duplicates_removed,
-            "orphans_removed": orphans_removed,
-            "verified_orphans": verified_orphans,
-            "checked": checked,
-            "total_removed": total_removed,
-            "new_files_indexed": new_files_indexed,
-            "errors": errors,
-            "verify_limit": verify_limit,
-            "duration_seconds": duration,
-            "start_time": start_time.isoformat(),
-            "end_time": end_time.isoformat()
-        })
+                # Calculate scan rate
+                scan_rate = scanned / duration if duration > 0 else 0
 
-        # Update status message with results
-        await status_msg.edit_text(
-            f"**Database Maintenance Complete**\n\n"
-            f"Results:\n"
-            f"Duplicates removed: {duplicates_removed}\n"
-            f"Orphaned entries removed: {orphans_removed}\n"
-            f"Verified orphans removed: {verified_orphans}\n"
-            f"New files indexed: {new_files_indexed}\n"
-            f"Entries checked: {checked}/{verify_limit}\n"
-            f"Total cleaned: {total_removed}\n"
-            f"Errors: {errors}\n\n"
-            f"Duration: {duration:.2f} seconds\n"
-            f"By: {uid}\n"
-            f"Completed: {end_time.strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
-            f"Database is now optimized and clean.\n"
-            f"Use /update_db {verify_limit * 2} to check more entries."
-        )
+                # Final status with completed progress bar
+                await status_msg.edit_text(
+                    f"✅ **Database Update Complete**\n\n"
+                    f"📺 **Channel:** {channel_title}\n"
+                    f"📍 **Range:** `{start_id}` → `{end_id}`\n\n"
+                    f"`[████████████████████]` 100%\n\n"
+                    f"**📊 Results:**\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🔍 Messages Scanned: `{scanned}`\n"
+                    f"🗑️ Orphans Removed: `{orphans_removed}`\n"
+                    f"➕ New Files Indexed: `{new_indexed}`\n"
+                    f"📁 Already Indexed: `{already_indexed}`\n"
+                    f"📭 No Media (Skipped): `{skipped_no_media}`\n"
+                    f"⚠️ Errors: `{errors}`\n\n"
+                    f"⏱️ **Duration:** {duration:.1f}s ({scan_rate:.1f} msg/s)\n"
+                    f"👤 **By:** `{uid}`\n"
+                    f"📅 **Completed:** {end_time.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                )
+
+                print(f"\n{'='*60}")
+                print(f"[UPDATE_DB] ✅ Database update completed!")
+                print(f"[UPDATE_DB] Summary:")
+                print(f"  - Scanned: {scanned} messages")
+                print(f"  - Orphans removed: {orphans_removed}")
+                print(f"  - New files indexed: {new_indexed}")
+                print(f"  - Already indexed: {already_indexed}")
+                print(f"  - No media: {skipped_no_media}")
+                print(f"  - Errors: {errors}")
+                print(f"  - Duration: {duration:.1f}s ({scan_rate:.1f} messages/second)")
+                print(f"{'='*60}\n")
+
+            except Exception as e:
+                print(f"[UPDATE_DB] ❌ Critical error: {e}")
+                import traceback
+                traceback.print_exc()
+
+                await status_msg.edit_text(
+                    f"❌ **Database Update Failed**\n\n"
+                    f"**Error:** {str(e)}\n\n"
+                    f"📊 **Partial Results:**\n"
+                    f"🔍 Scanned: {scanned}/{total_range}\n"
+                    f"🗑️ Orphans Removed: {orphans_removed}\n"
+                    f"➕ New Indexed: {new_indexed}\n"
+                    f"⚠️ Errors: {errors + 1}\n\n"
+                    f"Check logs for more details."
+                )
+
+    except asyncio.TimeoutError:
+        try:
+            await selection_msg.delete()
+        except Exception:
+            pass
+        await message.reply_text("⏰ **Timeout!** Please try again with /update_db")
+    except Exception as e:
+        print(f"[UPDATE_DB] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        await message.reply_text(f"❌ **Error:** {e}")
 
         print(f"Database maintenance completed by user {uid}. "
               f"Removed {duplicates_removed} duplicates, {orphans_removed} orphans, "
