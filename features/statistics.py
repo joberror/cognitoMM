@@ -56,12 +56,43 @@ async def collect_comprehensive_stats(admin_id=None):
         )
         
         # Unpack results
-        (stats['total_users'], stats['active_users_7d'], stats['banned_users'], 
+        (stats['total_users'], stats['active_users_7d'], stats['banned_users'],
          stats['admin_users'], stats['premium_users'], stats['total_content'],
          stats['total_movies'], stats['total_series'], stats['total_channels'],
          stats['enabled_channels'], stats['pending_requests'], stats['completed_requests'],
          stats['total_logs']) = results
-        
+
+        # Count unique movie titles (distinct titles where type is movie/film)
+        unique_movie_titles_pipeline = [
+            {"$match": {"type": {"$regex": "^(movie|film)$", "$options": "i"}}},
+            {"$group": {"_id": "$title"}},
+            {"$count": "count"}
+        ]
+        unique_movie_result = await movies_col.aggregate(unique_movie_titles_pipeline).to_list(length=1)
+        stats['unique_movie_titles'] = unique_movie_result[0]['count'] if unique_movie_result else 0
+
+        # Count unique show titles (distinct titles where type is series/tv/show)
+        unique_show_titles_pipeline = [
+            {"$match": {"type": {"$regex": "^(series|tv|show)$", "$options": "i"}}},
+            {"$group": {"_id": "$title"}},
+            {"$count": "count"}
+        ]
+        unique_show_result = await movies_col.aggregate(unique_show_titles_pipeline).to_list(length=1)
+        stats['unique_show_titles'] = unique_show_result[0]['count'] if unique_show_result else 0
+
+        # Get latest content update date (most recently indexed/uploaded content)
+        latest_content = await movies_col.find_one(
+            {},
+            sort=[("upload_date", -1)],
+            projection={"upload_date": 1, "title": 1}
+        )
+        if latest_content and latest_content.get('upload_date'):
+            stats['latest_content_date'] = latest_content['upload_date']
+            stats['latest_content_title'] = latest_content.get('title', 'Unknown')
+        else:
+            stats['latest_content_date'] = None
+            stats['latest_content_title'] = None
+
         # Quality distribution (aggregation with normalization)
         quality_pipeline = [
             {"$group": {"_id": "$quality", "count": {"$sum": 1}}},
@@ -221,17 +252,103 @@ async def collect_comprehensive_stats(admin_id=None):
         # Indexing statistics
         from .indexing import indexing_stats
         stats['indexing_stats'] = indexing_stats.copy()
-        
+
         # Database size estimation (count-based)
         stats['db_estimated_size'] = (
             stats['total_content'] * 1024 +  # ~1KB per content entry
             stats['total_users'] * 512 +      # ~512B per user
             stats['total_logs'] * 256         # ~256B per log
         )
-        
+
+        # === ADDITIONAL STATISTICS ===
+
+        # Total file size per channel (aggregation)
+        channel_size_pipeline = [
+            {"$match": {"file_size": {"$exists": True, "$ne": None, "$gt": 0}}},
+            {"$group": {
+                "_id": "$channel_id",
+                "total_size": {"$sum": "$file_size"},
+                "file_count": {"$sum": 1}
+            }},
+            {"$sort": {"total_size": -1}}
+        ]
+        channel_sizes = await movies_col.aggregate(channel_size_pipeline).to_list(length=None)
+
+        # Enrich with channel titles
+        channel_size_details = []
+        for ch in channel_sizes:
+            ch_id = ch['_id']
+            ch_title = channel_titles.get(ch_id)
+            if not ch_title:
+                ch_doc = await channels_col.find_one({"channel_id": ch_id})
+                ch_title = (ch_doc.get('channel_title') if ch_doc else None) or f"ID:{ch_id}"
+            channel_size_details.append({
+                'channel_id': ch_id,
+                'channel_title': ch_title or f"ID:{ch_id}",
+                'total_size': ch['total_size'],
+                'file_count': ch['file_count']
+            })
+        stats['channel_sizes'] = channel_size_details
+
+        # Top 5 users by activity (excluding admins)
+        # Activity is based on total searches (from search_history array length)
+        from .config import ADMINS
+
+        top_users_pipeline = [
+            # Exclude admin users by role
+            {"$match": {"role": {"$ne": "admin"}}},
+            # Calculate search count from search_history array
+            {"$addFields": {
+                "search_count": {"$size": {"$ifNull": ["$search_history", []]}}
+            }},
+            # Sort by search count descending
+            {"$sort": {"search_count": -1}},
+            # Limit to top 10 to allow filtering out config admins
+            {"$limit": 20},
+            # Project needed fields
+            {"$project": {
+                "user_id": 1,
+                "username": 1,
+                "first_name": 1,
+                "search_count": 1,
+                "role": 1
+            }}
+        ]
+        top_users_raw = await users_col.aggregate(top_users_pipeline).to_list(length=20)
+
+        # Filter out config admins and check premium status
+        top_users = []
+        for user in top_users_raw:
+            user_id = user.get('user_id')
+            if user_id in ADMINS:
+                continue  # Skip config admins
+
+            # Check if user is premium
+            premium_doc = await premium_users_col.find_one({"user_id": user_id})
+            is_premium = False
+            if premium_doc:
+                expiry = premium_doc.get('expiry_date')
+                if expiry:
+                    if expiry.tzinfo is None:
+                        expiry = expiry.replace(tzinfo=timezone.utc)
+                    is_premium = expiry > datetime.now(timezone.utc)
+
+            top_users.append({
+                'user_id': user_id,
+                'username': user.get('username'),
+                'first_name': user.get('first_name'),
+                'search_count': user.get('search_count', 0),
+                'role': 'Premium' if is_premium else 'Free'
+            })
+
+            if len(top_users) >= 5:
+                break
+
+        stats['top_users'] = top_users
+
         # Timestamp
         stats['generated_at'] = datetime.now(timezone.utc).isoformat()
-        
+
         return stats
         
     except Exception as e:
@@ -455,22 +572,81 @@ def format_stats_output(stats):
     # Activity bar
     if total_users > 0:
         active_pct = (active_users / total_users) * 100
-        output.append(f"┖ <b>Activity:</b> <code>{create_progress_bar(active_pct)}</code>")
+        output.append(f"┠ <b>Activity:</b> <code>{create_progress_bar(active_pct)}</code>")
         output.append("")
-    
+
+    # Top 5 Users (under User Statistics)
+    top_users = stats.get('top_users', [])
+    if top_users:
+        output.append("┠ <b>🏆 Top 5 Users:</b>")
+        for idx, user in enumerate(top_users, 1):
+            user_id = user.get('user_id', 'Unknown')
+            username = user.get('username')
+            first_name = user.get('first_name', 'Unknown')
+            search_count = user.get('search_count', 0)
+            role = user.get('role', 'Free')
+
+            # Format display name (show username or first_name, plus user_id)
+            if username:
+                display_name = f"@{username}"
+            else:
+                display_name = (first_name or 'User')[:15]
+
+            # Role emoji
+            role_emoji = "⭐" if role == "Premium" else "👤"
+
+            # Medal for top 3
+            medal = ""
+            if idx == 1:
+                medal = "🥇 "
+            elif idx == 2:
+                medal = "🥈 "
+            elif idx == 3:
+                medal = "🥉 "
+
+            if idx == len(top_users):
+                output.append(f"┖  {medal}<b>{display_name}</b> <code>[{user_id}]</code>")
+            else:
+                output.append(f"   {medal}<b>{display_name}</b> <code>[{user_id}]</code>")
+            output.append(f"       {role_emoji} {role} • 🔍 {format_number(search_count)} searches")
+    else:
+        output.append("┖ <i>No top user data available</i>")
+
+    output.append("")
+
     # === CONTENT STATISTICS ===
     output.append("<b>CONTENT STATISTICS</b>")
     output.append("")
-    
+
     total_content = stats.get('total_content', 0)
     total_movies = stats.get('total_movies', 0)
     total_series = stats.get('total_series', 0)
-    
+    unique_movie_titles = stats.get('unique_movie_titles', 0)
+    unique_show_titles = stats.get('unique_show_titles', 0)
+
     output.append(f"┎ <b>Total Files:</b> {format_number(total_content)}")
-    output.append(f"┠ <b>Movies:</b> {format_number(total_movies)} <i>({format_percentage(total_movies, total_content)})</i>")
-    output.append(f"┠ <b>Series/TV:</b> {format_number(total_series)} <i>({format_percentage(total_series, total_content)})</i>")
+    output.append(f"┠ <b>Movie Files:</b> {format_number(total_movies)} <i>({format_percentage(total_movies, total_content)})</i>")
+    output.append(f"┠ <b>Series/TV Files:</b> {format_number(total_series)} <i>({format_percentage(total_series, total_content)})</i>")
     output.append("")
-    
+    output.append(f"┠ <b>Movie Titles:</b> {format_number(unique_movie_titles)}")
+    output.append(f"┠ <b>Show Titles:</b> {format_number(unique_show_titles)}")
+    output.append("")
+
+    # Latest content update
+    latest_date = stats.get('latest_content_date')
+    if latest_date:
+        # Format the date nicely
+        if hasattr(latest_date, 'strftime'):
+            formatted_date = latest_date.strftime("%Y-%m-%d %H:%M UTC")
+        else:
+            formatted_date = str(latest_date)
+        latest_title = stats.get('latest_content_title', 'Unknown')
+        # Truncate title if too long
+        if latest_title and len(latest_title) > 25:
+            latest_title = latest_title[:22] + "..."
+        output.append(f"┠ <b>Latest Update:</b> <code>{formatted_date}</code>")
+        output.append("")
+
     # Top qualities with progress bars
     quality_dist = stats.get('quality_distribution', [])
     if quality_dist:
@@ -530,15 +706,31 @@ def format_stats_output(stats):
             count = ch['count']
             # Add trophy icon for channel with most files (index 1)
             trophy = "🏆 " if idx == 1 else ""
-            if idx == len(channel_dist[:5]):
-                output.append(f"┖  {idx}. {trophy}<b>{ch_name[:25]}</b>: {format_number(count)}")
+            output.append(f"   {idx}. {trophy}<b>{ch_name[:25]}</b>: {format_number(count)}")
+        output.append("")
+
+    # Channel storage sizes
+    channel_sizes = stats.get('channel_sizes', [])
+    if channel_sizes:
+        output.append("┠ <b>Channel Storage (size):</b>")
+        for idx, ch in enumerate(channel_sizes[:5], 1):
+            ch_name = (ch.get('channel_title') or 'Unknown')[:22]
+            total_size = ch.get('total_size', 0)
+            size_str = format_file_size_stat(total_size)
+            # Add disk icon for largest storage
+            disk = "💾 " if idx == 1 else ""
+            if idx == len(channel_sizes[:5]):
+                output.append(f"┖  {idx}. {disk}<b>{ch_name}</b>: {size_str}")
             else:
-                output.append(f"   {idx}. {trophy}<b>{ch_name[:25]}</b>: {format_number(count)}")
+                output.append(f"   {idx}. {disk}<b>{ch_name}</b>: {size_str}")
         output.append("")
     else:
-        # Close the last item if no channels
-        output[-2] = output[-2].replace("┠", "┖", 1)
-    
+        # Close the last item if no channel sizes
+        if channel_dist:
+            output[-2] = output[-2].replace("   ", "┖  ", 1)
+        else:
+            output[-2] = output[-2].replace("┠", "┖", 1)
+
     # === SYSTEM STATISTICS ===
     output.append("<b>SYSTEM STATISTICS</b>")
     output.append("")
@@ -607,19 +799,19 @@ def format_stats_output(stats):
         avg_days = sum(p['days_remaining'] for p in premium_details) / len(premium_details)
         output.append("")
         output.append(f"┠ <b>Avg Days Left:</b> {avg_days:.1f} days")
-        
+
         # Group by days remaining
         expiring_soon = len([p for p in premium_details if p['days_remaining'] <= 7])
         expiring_month = len([p for p in premium_details if 7 < p['days_remaining'] <= 30])
-        
+
         output.append(f"┠ <b>Expiring (7d):</b> {format_number(expiring_soon)}")
         output.append(f"┖ <b>Expiring (30d):</b> {format_number(expiring_month)}")
     else:
         # Close the last item if no premium details
         output[-1] = output[-1].replace("┠", "┖", 1)
-    
+
     output.append("")
-    
+
     # === FOOTER ===
     output.append("─" * 45)
     gen_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
