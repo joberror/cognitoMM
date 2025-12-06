@@ -1,0 +1,13 @@
+{
+	"servers": {
+		"everything": {
+			"command": "npx",
+			"args": [
+				"-y",
+				"@modelcontextprotocol/server-everything"
+			],
+			"type": "stdio"
+		}
+	},
+	"inputs": []
+}
