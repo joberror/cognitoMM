@@ -687,6 +687,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
         elif data.startswith("mdel#"):
             # Handle manual deletion callbacks
             from .config import temp_data
+            from .database import movies_col
 
             parts = data.split("#")
             session_id = parts[1]
@@ -765,6 +766,10 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     if idx < len(results):
                         doc = results[idx]
                         try:
+                            # DIAGNOSTIC LOG: Check movies_col before deletion
+                            print(f"🔍 DEBUG: About to delete entry {doc['_id']}")
+                            print(f"🔍 DEBUG: movies_col available: {movies_col is not None}")
+                            
                             result = await movies_col.delete_one({"_id": doc['_id']})
                             if result.deleted_count > 0:
                                 deleted_count += 1
@@ -772,6 +777,10 @@ async def callback_handler(client, callback_query: CallbackQuery):
                         except Exception as e:
                             errors += 1
                             print(f"Error deleting entry {doc['_id']}: {e}")
+                            # DIAGNOSTIC LOG: Check if this is the specific error
+                            if "cannot access local variable 'movies_col'" in str(e):
+                                print(f"🔍 CRITICAL: This is the movies_col scoping error!")
+                                print(f"🔍 DEBUG: movies_col type in exception: {type(movies_col) if 'movies_col' in locals() else 'NOT IN LOCALS'}")
 
                 # Log the action
                 await log_action("manual_deletion_confirmed", by=user_id, extra={
