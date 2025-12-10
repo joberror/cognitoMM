@@ -122,6 +122,8 @@ async def handle_command(client, message: Message):
         await cmd_reset_channel(client, message)
     elif command == 'recent':
         await cmd_recent(client, message)
+    elif command == 'trending':
+        await cmd_trending(client, message)
     elif command == 'indexing_stats':
         await cmd_indexing_stats(client, message)
     elif command == 'reset_stats':
@@ -152,6 +154,7 @@ USER_HELP = """
 /search -e <title>      - Exact search (match full title)
 /metadata <title>         - Show rich metadata
 /recent                   - Show recently added content
+/trending                 - View trending movies and shows
 /my_history               - Show your search history
 /my_prefs                 - Show or set preferences
 /my_stat                  - View your personal statistics
@@ -695,6 +698,52 @@ async def cmd_recent(client, message: Message):
             "❌ **Error**\n\n"
             "Unable to fetch recent content. Please try again later."
         )
+
+
+async def cmd_trending(client, message: Message):
+    """Handle /trending command to display trending movies, shows, and new releases"""
+    from .tmdb_integration import get_trending_movies, format_trending_list
+
+    # Fetch trending movies by default
+    status_msg = await message.reply_text("Fetching trending content...")
+
+    try:
+        movies = await get_trending_movies()
+
+        if not movies:
+            await status_msg.edit_text(
+                "**Trending**\n\n"
+                "Unable to fetch trending data. Please try again later."
+            )
+            return
+
+        # Format the list
+        content = format_trending_list(movies, "movies")
+
+        # Create category buttons (Movies is active by default)
+        buttons = [
+            [
+                InlineKeyboardButton("🟨 Movies", callback_data="trending:movies:active"),
+                InlineKeyboardButton("Shows", callback_data="trending:shows"),
+                InlineKeyboardButton("New Releases", callback_data="trending:releases")
+            ]
+        ]
+
+        output = f"🔥 **Trending Movies**\n\n{content}"
+
+        await status_msg.edit_text(
+            output,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            disable_web_page_preview=True
+        )
+
+    except Exception as e:
+        print(f"Error in trending command: {e}")
+        await status_msg.edit_text(
+            "**Trending**\n\n"
+            "Unable to fetch trending data. Please try again later."
+        )
+
 
 # -------------------------
 # Admin Commands (simplified implementations)

@@ -1262,6 +1262,73 @@ async def callback_handler(client, callback_query: CallbackQuery):
             else:
                 await callback_query.answer(f"❌ {message}", show_alert=True)
 
+        elif data.startswith("trending:"):
+            # Handle trending category callbacks
+            from .tmdb_integration import get_trending_movies, get_trending_shows, get_new_releases, format_trending_list
+
+            parts = data.split(":")
+            category = parts[1]
+
+            # Check if already active (ignore click)
+            if len(parts) > 2 and parts[2] == "active":
+                await callback_query.answer("Already viewing this category")
+                return
+
+            await callback_query.answer(f"Loading {category}...")
+
+            try:
+                if category == "movies":
+                    items = await get_trending_movies()
+                    content = format_trending_list(items, "movies")
+                    header = "🔥 **Trending Movies**"
+                    buttons = [
+                        [
+                            InlineKeyboardButton("🟨 Movies", callback_data="trending:movies:active"),
+                            InlineKeyboardButton("Shows", callback_data="trending:shows"),
+                            InlineKeyboardButton("New Releases", callback_data="trending:releases")
+                        ]
+                    ]
+                elif category == "shows":
+                    items = await get_trending_shows()
+                    content = format_trending_list(items, "shows")
+                    header = "🔥 **Trending Shows**"
+                    buttons = [
+                        [
+                            InlineKeyboardButton("Movies", callback_data="trending:movies"),
+                            InlineKeyboardButton("🟩 Shows", callback_data="trending:shows:active"),
+                            InlineKeyboardButton("New Releases", callback_data="trending:releases")
+                        ]
+                    ]
+                elif category == "releases":
+                    items = await get_new_releases()
+                    content = format_trending_list(items, "releases")
+                    header = "🔥 **New Releases**"
+                    buttons = [
+                        [
+                            InlineKeyboardButton("Movies", callback_data="trending:movies"),
+                            InlineKeyboardButton("Shows", callback_data="trending:shows"),
+                            InlineKeyboardButton("🟦 New Releases", callback_data="trending:releases:active")
+                        ]
+                    ]
+                else:
+                    await callback_query.answer("Invalid category", show_alert=True)
+                    return
+
+                if not items:
+                    content = "No data available."
+
+                output = f"{header}\n\n{content}"
+
+                await callback_query.message.edit_text(
+                    output,
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                    disable_web_page_preview=True
+                )
+
+            except Exception as e:
+                print(f"Error in trending callback: {e}")
+                await callback_query.answer("Failed to fetch data", show_alert=True)
+
         else:
             await callback_query.answer("❌ Unknown action.", show_alert=True)
 
