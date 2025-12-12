@@ -614,7 +614,7 @@ async def cmd_my_stat(client, message: Message):
         )
 
 async def cmd_recent(client, message: Message):
-    """Handle /recent command to display recently added content"""
+    """Handle /recent command to display last batch update content"""
 
     # Check if user is banned
     if await check_banned(message):
@@ -626,15 +626,38 @@ async def cmd_recent(client, message: Message):
         # Check if user is premium or admin
         if not await is_admin(uid) and not await is_premium_user(uid):
             return await message.reply_text(
-                "⭐ **Premium Feature**\n\n"
+                "⭐ <b>Premium Feature</b>\n\n"
                 "The /recent command is a premium-only feature.\n\n"
-                "Contact an admin to get premium access."
+                "Contact an admin to get premium access.",
+                parse_mode=ParseMode.HTML
             )
 
     try:
-        # Database query with error handling
+        # First, get the most recent indexed_at timestamp
+        latest_doc = await movies_col.find_one(
+            {"indexed_at": {"$exists": True}},
+            {"indexed_at": 1},
+            sort=[("indexed_at", -1)]
+        )
+
+        if not latest_doc or not latest_doc.get('indexed_at'):
+            await message.reply_text(
+                "📭 <b>No Content Found</b>\n\n"
+                "The database doesn't contain any indexed content yet.\n\n"
+                "💡 Add channels and enable indexing to see recent content here.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        # Get the latest indexed_at timestamp
+        latest_indexed_at = latest_doc['indexed_at']
+
+        # Define batch window: files indexed within 10 minutes of the most recent
+        batch_window_start = latest_indexed_at - timedelta(minutes=10)
+
+        # Query for files in the last batch
         cursor = movies_col.find(
-            {},
+            {"indexed_at": {"$gte": batch_window_start}},
             {
                 "title": 1,
                 "type": 1,
@@ -645,16 +668,16 @@ async def cmd_recent(client, message: Message):
                 "indexed_at": 1,
                 "_id": 1
             }
-        ).sort("indexed_at", -1).limit(100)
+        ).sort("indexed_at", -1)
 
-        raw_results = await cursor.to_list(length=100)
+        raw_results = await cursor.to_list(length=None)
 
         # Handle empty results
         if not raw_results:
             await message.reply_text(
-                "📭 **No Content Found**\n\n"
-                "The database doesn't contain any indexed content yet.\n\n"
-                "💡 Add channels and enable indexing to see recent content here."
+                "📭 <b>No Content Found</b>\n\n"
+                "No recent batch updates found.",
+                parse_mode=ParseMode.HTML
             )
             return
 
@@ -664,19 +687,18 @@ async def cmd_recent(client, message: Message):
         total_series = len([r for r in raw_results if r.get('type', 'Movie').lower() in ['series', 'tv', 'show']])
 
         # Get last updated time from most recent item
-        last_updated = None
-        if raw_results:
-            last_indexed = raw_results[0].get('indexed_at')
-            if last_indexed:
-                # Format datetime for display
-                last_updated = last_indexed.strftime('%Y-%m-%d %H:%M:%S UTC')
+        last_updated = latest_indexed_at.strftime('%Y-%m-%d %H:%M UTC')
 
         # Process and format results
         grouped_results = group_recent_content(raw_results)
         formatted_output = format_recent_output(grouped_results, total_files, total_movies, total_series, last_updated)
 
-        # Send response
-        await message.reply_text(formatted_output, disable_web_page_preview=True)
+        # Send response with HTML parse mode
+        await message.reply_text(
+            formatted_output,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
 
         # Log successful usage
         await log_action("recent_command", by=message.from_user.id, extra={
@@ -684,7 +706,8 @@ async def cmd_recent(client, message: Message):
             "grouped_count": len(grouped_results),
             "total_files": total_files,
             "total_movies": total_movies,
-            "total_series": total_series
+            "total_series": total_series,
+            "batch_window_minutes": 10
         })
 
     except Exception as e:
@@ -695,8 +718,9 @@ async def cmd_recent(client, message: Message):
         })
 
         await message.reply_text(
-            "❌ **Error**\n\n"
-            "Unable to fetch recent content. Please try again later."
+            "❌ <b>Error</b>\n\n"
+            "Unable to fetch recent content. Please try again later.",
+            parse_mode=ParseMode.HTML
         )
 
 

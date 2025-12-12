@@ -158,17 +158,19 @@ def group_recent_content(results):
 
     # Process movies
     for movie_data in movies:
-        display_name = format_movie_group(movie_data)
+        title, details = format_movie_group(movie_data)
         categorized_results['movies'].append({
-            'display_name': display_name,
+            'title': title,
+            'details': details,
             'count': movie_data['count']
         })
 
     # Process series
     for series_data in series:
-        display_name = format_series_group(series_data)
+        title, details = format_series_group(series_data)
         categorized_results['series'].append({
-            'display_name': display_name,
+            'title': title,
+            'details': details,
             'count': series_data['count']
         })
 
@@ -176,108 +178,118 @@ def group_recent_content(results):
 
 
 def format_movie_group(group_data):
-    """Format movie group with quality consolidation and year"""
+    """Format movie group with quality consolidation and year. Returns (title, details)."""
     title = group_data['title']
     year = group_data['year']
     qualities = sorted(group_data['qualities'])
-    
-    # Start with title and year
-    base_name = f"{title} {year}" if year else title
-    
-    if not qualities:
-        return base_name
-    
-    if len(qualities) == 1:
-        return f"{base_name} ({qualities[0]})"
-    else:
-        # Join multiple qualities with " & "
-        quality_str = " & ".join(qualities)
-        return f"{base_name} ({quality_str})"
+
+    # Build details string (year + qualities)
+    details_parts = []
+    if year:
+        details_parts.append(str(year))
+
+    if qualities:
+        if len(qualities) == 1:
+            details_parts.append(f"({qualities[0]})")
+        else:
+            quality_str = " & ".join(qualities)
+            details_parts.append(f"({quality_str})")
+
+    details = " ".join(details_parts)
+    return title, details
 
 
 def format_series_group(group_data):
-    """Format series group with season/episode consolidation and year"""
+    """Format series group with season/episode consolidation and year. Returns (title, details)."""
     title = group_data['title']
     year = group_data['year']
     seasons_episodes = group_data['seasons_episodes']
-    
-    # Start with title and year
-    base_name = f"{title} {year}" if year else title
-    
-    if not seasons_episodes:
-        return base_name
-    
-    # Group by season
-    season_groups = {}
-    for season, episode in seasons_episodes:
-        if season not in season_groups:
-            season_groups[season] = []
-        season_groups[season].append(episode)
-    
-    # Format each season's episode ranges
-    season_parts = []
-    for season in sorted(season_groups.keys()):
-        episodes = sorted(season_groups[season])
-        
-        if len(episodes) == 1:
-            episode_str = f"E{episodes[0]:02d}"
-        else:
-            # Create episode range
-            first_ep = episodes[0]
-            last_ep = episodes[-1]
-            episode_str = f"E{first_ep:02d}-{last_ep:02d}"
-        
-        season_parts.append(f"S{season:02d}({episode_str})")
-    
-    # Join all season parts with base name
-    episode_info = ", ".join(season_parts)
-    return f"{base_name} {episode_info}"
+
+    # Build details parts
+    details_parts = []
+    if year:
+        details_parts.append(str(year))
+
+    if seasons_episodes:
+        # Group by season
+        season_groups = {}
+        for season, episode in seasons_episodes:
+            if season not in season_groups:
+                season_groups[season] = []
+            season_groups[season].append(episode)
+
+        # Format each season's episode ranges
+        season_parts = []
+        for season in sorted(season_groups.keys()):
+            episodes = sorted(season_groups[season])
+
+            if len(episodes) == 1:
+                episode_str = f"E{episodes[0]:02d}"
+            else:
+                # Create episode range
+                first_ep = episodes[0]
+                last_ep = episodes[-1]
+                episode_str = f"E{first_ep:02d}-{last_ep:02d}"
+
+            season_parts.append(f"S{season:02d}({episode_str})")
+
+        episode_info = ", ".join(season_parts)
+        details_parts.append(episode_info)
+
+    details = " ".join(details_parts)
+    return title, details
 
 
 def format_recent_output(categorized_results, total_files=None, total_movies=None, total_series=None, last_updated=None):
-    """Format categorized results for display with context information"""
-    output_text = f"```\n"
-    output_text += f"Recently Added Content\n\n"
-    
+    """Format categorized results for display with context information (plain HTML, click-to-copy titles)"""
+    output_text = "<b>LAST BATCH UPDATE</b>\n\n"
+
     # Add context information
     if last_updated:
-        output_text += f"Last Updated: {last_updated}\n"
+        output_text += f"Updated: {last_updated}\n"
     if total_files is not None:
-        output_text += f"Total Files Added: {total_files}\n"
-    if total_movies is not None:
-        output_text += f"Total Movie Files: {total_movies}\n"
-    if total_series is not None:
-        output_text += f"Total Series Files: {total_series}\n"
-    
-    output_text += f"\n"
-    
+        output_text += f"Files: {total_files}"
+        if total_movies is not None and total_series is not None:
+            output_text += f" (Movies: {total_movies} | Series: {total_series})"
+        output_text += "\n"
+
+    output_text += "\n"
+
     # Display Movies section
     movies = categorized_results['movies']
     if movies:
-        output_text += f"MOVIES\n"
-        output_text += f"{'-' * 40}\n"
+        output_text += "<b>MOVIES</b>\n"
+        output_text += "─" * 30 + "\n"
         for i, result in enumerate(movies, 1):
-            display_name = result['display_name']
-            output_text += f"{i}. {display_name}\n"
-        output_text += f"\n"
-    
+            title = result['title']
+            details = result.get('details', '')
+            if details:
+                output_text += f"{i}. <code>{title}</code> {details}\n"
+            else:
+                output_text += f"{i}. <code>{title}</code>\n"
+        output_text += "\n"
+
     # Display Series section
     series = categorized_results['series']
     if series:
-        output_text += f"SERIES\n"
-        output_text += f"{'-' * 40}\n"
+        output_text += "<b>SERIES</b>\n"
+        output_text += "─" * 30 + "\n"
         for i, result in enumerate(series, 1):
-            display_name = result['display_name']
-            output_text += f"{i}. {display_name}\n"
-        output_text += f"\n"
-    
+            title = result['title']
+            details = result.get('details', '')
+            if details:
+                output_text += f"{i}. <code>{title}</code> {details}\n"
+            else:
+                output_text += f"{i}. <code>{title}</code>\n"
+        output_text += "\n"
+
     # Calculate total items and check if we hit limit
     total_items = len(movies) + len(series)
     if total_items >= 20:
-        output_text += f"..and many others"
-    
-    output_text += f"```"
-    
+        output_text += "<i>..and more</i>"
+
+    output_text += "\n<i>Tap any title to copy</i>"
+
     return output_text
 
 
