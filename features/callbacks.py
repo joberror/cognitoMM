@@ -17,7 +17,7 @@ from hydrogram.enums import ParseMode
 from .config import LOG_CHANNEL, client
 from .database import users_col, movies_col, requests_col, premium_users_col, premium_features_col
 from .config import bulk_downloads, temp_data, user_input_events
-from .utils import cleanup_expired_bulk_downloads, wait_for_user_input, set_user_input
+from .utils import cleanup_expired_bulk_downloads, wait_for_user_input, set_user_input, construct_final_caption
 from .file_deletion import track_file_for_deletion
 from .search import format_file_size, send_search_results
 from .user_management import should_process_command_for_user, has_accepted_terms, is_admin, log_action
@@ -122,19 +122,23 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 if not msg:
                     raise Exception("Message not found")
 
+                # Parse custom caption from database
+                db_item = await movies_col.find_one({"channel_id": channel_id, "message_id": message_id})
+                final_caption = construct_final_caption(db_item) or msg.caption or ""
+
                 # Extract media and send using send_cached_media (no forward header)
                 sent_message = None
                 if msg.video:
                     sent_message = await client.send_cached_media(
                         chat_id=callback_query.from_user.id,
                         file_id=msg.video.file_id,
-                        caption=msg.caption or ""
+                        caption=final_caption
                     )
                 elif msg.document:
                     sent_message = await client.send_cached_media(
                         chat_id=callback_query.from_user.id,
                         file_id=msg.document.file_id,
-                        caption=msg.caption or ""
+                        caption=final_caption
                     )
                 else:
                     raise Exception("Message does not contain video or document")
@@ -432,7 +436,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
             elif action == "monitoring":
                 # Toggle the auto-indexing setting
-                from .database import settings_col, channels_col, movies_col
+                from .database import settings_col, channels_col
                 from .config import AUTO_INDEX_DEFAULT
 
                 uid = callback_query.from_user.id
@@ -582,19 +586,23 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     if not msg:
                         raise Exception("Message not found")
 
+                    # Parse custom caption from database
+                    db_item = await movies_col.find_one({"channel_id": channel_id, "message_id": message_id})
+                    final_caption = construct_final_caption(db_item) or msg.caption or ""
+
                     # Extract media and send using send_cached_media (no forward header)
                     sent_message = None
                     if msg.video:
                         sent_message = await client.send_cached_media(
                             chat_id=callback_query.from_user.id,
                             file_id=msg.video.file_id,
-                            caption=msg.caption or ""
+                            caption=final_caption
                         )
                     elif msg.document:
                         sent_message = await client.send_cached_media(
                             chat_id=callback_query.from_user.id,
                             file_id=msg.document.file_id,
-                            caption=msg.caption or ""
+                            caption=final_caption
                         )
                     else:
                         raise Exception("Message does not contain video or document")
@@ -687,7 +695,6 @@ async def callback_handler(client, callback_query: CallbackQuery):
         elif data.startswith("mdel#"):
             # Handle manual deletion callbacks
             from .config import temp_data
-            from .database import movies_col
 
             parts = data.split("#")
             session_id = parts[1]

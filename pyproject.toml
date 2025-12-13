@@ -1,0 +1,5 @@
+[tool.codeflash]
+module-root = "features"
+tests-root = "tests"
+test-framework = "pytest"
+formatter-cmds = ["disabled"]

@@ -568,6 +568,58 @@ def format_series_group(group_data):
     details = " ".join(details_parts)
     return title, details
 
+def construct_final_caption(db_item):
+    """Construct a standardized caption from a database item."""
+    if not db_item:
+        return None
+
+    # Extract Data
+    title = db_item.get('title', 'Unknown Title').upper()
+    
+    # Handle Series Title
+    type_ = db_item.get('type', 'Movie').lower()
+    if type_ in ['series', 'tv', 'show'] and db_item.get('season') and db_item.get('episode'):
+        season = int(db_item['season'])
+        episode = int(db_item['episode'])
+        title = f"{title} S{season:02d}E{episode:02d}"
+
+    year = db_item.get('year')
+    quality = db_item.get('quality', 'N/A')
+    source = db_item.get('rip') or db_item.get('source') or 'N/A'
+    audio = db_item.get('audio')
+    ext = db_item.get('extension', '.mkv').replace('.', '').upper()
+
+    # Design Constants
+    bar = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    # Build content lines
+    lines = []
+    
+    if year and str(year) != 'N/A':
+        lines.append(f" 📅  Year        ───────────     {year}")
+        
+    lines.append(f" 🎞️  Quality     ───────────     {quality}")
+    lines.append(f" 💿  Source      ───────────     {source}")
+    
+    if audio and str(audio) != 'N/A':
+        lines.append(f" 🔊  Audio       ───────────     {audio}")
+        
+    lines.append(f" 📦  Format      ───────────     {ext}")
+    
+    middle_content = "\n".join(lines)
+    
+    # Template
+    template = f"""
+{bar}
+{title.center(len(bar))}
+{bar}
+
+{middle_content}
+
+{bar}
+"""
+    return f"```\n{template.strip()}\n```"
+
 def format_recent_output(categorized_results, total_files=None, total_movies=None, total_series=None, last_updated=None):
     """Format categorized results for display with context information (plain HTML, click-to-copy titles)"""
     output_text = "<b>LAST BATCH UPDATE</b>\n\n"
