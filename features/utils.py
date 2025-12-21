@@ -568,7 +568,18 @@ def format_series_group(group_data):
     details = " ".join(details_parts)
     return title, details
 
-def construct_final_caption(db_item):
+def format_size(size_bytes):
+    if not size_bytes:
+        return ""
+    # Convert to GB or MB
+    size_gb = size_bytes / (1024 * 1024 * 1024)
+    if size_gb >= 1:
+        return f"{size_gb:.2f}GB"
+    
+    size_mb = size_bytes / (1024 * 1024)
+    return f"{size_mb:.2f}MB"
+
+def construct_final_caption(db_item, file_size_bytes=None, user_name="User"):
     """Construct a standardized caption from a database item."""
     if not db_item:
         return None
@@ -581,44 +592,52 @@ def construct_final_caption(db_item):
     if type_ in ['series', 'tv', 'show'] and db_item.get('season') and db_item.get('episode'):
         season = int(db_item['season'])
         episode = int(db_item['episode'])
-        title = f"{title} S{season:02d}E{episode:02d}"
+        title = f"`{title}` - S{season:02d}E{episode:02d}"
+
+    # Copy-to-text format (monospace)
+    title_formatted = f"{title}"
 
     year = db_item.get('year')
-    quality = db_item.get('quality', 'N/A')
-    source = db_item.get('rip') or db_item.get('source') or 'N/A'
+    quality = db_item.get('quality')
+    rip = db_item.get('rip')
     audio = db_item.get('audio')
-    ext = db_item.get('extension', '.mkv').replace('.', '').upper()
-
-    # Design Constants
-    bar = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    ext = db_item.get('extension', 'MKV').replace('.', '').upper()
     
+    # Combine quality fields
+    quality_parts = []
+    if quality: quality_parts.append(quality)
+    if rip: quality_parts.append(rip)
+    if audio: quality_parts.append(audio)
+    quality_str = ", ".join(quality_parts)
+
+    size_str = format_size(file_size_bytes)
+
+    # Disclaimer
+    disclaimer = "<i>©️ All rights belong to respective owners • Shared as found publicly</i>"
+    
+    # Date Format: 12/18/2025 1:20 AM
+    current_date = datetime.now().strftime("%m/%d/%Y %I:%M %p")
+
     # Build content lines
     lines = []
+    lines.append(f"┏ 🏷 Name: {title_formatted}")
+    lines.append("┃ ")
     
-    if year and str(year) != 'N/A':
-        lines.append(f" 📅  Year        ───────────     {year}")
+    if quality_str:
+        lines.append(f"┠ ✨ Quality: {quality_str}")
         
-    lines.append(f" 🎞️  Quality     ───────────     {quality}")
-    lines.append(f" 💿  Source      ───────────     {source}")
-    
-    if audio and str(audio) != 'N/A':
-        lines.append(f" 🔊  Audio       ───────────     {audio}")
+    if size_str:
+        lines.append(f"┠ ⚙️ Size: {size_str}")
         
-    lines.append(f" 📦  Format      ───────────     {ext}")
+    lines.append(f"┠ 💠 Type: {ext}")
+    lines.append(f"┠ 👤 User: {user_name}")
+    lines.append("┃")
+    lines.append(f"┖ 📅 Date: {current_date}")
     
-    middle_content = "\n".join(lines)
+    lines.append("")
+    lines.append(f"{disclaimer}")
     
-    # Template
-    template = f"""
-{bar}
-{title.center(len(bar))}
-{bar}
-
-{middle_content}
-
-{bar}
-"""
-    return f"```\n{template.strip()}\n```"
+    return "\n".join(lines)
 
 def format_recent_output(categorized_results, total_files=None, total_movies=None, total_series=None, last_updated=None):
     """Format categorized results for display with context information (plain HTML, click-to-copy titles)"""

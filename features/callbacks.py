@@ -124,7 +124,17 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
                 # Parse custom caption from database
                 db_item = await movies_col.find_one({"channel_id": channel_id, "message_id": message_id})
-                final_caption = construct_final_caption(db_item) or msg.caption or ""
+                
+                # Get file size and user info
+                file_size = 0
+                if msg.video:
+                    file_size = msg.video.file_size
+                elif msg.document:
+                    file_size = msg.document.file_size
+                    
+                user_name = callback_query.from_user.first_name
+                
+                final_caption = construct_final_caption(db_item, file_size, user_name) or msg.caption or ""
 
                 # Extract media and send using send_cached_media (no forward header)
                 sent_message = None
@@ -588,7 +598,17 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
                     # Parse custom caption from database
                     db_item = await movies_col.find_one({"channel_id": channel_id, "message_id": message_id})
-                    final_caption = construct_final_caption(db_item) or msg.caption or ""
+                    
+                    # Get file size and user info
+                    file_size = 0
+                    if msg.video:
+                        file_size = msg.video.file_size
+                    elif msg.document:
+                        file_size = msg.document.file_size
+                        
+                    user_name = callback_query.from_user.first_name
+                    
+                    final_caption = construct_final_caption(db_item, file_size, user_name) or msg.caption or ""
 
                     # Extract media and send using send_cached_media (no forward header)
                     sent_message = None
