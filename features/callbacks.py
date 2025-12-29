@@ -8,6 +8,7 @@ It handles file requests, pagination, bulk downloads, and other button interacti
 import asyncio
 import uuid
 from datetime import datetime, timezone
+import io
 from bson import ObjectId
 from hydrogram import Client, filters
 from hydrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -1188,9 +1189,13 @@ async def callback_handler(client, callback_query: CallbackQuery):
                         filename = f"bot_stats_{timestamp}.json"
                         
                         # Send as document
+                        # Wrap in BytesIO
+                        doc_file = io.BytesIO(export_data.encode('utf-8'))
+                        doc_file.name = filename
+                        
                         await client.send_document(
                             chat_id=callback_query.from_user.id,
-                            document=export_data.encode('utf-8'),
+                            document=doc_file,
                             file_name=filename,
                             caption=f"📊 **Bot Statistics Export**\n\nFormat: JSON\nGenerated: {timestamp}"
                         )
@@ -1209,9 +1214,13 @@ async def callback_handler(client, callback_query: CallbackQuery):
                         filename = f"bot_stats_{timestamp}.csv"
                         
                         # Send as document
+                        # Wrap in BytesIO
+                        doc_file = io.BytesIO(export_data.encode('utf-8'))
+                        doc_file.name = filename
+                        
                         await client.send_document(
                             chat_id=callback_query.from_user.id,
-                            document=export_data.encode('utf-8'),
+                            document=doc_file,
                             file_name=filename,
                             caption=f"📊 **Bot Statistics Export**\n\nFormat: CSV\nGenerated: {timestamp}"
                         )
