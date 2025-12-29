@@ -17,7 +17,7 @@ from hydrogram.types import Message, InlineQuery, InlineQueryResultArticle, Inpu
 from hydrogram.enums import ParseMode, ChatType
 
 # Import from our modules
-from .config import API_ID, API_HASH, BOT_TOKEN, BOT_ID, MONGO_URI, MONGO_DB, ADMINS, LOG_CHANNEL, FUZZY_THRESHOLD, AUTO_INDEX_DEFAULT, temp_data, user_input_events, bulk_downloads
+from .config import API_ID, API_HASH, BOT_TOKEN, BOT_ID, MONGO_URI, MONGO_DB, ADMINS, LOG_CHANNEL, FUZZY_THRESHOLD, AUTO_INDEX_DEFAULT, temp_data, user_input_events, bulk_downloads, START_MESSAGE, SUPPORT_LINK
 from .database import mongo, db, movies_col, users_col, channels_col, settings_col, logs_col, requests_col, user_request_limits_col, premium_users_col, premium_features_col, ensure_indexes
 from .utils import get_readable_time, wait_for_user_input, set_user_input, cleanup_expired_bulk_downloads
 from .metadata_parser import parse_metadata
@@ -26,7 +26,7 @@ from .file_deletion import track_file_for_deletion
 from .indexing import INDEX_EXTENSIONS, indexing_lock, start_indexing_process, save_file_to_db, index_message, message_queue, process_message_queue, indexing_stats
 from .search import format_file_size, group_recent_content, format_recent_output, send_search_results
 from .request_management import check_rate_limits, update_user_limits, check_duplicate_request, validate_imdb_link, get_queue_position, MAX_PENDING_REQUESTS_PER_USER
-from .tmdb_integration import search_tmdb, format_tmdb_result
+from .tmdb_integration import search_tmdb, format_tmdb_result, get_random_background_image
 from .premium_management import is_premium_user, get_premium_user, add_premium_user, edit_premium_user, remove_premium_user, get_days_remaining, is_feature_premium_only, toggle_feature, add_premium_feature, get_all_premium_features, get_all_premium_users
 from .broadcast import cmd_broadcast
 from .statistics import (
@@ -261,12 +261,39 @@ async def cmd_start(client, message: Message):
     # Check if user has already accepted terms
     if await has_accepted_terms(uid):
         # User has already accepted terms - show welcome message
-        await message.reply_text(
-            f"👋 **Welcome back, {user_name}!**\n\n"
-            f"You're all set to use MovieBot.\n\n"
-            f"Use /help to see available commands.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        bg_image = await get_random_background_image()
+        
+        # Create buttons
+        buttons = [
+            [
+                InlineKeyboardButton("Support", url=SUPPORT_LINK),
+                InlineKeyboardButton("Tutorial", callback_data="help")
+            ]
+        ]
+        keyboard = InlineKeyboardMarkup(buttons)
+
+        if bg_image:
+            try:
+                await message.reply_photo(
+                    photo=bg_image,
+                    caption=START_MESSAGE,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                # Fallback if image fails
+                print(f"Failed to send image: {e}")
+                await message.reply_text(
+                    START_MESSAGE,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+        else:
+            await message.reply_text(
+                START_MESSAGE,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
         return
 
     # User hasn't accepted terms - show terms and privacy policy
@@ -333,8 +360,8 @@ async def cmd_start(client, message: Message):
             parse_mode=ParseMode.MARKDOWN
         )
 
-async def cmd_help(client, message: Message):
-    uid = message.from_user.id
+async def cmd_help(client, message: Message, user_id=None):
+    uid = user_id or message.from_user.id
     text = USER_HELP
     if await is_admin(uid):
         text += "\n" + ADMIN_HELP

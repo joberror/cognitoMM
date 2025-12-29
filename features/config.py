@@ -33,6 +33,8 @@ LOG_CHANNEL = os.getenv("LOG_CHANNEL")             # optional - e.g. -1001234567
 FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", "68"))
 AUTO_INDEX_DEFAULT = os.getenv("AUTO_INDEXING", "True").lower() in ("1", "true", "yes")
 TMDB_API = os.getenv("TMDB_API", "")               # TMDb API key for request feature
+START_MESSAGE = os.getenv("START_MESSAGE", os.getenv("START_MESSAGEE", "Welcome to the bot! Use buttons below to navigate."))
+SUPPORT_LINK = os.getenv("SUPPORT_LINK", "https://t.me/")
 
 # Broadcast Configuration
 BROADCAST_RATE_LIMIT = int(os.getenv("BROADCAST_RATE_LIMIT", "25"))  # messages per second

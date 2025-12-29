@@ -77,6 +77,13 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 await callback_query.answer("You must accept terms to use this bot.", show_alert=True)
 
             return
+            
+        # Handle help callback
+        if data == "help":
+            from .commands import cmd_help
+            await cmd_help(client, callback_query.message, user_id=user_id)
+            await callback_query.answer()
+            return
 
         # Check access control for all other callbacks
         if not await should_process_command_for_user(user_id):

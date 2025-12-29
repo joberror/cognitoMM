@@ -9,6 +9,7 @@ import aiohttp
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 from .config import TMDB_API
+import random
 
 
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
@@ -397,4 +398,30 @@ def format_trending_list(items: List[Dict], category: str) -> str:
             lines.append(f"{i}. `{title}` - {year}, {rating}, {link}")
 
     return "\n".join(lines)
+
+
+async def get_random_background_image() -> Optional[str]:
+    """Get a random background image from trending movies"""
+    if not TMDB_API:
+        return None
+        
+    url = f"{TMDB_BASE_URL}/trending/movie/week"
+    params = {"api_key": TMDB_API}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=5) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    results = data.get("results", [])
+                    if results:
+                        # Filter results with backdrop
+                        valid_results = [r for r in results if r.get("backdrop_path")]
+                        if valid_results:
+                            item = random.choice(valid_results)
+                            return f"https://image.tmdb.org/t/p/original{item['backdrop_path']}"
+    except Exception as e:
+        print(f"Error fetching background image: {e}")
+        
+    return None
 
