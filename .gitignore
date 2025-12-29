@@ -124,6 +124,7 @@ cython_debug/
 
 # Logs
 logs/
+.smart-coding-cache/
 
 # Sessions
 *.session
