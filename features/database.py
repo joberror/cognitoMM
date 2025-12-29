@@ -8,7 +8,7 @@ and database index creation for the Movie Bot application.
 import asyncio
 from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime, timezone
-from .config import MONGO_URI, MONGO_DB
+from .config import MONGO_URI, MONGO_DB, LOG_CHANNEL
 
 # -------------------------
 # DB (motor async)
@@ -117,10 +117,12 @@ async def log_action(action: str, by: int = None, target: int = None, extra: dic
         await logs_col.insert_one(doc)
     except Exception:
         pass
-    from .config import client, LOG_CHANNEL
-    if client and LOG_CHANNEL:
-        try:
-            msg = f"Log: {action}\nBy: {by}\nTarget: {target}\nExtra: {extra or {}}"
-            await client.send_message(int(LOG_CHANNEL), msg)
-        except Exception:
-            pass
+    from .logger import logger
+    
+    # Log to logger (which handles both console and Telegram)
+    if LOG_CHANNEL:
+        msg = f"Log: {action}\nBy: {by}\nTarget: {target}\nExtra: {extra or {}}"
+        logger.log(msg, level="OPERATIONAL")
+    else:
+        # Fallback to just print if no channel (logger handles this too via original_stdout, but effectively just print)
+        print(f"[ACTION] {action} (By: {by}, Target: {target})")

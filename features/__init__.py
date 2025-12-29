@@ -20,6 +20,8 @@ from .config import (
     client, get_readable_time
 )
 
+from .logger import logger
+
 from .database import (
     mongo, db, movies_col, users_col, channels_col,
     settings_col, logs_col, requests_col, user_request_limits_col,

@@ -15,7 +15,8 @@ from hydrogram.handlers import MessageHandler, InlineQueryHandler, CallbackQuery
 from hydrogram.enums import ChatType
 
 # Import from our modules
-from .config import API_ID, API_HASH, BOT_TOKEN, client
+from .config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL, client
+from .logger import logger
 from .database import ensure_indexes
 from .commands import handle_command
 from .callbacks import callback_handler
@@ -114,6 +115,15 @@ async def main():
             from . import config
             config.client = app
 
+            # Initialize Logger
+            logger.set_client(app, LOG_CHANNEL)
+            logger.start_capturing()
+            logger.log("🤖 Bot Session Started")
+            if LOG_CHANNEL:
+                print(f"📝 Logging to channel: {LOG_CHANNEL}")
+            else:
+                print("⚠️ No LOG_CHANNEL defined in .env")
+
             # Register handlers
             app.add_handler(MessageHandler(handle_command, filters.regex(r"^/")))
             app.add_handler(MessageHandler(on_message))
@@ -137,15 +147,17 @@ async def main():
             stop_event = asyncio.Event()
 
             # Handle shutdown gracefully
-            def signal_handler():
+            async def signal_handler():
                 print("\n🛑 Received shutdown signal...")
+                await logger.flush()
+                logger.stop_capturing()
                 stop_event.set()
 
             # Wait for stop signal
             try:
                 await stop_event.wait()
             except KeyboardInterrupt:
-                signal_handler()
+                await signal_handler()
 
     except Exception as e:
         print(f"❌ Error during startup: {e}")
