@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: cognito_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - /app/__pycache__
+    depends_on:
+      - mongodb
+
+  mongodb:
+    image: mongo:latest
+    container_name: cognito_mongo
+    restart: unless-stopped
+    volumes:
+      - mongodb_data:/data/db
+    ports:
+      - "27017:27017"
+
+volumes:
+  mongodb_data:

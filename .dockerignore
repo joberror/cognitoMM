@@ -1,0 +1,30 @@
+__pycache__
+*.py[cod]
+*$py.class
+NON_EXISTENT_FILE_TO_FORCE_DOCKER_IGNORE_EVERYTHING_ELSE
+
+# Environment variables
+.env
+.env.local
+
+# Git
+.git
+.gitignore
+
+# Session files
+*.session
+*.session-journal
+*.session-wal
+*.session-shm
+
+# Logs
+logs/
+*.log
+
+# IDEs
+.vscode/
+.idea/
+
+# OS specific
+.DS_Store
+Thumbs.db
