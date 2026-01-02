@@ -350,10 +350,39 @@ async def process_message_queue():
     """Process messages from queue sequentially to avoid race conditions"""
     print("[DIAGNOSTIC] Message queue processor started")
     
+    # Batch statistics
+    batch_stats = {
+        'processed': 0,
+        'success': 0,
+        'error': 0,
+        'skipped': 0
+    }
+    
+    from .logger import logger
+    
     while True:
         try:
-            # Wait for message with timeout
+            # Check if queue is empty to finalize batch
             if not message_queue:
+                # If we have processed messages in this batch, log the summary
+                if batch_stats['processed'] > 0:
+                     summary = (
+                        f"INDEX - Index completed - "
+                        f"Processed {batch_stats['processed']} - "
+                        f"{batch_stats['success']} satisfied - "
+                        f"{batch_stats['skipped']} skipped - "
+                        f"{batch_stats['error']} errors"
+                     )
+                     logger.log(summary)
+                     
+                     # Reset stats
+                     batch_stats = {
+                        'processed': 0,
+                        'success': 0,
+                        'error': 0,
+                        'skipped': 0
+                     }
+                
                 await asyncio.sleep(1)  # Wait for new messages
                 continue
                 
@@ -365,6 +394,10 @@ async def process_message_queue():
             # Process message sequentially
             current_thread = threading.current_thread().ident
             timestamp = datetime.now(timezone.utc).isoformat()
+            
+            # Count as processed
+            batch_stats['processed'] += 1
+            
             print(f"[DIAGNOSTIC] {timestamp} - Processing queued message {message.id} on thread {current_thread}")
             
             # Check if this message has media before attempting to index
@@ -377,11 +410,14 @@ async def process_message_queue():
                 try:
                     await index_message(message)
                     indexing_stats['successful_inserts'] += 1
+                    batch_stats['success'] += 1
                     print(f"[DIAGNOSTIC] {timestamp} - Successfully indexed queued message {message.id}")
                 except Exception as e:
                     indexing_stats['other_errors'] += 1
+                    batch_stats['error'] += 1
                     print(f"[DIAGNOSTIC] {timestamp} - ERROR indexing queued message {message.id}: {str(e)}")
             else:
+                batch_stats['skipped'] += 1
                 print(f"[DIAGNOSTIC] {timestamp} - Queued message {message.id} skipped: No media content")
                 
         except Exception as e:

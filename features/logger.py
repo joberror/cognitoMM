@@ -28,6 +28,9 @@ class TelegramLogger:
         # Buffer settings
         self.FLUSH_INTERVAL = 3.0  # Seconds
         self.MAX_BUFFER_SIZE = 4000 # Telegram max is 4096, keep room for overhead
+        
+        # Patterns to ignore for Telegram logging (still printed to console)
+        self.ignore_patterns = ["[DIAGNOSTIC]", "[INDEXED]"]
 
     def set_client(self, client, channel_id):
         """Update client and channel ID after initialization"""
@@ -158,11 +161,18 @@ class TelegramLogger:
                     # Filter out empty lines if desired, or keep them
                     # Apply label
                     label = "[TERMINAL]" if self.stream_name == "stdout" else "[ERROR]"
-                    # timestamp = datetime.now().strftime("%H:%M:%S")
-                    # For terminal logs, we might just want the label, or also timestamp
-                    # Let's keep it simple: Tag + Content
-                    formatted = f"{label} {line}\n"
-                    self.logger._add_to_buffer(formatted)
+                    
+                    # Check for ignore patterns
+                    schip = False
+                    if self.stream_name == "stdout":
+                         for pattern in self.logger.ignore_patterns:
+                             if pattern in line:
+                                 schip = True
+                                 break
+                    
+                    if not schip:
+                        formatted = f"{label} {line}\n"
+                        self.logger._add_to_buffer(formatted)
                 
                 # Keep remainder
                 self.line_buffer = lines[-1]
