@@ -148,99 +148,82 @@ async def handle_command(client, message: Message):
 # Command Implementations
 # -------------------------
 USER_HELP = """
-🤖 Movie Bot Commands (Bot Session)
-/search <title>           - Search (exact + fuzzy)
-/f <title>             - Shortcut for search command
-/search -e <title>      - Exact search (match full title)
-/metadata <title>         - Show rich metadata
-/recent                   - Show recently added content
-/trending                 - View trending movies and shows
-/my_history               - Show your search history
-/my_prefs                 - Show or set preferences
-/my_stat                  - View your personal statistics
-/request                  - Request a movie or series
-/help                     - Show this message
+╔══════════════════════╗
+║   🎬 Movie Bot Help   ║
+╚══════════════════════╝
 
-💡 Search Tips:
-• Use /f for quick searches
-• Use -e for exact title matches
-• Normal search combines exact + fuzzy results
-• Exact search finds perfect title matches only
+╭─ 🔎 Search
+│ /f <title>             Quick search
+│ /search <title>        Smart search (exact + fuzzy)
+│ /search -e <title>     Exact title only
+│ /metadata <title>      Full details (cast, year, quality)
+╰─────────────────────
 
-📊 Personal Stats:
-• View your searches, downloads, and activity level
-• Track your premium status and expiry date
-• Monitor your request history
+╭─ 📌 Discover
+│ /recent                Newly added
+│ /trending              Trending now
+│ /request               Request missing title
+╰─────────────────────
 
-📝 Request Feature:
-• Submit requests for movies/series not in the database
-• Maximum 3 pending requests per user
-• 1 request per day per user
+╭─ 👤 Me
+│ /my_history            Your searches
+│ /my_prefs              Preferences / filters
+│ /my_stat               Usage + premium info
+│ /help                  This menu
+╰─────────────────────
+
+💡 Tips: /f = fastest • -e = perfect match
+📝 Requests: max 3 pending • 1 per day
 """
 
 ADMIN_HELP = """
-👑 Admin Commands
+═══════════════════════
+👑 Admin Zone
 
-📊 Statistics & Analytics
-/stat                      - Comprehensive bot statistics dashboard
-  • User analytics (total, active, premium, banned)
-  • Content breakdown (movies, series, quality distribution)
-  • Channel performance metrics
-  • System health and indexing stats
-  • Activity trends and top searches
-  • Export to JSON/CSV formats
-/quickstat                 - Quick summary of key metrics
+╭─ 📊 Stats
+│ /stat                  Full dashboard
+│ /quickstat             Quick key numbers
+╰─────────────────────
 
-📢 Broadcasting
-/broadcast [message]       - Send message to all eligible users
-  • Interactive mode if no message provided
-  • Shows progress and statistics
-  • Logs all broadcasts for audit
-  • Rate limited to prevent API bans
+╭─ 📢 Broadcast & Requests
+│ /broadcast [message]   Message users
+│ /request_list          Manage requests
+╰─────────────────────
 
-📝 Request Management
-/request_list              - View and manage user requests
+╭─ ⭐ Premium
+│ /premium               Manage premium + features
+╰─────────────────────
 
-⭐ Premium Management
-/premium                   - Manage premium users and features
-  • Add Users: Grant premium access with duration
-  • Edit Users: Modify premium duration (add/remove days)
-  • Remove Users: Revoke premium access
-  • Manage Features: Control which features are premium-only
+╭─ 📡 Channels
+│ /mc                    Unified channel manager
+│ /add_channel <id>      Add channel
+│ /remove_channel <id>   Remove channel
+│ /index_channel         Index (interactive)
+│ /toggle_indexing       Auto-index on/off
+│ /reset_channel         Clear channel index (confirm)
+╰─────────────────────
 
-📡 Channel Management
-/manage_channel            - Unified channel management interface (alias: /mc)
-/add_channel <link|id>     - Add a channel (bot must be admin)
-/remove_channel <link|id>  - Remove a channel
-/index_channel             - Enhanced channel indexing (interactive)
-/reset_channel             - Clear indexed data from a specific channel (requires confirmation)
-/toggle_indexing           - Toggle auto-indexing on/off
+╭─ 👥 Users
+│ /promote <user_id>     Make admin
+│ /demote <user_id>      Remove admin
+│ /ban_user <user_id>    Ban
+│ /unban_user <user_id>  Unban
+╰─────────────────────
 
-👥 User Management
-/promote <user_id>         - Promote to admin
-/demote <user_id>          - Demote admin
-/ban_user <user_id>        - Ban a user
-/unban_user <user_id>      - Unban a user
+╭─ 🗄️ Database
+│ /update_db             Cleanup duplicates/orphans
+│ /manual_deletion <t>   Delete by title
+│ /indexing_stats        Diagnose indexing skips
+│ /reset_stats           Reset counters
+│ /reset                 WIPE all indexed data (confirm)
+╰─────────────────────
 
-🗄️ Database Management
-/reset                     - Clear all indexed data from database (requires confirmation)
-/indexing_stats            - Show indexing statistics (diagnose file skipping)
-/reset_stats               - Reset indexing statistics counters
-/update_db                 - Database maintenance: remove duplicates + orphaned entries (with limit option)
-/manual_deletion [title]   - Manually delete indexed entries by searching title
+✨ Highlights
+• /mc unified management • interactive + cancellable indexing
+• Better errors + supports all video types • diagnostics for indexing
+• Safe resets + cleanup tools • premium feature access control
 
-🚀 Enhanced Features:
-• Unified channel management with /mc command
-• Interactive indexing with progress tracking
-• Cancellable operations
-• Better error handling
-• Support for all video file types
-• Safe database & per-channel reset with confirmation
-• Orphan/duplicate cleanup utilities
-• Diagnostic logging for troubleshooting file indexing issues
-• Premium system for feature access control
-
-⚠️ Important: Add bot as admin to channels for monitoring and file access
+⚠️ Add the bot as admin in channels to index/monitor files
 """
 
 async def cmd_start(client, message: Message):
