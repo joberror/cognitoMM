@@ -20,7 +20,7 @@ from hydrogram.enums import ParseMode, ChatType
 from .config import API_ID, API_HASH, BOT_TOKEN, BOT_ID, MONGO_URI, MONGO_DB, ADMINS, LOG_CHANNEL, FUZZY_THRESHOLD, AUTO_INDEX_DEFAULT, temp_data, user_input_events, bulk_downloads, START_MESSAGE, SUPPORT_LINK
 from .database import mongo, db, movies_col, users_col, channels_col, settings_col, logs_col, requests_col, user_request_limits_col, premium_users_col, premium_features_col, ensure_indexes
 from .utils import get_readable_time, wait_for_user_input, set_user_input, cleanup_expired_bulk_downloads
-from .metadata_parser import parse_metadata
+
 from .user_management import get_user_doc, is_admin, is_banned, has_accepted_terms, load_terms_and_privacy, log_action, check_banned, check_terms_acceptance, should_process_command, require_not_banned
 from .file_deletion import track_file_for_deletion
 from .indexing import INDEX_EXTENSIONS, indexing_lock, start_indexing_process, save_file_to_db, index_message, message_queue, process_message_queue, indexing_stats
@@ -85,12 +85,7 @@ async def handle_command(client, message: Message):
     #     await cmd_search_quality(client, message)
     # elif command == 'file_info':
     #     await cmd_file_info(client, message)
-    elif command == 'metadata':
-        await cmd_metadata(client, message)
-    elif command == 'my_history':
-        await cmd_my_history(client, message)
-    elif command == 'my_prefs':
-        await cmd_my_prefs(client, message)
+
     elif command == 'my_stat':
         await cmd_my_stat(client, message)
     elif command == 'request':
@@ -156,7 +151,6 @@ USER_HELP = """
 │ /f <title>             Quick search
 │ /search <title>        Smart search (exact + fuzzy)
 │ /search -e <title>     Exact title only
-│ /metadata <title>      Full details (cast, year, quality)
 ╰─────────────────────
 
 ╭─ 📌 Discover
@@ -167,7 +161,6 @@ USER_HELP = """
 
 ╭─ 👤 Me
 │ /my_history            Your searches
-│ /my_prefs              Preferences / filters
 │ /my_stat               Usage + premium info
 │ /help                  This menu
 ╰─────────────────────
@@ -411,103 +404,7 @@ async def cmd_search(client, message: Message):
     # Pass client explicitly to avoid relative import issues inside search module
     await send_search_results(client, message, all_results, query)
 
-async def cmd_metadata(client, message: Message):
-    parts = message.text.split()
-    if len(parts) < 2:
-        return await message.reply_text("Usage: /metadata <title>")
-    query = " ".join(parts[1:]).strip()
-    doc = await movies_col.find_one({"title": {"$regex": query, "$options": "i"}})
-    if not doc:
-        return await message.reply_text("No metadata found for that title.")
 
-    # Helper function to check if value is available
-    def has_value(val):
-        return val and val not in ['N/A', 'Unknown', '', None] and val != 0
-
-    # Extract metadata fields
-    title = doc.get('title', 'Unknown')
-    caption = doc.get('caption')
-    quality = doc.get('quality')
-    rip = doc.get('rip')
-    audio = doc.get('audio')
-    file_size = doc.get('file_size')
-    resolution = doc.get('resolution')
-    movie_type = doc.get('type')
-    year = doc.get('year')
-    season = doc.get('season')
-    episode = doc.get('episode')
-    source = doc.get('source')
-    extension = doc.get('extension')
-
-    # Build metadata output with specific attributes
-    metadata_text = f"```\n"
-    metadata_text += f"Metadata: \"{query}\"\n\n"
-
-    # 1. Name (always shown)
-    metadata_text += f"Name: {title}\n"
-
-    # 2. Quality (combine quality and rip if available)
-    quality_parts = []
-    if has_value(quality):
-        quality_parts.append(quality)
-    if has_value(rip):
-        quality_parts.append(rip)
-    if quality_parts:
-        metadata_text += f"Quality: {' '.join(quality_parts)}\n"
-
-    # 4. Audio (only if available)
-    if has_value(audio):
-        metadata_text += f"Audio: {audio}\n"
-
-    # 5. Size (formatted, only if available)
-    if has_value(file_size):
-        size_str = format_file_size(file_size)
-        metadata_text += f"Size: {size_str}\n"
-
-    # 6. Resolution (only if available)
-    if has_value(resolution):
-        metadata_text += f"Resolution: {resolution}\n"
-
-    # 7. Type (only if available)
-    if has_value(movie_type):
-        metadata_text += f"Type: {movie_type}\n"
-
-    # 8. Year (only if available)
-    if has_value(year):
-        metadata_text += f"Year: {year}\n"
-
-    # 9. Season (only if available for series)
-    if has_value(season) or has_value(episode):
-        season_str = ""
-        if has_value(season) and has_value(episode):
-            season_str = f"S{season:02d}E{episode:02d}"
-        elif has_value(season):
-            season_str = f"S{season:02d}"
-        elif has_value(episode):
-            season_str = f"E{episode:02d}"
-        if season_str:
-            metadata_text += f"Season: {season_str}\n"
-
-    # 10. Features (combine source, extension, and other special features)
-    features = []
-    if has_value(source):
-        features.append(source)
-    if has_value(extension):
-        features.append(extension.upper().replace('.', ''))
-    # Check for DV, HDR, Dolby Vision in caption or filename
-    if caption:
-        caption_lower = caption.lower()
-        if 'dolby vision' in caption_lower or 'dv' in caption_lower:
-            if 'Dolby Vision' not in features:
-                features.append('Dolby Vision')
-        if 'hdr' in caption_lower and 'HDR' not in features:
-            features.append('HDR')
-    if features:
-        metadata_text += f"Extras: {', '.join(features)}\n"
-
-    metadata_text += f"```"
-
-    await message.reply_text(metadata_text, disable_web_page_preview=True)
 
 async def cmd_my_history(client, message: Message):
     """Display user's search history with clickable command links"""
@@ -572,19 +469,7 @@ async def cmd_my_history(client, message: Message):
         disable_web_page_preview=True
     )
 
-async def cmd_my_prefs(client, message: Message):
-    uid = message.from_user.id
-    parts = message.text.split()
-    if len(parts) == 1:
-        doc = await users_col.find_one({"user_id": uid})
-        prefs = doc.get("preferences", {}) if doc else {}
-        await message.reply_text(f"Your preferences: {prefs}")
-    else:
-        if len(parts) < 3:
-            return await message.reply_text("Usage: /my_prefs <key> <value>")
-        key = parts[1]
-        value = " ".join(parts[2:])
-        await users_col.update_one({"user_id": uid}, {"$set": {f"preferences.{key}": value}}, upsert=True)
+
 
 async def cmd_my_stat(client, message: Message):
     """Display comprehensive user statistics"""
