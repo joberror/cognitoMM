@@ -86,6 +86,8 @@ async def handle_command(client, message: Message):
     # elif command == 'file_info':
     #     await cmd_file_info(client, message)
 
+    elif command == 'my_history':
+        await cmd_my_history(client, message)
     elif command == 'my_stat':
         await cmd_my_stat(client, message)
     elif command == 'request':
