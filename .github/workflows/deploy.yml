@@ -8,6 +8,12 @@ jobs:
   sync-to-hub:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout GitHub Repo
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          lfs: true
+
       - name: Sync GitHub to Hugging Face Hub
         uses: huggingface/hub-sync@v0.2.0
         with:
