@@ -1,20 +1,19 @@
-name: Deploy to Hugging Face
+name: Sync to Hugging Face Hub
 
 on:
   push:
     branches: [main]
 
 jobs:
-  deploy:
+  sync-to-hub:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Push to Hugging Face Space
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          git config --global user.email "ci@github.com"
-          git config --global user.name "GitHub Actions"
-          git remote add hf https://HF_USER:$HF_TOKEN@huggingface.co/spaces/iamjoberror/bot-media
-          git push hf main --force
+      - name: Sync GitHub to Hugging Face Hub
+        uses: huggingface/hub-sync@v0.2.0
+        with:
+          github_repo_id: joberror/cognitoMM
+          huggingface_repo_id: iamjoberror/bot-media
+          hf_token: ${{ secrets.HF_TOKEN }}
+          repo_type: space
+          space_sdk: gradio
+          private: false
