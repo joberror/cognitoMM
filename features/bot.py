@@ -24,6 +24,7 @@ from .indexing import on_message
 from .file_deletion import start_deletion_monitor
 from .search import inline_handler
 from .deletion_events import handle_raw_update  # Real-time deletion heuristic handler
+from .webapp import start_webapp
 
 # -------------------------
 # CUSTOM BOT CLASS WITH iter_messages
@@ -71,6 +72,10 @@ def run_bot():
     """Run bot with Kurigram - simplified approach"""
     try:
         print("🔄 Starting bot with Kurigram...")
+        
+        # Start the health check webapp for BetterStack/Hosting platforms
+        start_webapp()
+        
         # Use asyncio.run for cleaner event loop management
         asyncio.run(main())
     except KeyboardInterrupt:
