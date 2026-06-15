@@ -6,7 +6,7 @@ services:
     container_name: cognito_bot
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "7860:7860"
     env_file:
       - .env
     volumes:

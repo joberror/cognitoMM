@@ -19,8 +19,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy project
 COPY . .
 
-# Expose port for health checks
-EXPOSE 8080
+# Expose port for health checks (HF default is 7860)
+EXPOSE 7860
 
 # Run the application
 CMD ["python", "main.py"]

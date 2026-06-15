@@ -39,14 +39,17 @@ def health_check():
 
 def run_flask():
     """Run the Flask app"""
-    # Use port from environment variable (standard for most hosting platforms)
-    port = int(os.environ.get("PORT", 8080))
-    # Run Flask with host 0.0.0.0 to be accessible externally
-    app.run(host='0.0.0.0', port=port)
+    try:
+        # Use port from environment variable, default to 7860 for HF compatibility
+        port = int(os.environ.get("PORT", 7860))
+        print(f"🚀 [Webapp] Starting Flask server on 0.0.0.0:{port}")
+        # Explicitly disable the reloader to avoid issues in threads
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    except Exception as e:
+        print(f"❌ [Webapp] Flask failed to start: {e}")
 
 def start_webapp():
     """Start the web application in a background thread"""
     webapp_thread = threading.Thread(target=run_flask, daemon=True)
     webapp_thread.start()
-    print(f"🌐 Webapp started in background thread (Port: {os.environ.get('PORT', 8080)})")
     return webapp_thread
