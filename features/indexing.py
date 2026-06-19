@@ -317,6 +317,12 @@ async def index_message(msg):
             "indexed_at": datetime.now(timezone.utc)
         }
 
+        # Update entry with all parsed fields to store extra info (e.g. edition, language, flags, tags)
+        original_title = entry["title"]
+        entry.update(parsed)
+        if not entry["title"]:
+            entry["title"] = original_title
+
         # DIAGNOSTIC LOG: Track database insertion
         timestamp = datetime.now(timezone.utc).isoformat()
         print(f"[DIAGNOSTIC] {timestamp} - Attempting to insert message {msg.id} into database")
