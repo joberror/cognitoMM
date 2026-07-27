@@ -8,7 +8,7 @@ Render, or for BetterStack monitoring).
 
 import os
 from flask import Flask, jsonify
-from datetime import datetime
+from datetime import datetime, timezone
 import threading
 
 # Import start time from config if needed, otherwise use local
@@ -25,7 +25,7 @@ def index():
     return jsonify({
         "status": "running",
         "bot": "CognitoMM",
-        "uptime": str(datetime.now() - BOT_START_TIME),
+        "uptime": str(datetime.now(timezone.utc) - BOT_START_TIME),
         "message": "Bot is alive and healthy!"
     })
 
@@ -34,7 +34,7 @@ def health_check():
     """Dedicated health check endpoint for BetterStack"""
     return jsonify({
         "status": "healthy",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     })
 
 def run_flask():
