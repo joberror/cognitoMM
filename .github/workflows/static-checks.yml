@@ -1,0 +1,50 @@
+name: Static Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Stdlib-only AST check — catches import-graph regressions without needing
+  # any dependencies installed.
+  reexport-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      # Fails the build if any relative intra-package import resolves through a
+      # module that only re-exports the symbol (re-export chain), references a
+      # name the source module neither defines nor imports (broken import),
+      # targets a module that doesn't exist, or defines the same module-level
+      # function/class in two different modules (duplicate definition).
+      - name: Check re-export chains / broken imports / duplicate definitions
+        run: python scripts/check_reexports.py
+
+  # Full test suite — runs the standalone tests (also pytest-compatible) on
+  # every push/PR so regressions are caught before merge. Does not require a
+  # live MongoDB or Telegram connection (tests use fakes/mocks; the former
+  # live test_bot.py was removed).
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        run: python -m pytest tests/ -q

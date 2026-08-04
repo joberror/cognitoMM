@@ -9,9 +9,10 @@ banning/unbanning users, and verifying terms acceptance.
 import asyncio
 from datetime import datetime, timezone
 from hydrogram.types import Message
+from hydrogram.enums import ChatType
 
 from .config import ADMINS
-from .database import users_col, logs_col
+from .database import users_col, logs_col, channels_col
 
 
 async def get_user_doc(user_id: int):
@@ -103,21 +104,21 @@ async def check_terms_acceptance(message: Message) -> bool:
 
 async def should_process_command(message: Message) -> bool:
     """
-    Determine if a command should be processed based on access control rules for bot session.
+    Determine if a command should be processed based on access control rules.
 
     Commands are processed if:
     1. Message is from a private chat (direct message to bot)
-    2. Message is from a monitored channel/group (in channels_col database)
+    2. Message is from a monitored channel/group (registered in channels_col
+       and enabled)
     3. User is an admin (in ADMINS list or has admin role in database)
-    4. Bot is mentioned in groups (for bot session compatibility)
 
     This prevents the bot from responding to commands in random groups.
+
+    Note: chat.type is a hydrogram ChatType enum (not a plain string), so it
+    is compared against the enum values directly.
     """
-    # Import channels_col here to avoid circular imports
-    from ..main import channels_col
-    
     # Always process private messages (direct messages to bot)
-    if message.chat.type == "private":
+    if message.chat.type == ChatType.PRIVATE:
         return True
 
     # Check if user is an admin - admins can use commands anywhere
@@ -125,20 +126,9 @@ async def should_process_command(message: Message) -> bool:
     if await is_admin(user_id):
         return True
 
-    # For groups/supergroups, check if bot is mentioned or if it's a monitored group
-    if message.chat.type in ["group", "supergroup"]:
-        # Check if this group is explicitly added as a monitored channel
-        channel_doc = await channels_col.find_one({"channel_id": message.chat.id})
-        if channel_doc and channel_doc.get("enabled", True):
-            return True
-
-        # For bot sessions, also check if bot is mentioned (for compatibility)
-        if message.text and message.text.startswith('/'):
-            # Allow commands in groups if they're directed to the bot
-            return True
-
-    # Check if this is a monitored channel
-    if message.chat.type == "channel":
+    # For groups/supergroups/channels, only process commands if the chat is a
+    # registered, enabled monitored channel
+    if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL):
         channel_doc = await channels_col.find_one({"channel_id": message.chat.id})
         if channel_doc and channel_doc.get("enabled", True):
             return True

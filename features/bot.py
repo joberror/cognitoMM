@@ -20,11 +20,12 @@ from .logger import logger
 from .database import ensure_indexes
 from .commands import handle_command
 from .callbacks import callback_handler
-from .indexing import on_message
+from .indexing import on_message, start_orphan_prune_monitor
 from .file_deletion import start_deletion_monitor
 from .search import inline_handler
 from .deletion_events import handle_raw_update  # Real-time deletion heuristic handler
-from .webapp import start_webapp
+from .webapp import start_webapp, set_stats_provider
+from .statistics import collect_comprehensive_stats
 
 # -------------------------
 # CUSTOM BOT CLASS WITH iter_messages
@@ -142,8 +143,14 @@ async def main():
             except Exception:
                 pass  # Handler not available in this version
 
+            # Wire the /metrics endpoint with real stats
+            set_stats_provider(lambda: collect_comprehensive_stats())
+
             # Start deletion monitor background task
             asyncio.create_task(start_deletion_monitor())
+
+            # Start orphan prune monitor (primary channel-deletion cleanup)
+            asyncio.create_task(start_orphan_prune_monitor())
 
             print("✅ MovieBot is running!")
             print("🛑 Press Ctrl+C to stop")

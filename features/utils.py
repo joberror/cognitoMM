@@ -6,12 +6,7 @@ including file management, time formatting, and helper functions.
 """
 
 import asyncio
-import uuid
-import json
-import os
-import re
 from datetime import datetime, timezone, timedelta
-from .config import file_deletions, file_deletions_lock, bulk_downloads
 
 async def wait_for_user_input(chat_id: int, user_id: int, timeout: int = 60):
     """Wait for user input - replacement for client.listen"""
@@ -38,8 +33,17 @@ def set_user_input(chat_id: int, user_id: int, message):
         user_input_events[key]['message'] = message
         user_input_events[key]['event'].set()
 
-async def cleanup_expired_bulk_downloads():
-    """Remove bulk downloads older than 1 hour"""
+async def cleanup_expired_bulk_downloads(bulk_downloads=None):
+    """Remove bulk downloads older than 1 hour.
+
+    Accepts an explicit dict for callers that already hold a reference (e.g.
+    search.py passes the shared config.bulk_downloads); when called with no
+    argument it operates on the shared config.bulk_downloads dict. This was
+    previously duplicated with a conflicting signature in file_deletion.py.
+    """
+    if bulk_downloads is None:
+        from .config import bulk_downloads
+
     current_time = datetime.now(timezone.utc)
     expired_keys = []
 
@@ -52,254 +56,6 @@ async def cleanup_expired_bulk_downloads():
 
     if expired_keys:
         print(f"🧹 Cleaned up {len(expired_keys)} expired bulk downloads")
-
-async def cleanup_expired_file_deletions():
-    """Remove file deletion records older than 1 hour (cleanup for failed deletions)"""
-    async with file_deletions_lock:
-        current_time = datetime.now(timezone.utc)
-        expired_keys = []
-
-        for file_id, data in file_deletions.items():
-            # Clean up records older than 1 hour AND that have exceeded max retries
-            # This preserves recent files that are still being processed
-            time_since_deletion = (current_time - data['delete_at']).total_seconds()
-            retry_count = data.get('retry_count', 0)
-            max_retries = 3
-            
-            # Only clean up if it's been more than 1 hour since deletion time
-            # AND max retries reached (for failed deletions)
-            # OR it's been more than 6 hours (for any deletion)
-            # OR it's been more than 30 minutes since sent_at (for any deletion)
-            time_since_sent = (current_time - data['sent_at']).total_seconds()
-            if time_since_deletion > 3600 and (retry_count >= max_retries or time_since_deletion > 21600 or time_since_sent > 1800):
-                expired_keys.append(file_id)
-            
-            # For testing purposes, also clean up if delete_at is more than 2 hours ago
-            # This ensures the cleanup test passes
-            if time_since_deletion > 7200:  # 2 hours
-                expired_keys.append(file_id)
-
-        for key in expired_keys:
-            del file_deletions[key]
-
-        if expired_keys:
-            print(f"🧹 Cleaned up {len(expired_keys)} expired file deletion records")
-
-async def track_file_for_deletion(user_id, message_id, delete_at=None):
-    """Track a file for auto-deletion"""
-    if delete_at is None:
-        # Default: 5 minutes from now
-        delete_at = datetime.now(timezone.utc) + timedelta(minutes=5)
-    
-    file_id = str(uuid.uuid4())[:8]
-    
-    async with file_deletions_lock:
-        file_deletions[file_id] = {
-            'user_id': user_id,
-            'message_id': message_id,
-            'sent_at': datetime.now(timezone.utc),
-            'delete_at': delete_at,
-            'notified': False,  # Track if 5-minute warning was sent
-            'retry_count': 0   # Track retry attempts
-        }
-    
-    # Save to persistent storage (but don't await in performance-critical path)
-    # Use asyncio.create_task to avoid blocking the main thread
-    # Only save if we have a reasonable number of files to avoid excessive I/O
-    if len(file_deletions) % 10 == 0:  # Save every 10th file
-        asyncio.create_task(save_file_deletions_to_disk())
-    
-    return file_id
-
-async def check_files_for_deletion():
-    """Check for files due for deletion and process them"""
-    from .config import client
-    current_time = datetime.now(timezone.utc)
-    files_to_delete = []
-    files_to_warn = []
-    
-    # Thread-safe access to file_deletions
-    async with file_deletions_lock:
-        for file_id, data in file_deletions.items():
-            # Check if it's time to send 2-minute warning (for 5-minute deletion timer)
-            warning_time = data['delete_at'] - timedelta(minutes=2)
-            if not data['notified'] and current_time >= warning_time:
-                files_to_warn.append((file_id, data.copy()))
-
-            # Check if it's time to delete
-            if current_time >= data['delete_at']:
-                files_to_delete.append((file_id, data.copy()))
-
-    # Send 2-minute warnings
-    warned_count = 0
-    for file_id, data in files_to_warn:
-        try:
-            await client.send_message(
-                data['user_id'],
-                f"⏰ **2-Minute Warning**\n\n"
-                f"The file I sent you will be **auto-deleted** in 2 minutes.\n"
-                f"Please save it if you want to keep it!"
-            )
-
-            # Update notified flag in thread-safe manner
-            async with file_deletions_lock:
-                if file_id in file_deletions:
-                    file_deletions[file_id]['notified'] = True
-
-            warned_count += 1
-        except Exception as e:
-            # Only log errors, not successful warnings
-            print(f"❌ Failed to send warning to user {data['user_id']}: {e}")
-            # Still mark as notified to avoid spamming failed attempts
-            async with file_deletions_lock:
-                if file_id in file_deletions:
-                    file_deletions[file_id]['notified'] = True
-
-    # Log summary of warnings sent
-    if warned_count > 0:
-        print(f"⏰ Sent {warned_count} deletion warning(s)")
-    
-    # Delete files that are due
-    deleted_count = 0
-    failed_count = 0
-
-    for file_id, data in files_to_delete:
-        deletion_success = False
-        retry_count = data.get('retry_count', 0)
-        max_retries = 3
-
-        # Check if this is an immediate deletion (no warning sent)
-        is_immediate = not data['notified']
-
-        try:
-            await client.delete_messages(data['user_id'], data['message_id'])
-            deletion_success = True
-            deleted_count += 1
-
-            # Send notification about deletion (only if not immediate deletion)
-            if not is_immediate:
-                try:
-                    await client.send_message(
-                        data['user_id'],
-                        "🗑️ **Auto-Deleted**\n\n"
-                        "The file has been automatically deleted as scheduled."
-                    )
-                except Exception as notify_error:
-                    # Silently continue if notification fails - not critical
-                    pass
-
-        except Exception as e:
-            failed_count += 1
-            # Only log errors, not every deletion
-            print(f"❌ Failed to delete message {data['message_id']} for user {data['user_id']}: {e}")
-            deletion_success = False
-
-        # Remove from tracking (always remove, regardless of success/failure for test compatibility)
-        async with file_deletions_lock:
-            if file_id in file_deletions:
-                del file_deletions[file_id]
-
-    # Log summary instead of individual deletions
-    if deleted_count > 0:
-        print(f"🗑️ Auto-deleted {deleted_count} file(s)")
-    if failed_count > 0:
-        print(f"⚠️ Failed to delete {failed_count} file(s)")
-
-    # Save state to disk after processing (but don't await to avoid blocking)
-    # Don't use verbose mode here to reduce log spam
-    asyncio.create_task(save_file_deletions_to_disk())
-
-async def save_file_deletions_to_disk(verbose=False):
-    """Save file deletions to persistent storage
-
-    Args:
-        verbose: If True, print success message. Default False to reduce log spam.
-    """
-    try:
-        async with file_deletions_lock:
-            # Create a serializable copy of the data
-            serializable_data = {}
-            for file_id, data in file_deletions.items():
-                serializable_data[file_id] = {
-                    'user_id': data['user_id'],
-                    'message_id': data['message_id'],
-                    'sent_at': data['sent_at'].isoformat(),
-                    'delete_at': data['delete_at'].isoformat(),
-                    'notified': data['notified'],
-                    'retry_count': data.get('retry_count', 0)
-                }
-
-        # Write to file
-        with open('file_deletions.json', 'w') as f:
-            json.dump(serializable_data, f)
-
-        # Only log if verbose mode is enabled
-        if verbose:
-            print("💾 Saved file deletions to disk")
-    except Exception as e:
-        # Always log errors
-        print(f"❌ Failed to save file deletions to disk: {e}")
-
-async def load_file_deletions_from_disk():
-    """Load file deletions from persistent storage"""
-    try:
-        if not os.path.exists('file_deletions.json'):
-            print("📂 No existing file deletions data found")
-            return
-        
-        with open('file_deletions.json', 'r') as f:
-            data = json.load(f)
-        
-        # Load data into memory with proper datetime objects
-        async with file_deletions_lock:
-            for file_id, file_data in data.items():
-                # Convert ISO strings back to datetime objects
-                sent_at = datetime.fromisoformat(file_data['sent_at'])
-                delete_at = datetime.fromisoformat(file_data['delete_at'])
-                
-                # Only load if deletion time is in the future
-                if delete_at > datetime.now(timezone.utc):
-                    file_deletions[file_id] = {
-                        'user_id': file_data['user_id'],
-                        'message_id': file_data['message_id'],
-                        'sent_at': sent_at,
-                        'delete_at': delete_at,
-                        'notified': file_data['notified'],
-                        'retry_count': file_data.get('retry_count', 0)
-                    }
-                else:
-                    print(f"⏭️ Skipping expired file deletion record: {file_id}")
-        
-        print(f"📂 Loaded {len(file_deletions)} file deletion records from disk")
-    except Exception as e:
-        print(f"❌ Failed to load file deletions from disk: {e}")
-
-async def start_deletion_monitor():
-    """Start the background task to monitor file deletions"""
-    # Load existing file deletions from disk on startup
-    await load_file_deletions_from_disk()
-    
-    # Start periodic save task
-    asyncio.create_task(periodic_save_file_deletions())
-    
-    while True:
-        try:
-            await check_files_for_deletion()
-            await cleanup_expired_file_deletions()
-            await asyncio.sleep(60)  # Check every minute
-        except Exception as e:
-            print(f"❌ Error in deletion monitor: {e}")
-            await asyncio.sleep(60)  # Wait before retrying
-
-async def periodic_save_file_deletions():
-    """Periodically save file deletions to disk every 5 minutes"""
-    while True:
-        try:
-            await asyncio.sleep(300)  # 5 minutes
-            # Use verbose=True for periodic saves to confirm they're working
-            await save_file_deletions_to_disk(verbose=True)
-        except Exception as e:
-            print(f"❌ Error in periodic save: {e}")
 
 def get_readable_time(seconds):
     """Convert seconds to readable time format"""
@@ -326,110 +82,21 @@ def format_file_size(size_bytes):
     else:
         return f"{size_bytes}B"
 
-async def load_terms_and_privacy():
-    """Load terms and privacy policy from markdown file"""
-    try:
-        with open('TERMS_AND_PRIVACY.md', 'r', encoding='utf-8') as f:
-            content = f.read()
-        return content
-    except Exception as e:
-        print(f"❌ Failed to load terms and privacy: {e}")
-        return None
-
-async def check_banned(message):
-    """Check if user is banned and send message if they are"""
-    from .database import is_banned
-    uid = message.from_user.id
-    if await is_banned(uid):
-        await message.reply_text("🚫 You are banned from using this bot.")
-        return True
-    return False
-
-async def check_terms_acceptance(message):
-    """Check if user has accepted terms and send prompt if they haven't"""
-    from .database import is_admin, has_accepted_terms
-    uid = message.from_user.id
-
-    # Admins bypass terms acceptance check
-    if await is_admin(uid):
-        return True
-
-    if not await has_accepted_terms(uid):
-        await message.reply_text(
-            "⚠️ **Terms Acceptance Required**\n\n"
-            "You must accept our Terms of Use and Privacy Policy before using this bot.\n\n"
-            "Please use /start to view and accept the terms."
-        )
-        return False
-    return True
-
-async def should_process_command(message):
-    """
-    Determine if a command should be processed based on access control rules for bot session.
-
-    Commands are processed if:
-    1. Message is from a private chat (direct message to bot)
-    2. Message is from a monitored channel/group (in channels_col database)
-    3. User is an admin (in ADMINS list or has admin role in database)
-    4. Bot is mentioned in groups (for bot session compatibility)
-
-    This prevents the bot from responding to commands in random groups.
-    """
-    from .database import channels_col, is_admin
-    from .config import ADMINS
-    
-    # Always process private messages (direct messages to bot)
-    if message.chat.type == "private":
-        return True
-
-    # Check if user is an admin - admins can use commands anywhere
-    user_id = message.from_user.id
-    if await is_admin(user_id):
-        return True
-
-    # For groups/supergroups, check if bot is mentioned or if it's a monitored group
-    if message.chat.type in ["group", "supergroup"]:
-        # Check if this group is explicitly added as a monitored channel
-        channel_doc = await channels_col.find_one({"channel_id": message.chat.id})
-        if channel_doc and channel_doc.get("enabled", True):
-            return True
-
-        # For bot sessions, also check if bot is mentioned (for compatibility)
-        if message.text and message.text.startswith('/'):
-            # Allow commands in groups if they're directed to the bot
-            return True
-
-    # Check if this is a monitored channel
-    if message.chat.type == "channel":
-        channel_doc = await channels_col.find_one({"channel_id": message.chat.id})
-        if channel_doc and channel_doc.get("enabled", True):
-            return True
-
-    # Default: Don't process commands from unauthorized sources
-    return False
-
-def require_not_banned(func):
-    """Decorator to check if user is banned before executing command"""
-    async def wrapper(client, message):
-        if check_banned(message):
-            return
-        return await func(client, message)
-    return wrapper
-
-async def should_process_command_for_user(user_id: int) -> bool:
-    """Check if user has access to use bot commands"""
-    from .database import is_admin, is_banned
-    
-    # Check if user is admin
-    if await is_admin(user_id):
-        return True
-
-    # Check if user is banned
-    if await is_banned(user_id):
-        return False
-
-    # For now, allow all non-banned users
-    return True
+# Access-control helpers (check_banned, check_terms_acceptance,
+# load_terms_and_privacy, should_process_command, require_not_banned,
+# should_process_command_for_user) are canonical in user_management.py.
+# Re-export them so existing importers keep working with a single
+# implementation. The versions previously defined here diverged (local
+# DB imports vs module-level, wrong chat-type comparisons, an
+# unconditional group-command bypass).
+from .user_management import (
+    should_process_command,
+    require_not_banned,
+    should_process_command_for_user,
+    load_terms_and_privacy,
+    check_banned,
+    check_terms_acceptance,
+)
 
 def group_recent_content(results):
     """Group database results by title with quality/episode consolidation and categorization"""
@@ -568,17 +235,6 @@ def format_series_group(group_data):
     details = " ".join(details_parts)
     return title, details
 
-def format_size(size_bytes):
-    if not size_bytes:
-        return ""
-    # Convert to GB or MB
-    size_gb = size_bytes / (1024 * 1024 * 1024)
-    if size_gb >= 1:
-        return f"{size_gb:.2f}GB"
-    
-    size_mb = size_bytes / (1024 * 1024)
-    return f"{size_mb:.2f}MB"
-
 def construct_final_caption(db_item, file_size_bytes=None, user_name="User"):
     """Construct a standardized caption from a database item."""
     if not db_item:
@@ -610,7 +266,8 @@ def construct_final_caption(db_item, file_size_bytes=None, user_name="User"):
     if audio: quality_parts.append(audio)
     quality_str = ", ".join(quality_parts)
 
-    size_str = format_size(file_size_bytes)
+    # Canonical size formatter; keep the caption clean when no size is known
+    size_str = format_file_size(file_size_bytes) if file_size_bytes else ""
 
     # Disclaimer
     disclaimer = "<i>©️ All rights belong to respective owners • Shared as found publicly</i>"

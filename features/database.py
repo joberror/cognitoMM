@@ -5,10 +5,8 @@ This module handles MongoDB connection setup, database collections,
 and database index creation for the Movie Bot application.
 """
 
-import asyncio
 from motor.motor_asyncio import AsyncIOMotorClient
-from datetime import datetime, timezone
-from .config import MONGO_URI, MONGO_DB, LOG_CHANNEL
+from .config import MONGO_URI, MONGO_DB
 
 # -------------------------
 # DB (motor async)
@@ -80,49 +78,24 @@ async def ensure_indexes():
         raise e
 
 # -------------------------
-# Helpers: roles, logs
+# Helpers: roles, logs (canonical home: user_management.py)
 # -------------------------
-async def get_user_doc(user_id: int):
-    """Get user document from database"""
-    return await users_col.find_one({"user_id": user_id})
+# The role/log helpers (get_user_doc, is_admin, is_banned, has_accepted_terms,
+# log_action) are canonical in user_management.py. They were previously
+# duplicated here with a diverging log_action implementation (direct logger
+# route vs user_management's direct send_message). Consolidated into
+# user_management.py; re-exported lazily below via PEP 562 __getattr__ so
+# `from .database import log_action` keeps working WITHOUT a top-level import
+# (which would create a circular import: user_management imports this module's
+# collections at module level).
 
-async def is_admin(user_id: int):
-    """Check if user is an admin"""
-    from .config import ADMINS
-    if user_id in ADMINS:
-        return True
-    doc = await get_user_doc(user_id)
-    return bool(doc and doc.get("role") == "admin")
+_USER_MANAGEMENT_HELPERS = ("get_user_doc", "is_admin", "is_banned",
+                            "has_accepted_terms", "log_action")
 
-async def is_banned(user_id: int):
-    """Check if user is banned"""
-    doc = await get_user_doc(user_id)
-    return bool(doc and doc.get("role") == "banned")
 
-async def has_accepted_terms(user_id: int):
-    """Check if user has accepted terms and privacy policy"""
-    doc = await get_user_doc(user_id)
-    return bool(doc and doc.get("terms_accepted", False))
-
-async def log_action(action: str, by: int = None, target: int = None, extra: dict = None):
-    """Log action to database and optionally to log channel"""
-    doc = {
-        "action": action,
-        "by": by,
-        "target": target,
-        "extra": extra or {},
-        "ts": datetime.now(timezone.utc)
-    }
-    try:
-        await logs_col.insert_one(doc)
-    except Exception:
-        pass
-    from .logger import logger
-    
-    # Log to logger (which handles both console and Telegram)
-    if LOG_CHANNEL:
-        msg = f"Log: {action}\nBy: {by}\nTarget: {target}\nExtra: {extra or {}}"
-        logger.log(msg, level="OPERATIONAL")
-    else:
-        # Fallback to just print if no channel (logger handles this too via original_stdout, but effectively just print)
-        print(f"[ACTION] {action} (By: {by}, Target: {target})")
+def __getattr__(name):
+    """Lazy backward-compat re-export of the user-management helpers."""
+    if name in _USER_MANAGEMENT_HELPERS:
+        from . import user_management
+        return getattr(user_management, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

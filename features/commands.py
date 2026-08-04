@@ -19,12 +19,15 @@ from hydrogram.enums import ParseMode, ChatType
 # Import from our modules
 from .config import API_ID, API_HASH, BOT_TOKEN, BOT_ID, MONGO_URI, MONGO_DB, ADMINS, LOG_CHANNEL, FUZZY_THRESHOLD, AUTO_INDEX_DEFAULT, temp_data, user_input_events, bulk_downloads, START_MESSAGE, SUPPORT_LINK
 from .database import mongo, db, movies_col, users_col, channels_col, settings_col, logs_col, requests_col, user_request_limits_col, premium_users_col, premium_features_col, ensure_indexes
-from .utils import get_readable_time, wait_for_user_input, set_user_input, cleanup_expired_bulk_downloads
+from .utils import get_readable_time, wait_for_user_input, set_user_input, cleanup_expired_bulk_downloads, resolve_chat_ref
 
 from .user_management import get_user_doc, is_admin, is_banned, has_accepted_terms, load_terms_and_privacy, log_action, check_banned, check_terms_acceptance, should_process_command, require_not_banned
 from .file_deletion import track_file_for_deletion
-from .indexing import INDEX_EXTENSIONS, indexing_lock, start_indexing_process, save_file_to_db, index_message, message_queue, process_message_queue, indexing_stats
-from .search import format_file_size, group_recent_content, format_recent_output, send_search_results
+from .config import indexing_lock, message_queue
+from .statistics_store import indexing_stats
+from .indexing import start_indexing_process, save_file_to_db, process_message_queue
+from .search import send_search_results
+from .utils import format_file_size, group_recent_content, format_recent_output
 from .request_management import check_rate_limits, update_user_limits, check_duplicate_request, validate_imdb_link, get_queue_position, MAX_PENDING_REQUESTS_PER_USER
 from .tmdb_integration import search_tmdb, format_tmdb_result, get_random_background_image
 from .premium_management import is_premium_user, get_premium_user, add_premium_user, edit_premium_user, remove_premium_user, get_days_remaining, is_feature_premium_only, toggle_feature, add_premium_feature, get_all_premium_features, get_all_premium_users
@@ -39,6 +42,7 @@ from .statistics import (
     collect_user_stats,
     format_user_stats_output
 )
+from .database_scan import scan_message_range
 
 # -------------------------
 # Command Handler
@@ -46,6 +50,12 @@ from .statistics import (
 async def handle_command(client, message: Message):
     """Handle bot commands"""
     if not message.text:
+        return
+
+    # Access control: only handle commands from allowed contexts (private
+    # chats, admins, or registered/enabled monitored channels). Commands from
+    # random groups are silently ignored so the bot doesn't respond there.
+    if not await should_process_command(message):
         return
 
     # Parse command
@@ -669,20 +679,6 @@ async def cmd_trending(client, message: Message):
 # -------------------------
 # Admin Commands (simplified implementations)
 # -------------------------
-async def resolve_chat_ref(ref: str):
-    """Use client to resolve a channel reference (id, t.me/slug, @username)."""
-    r = ref.strip()
-    if r.startswith("t.me/"):
-        r = r.split("t.me/")[-1]
-    # try numeric
-    try:
-        cid = int(r)
-        return await client.get_chat(cid)
-    except Exception:
-        pass
-    # try username or slug
-    return await client.get_chat(r)
-
 async def cmd_add_channel(client, message: Message):
     uid = message.from_user.id
     if not await is_admin(uid):
@@ -692,7 +688,7 @@ async def cmd_add_channel(client, message: Message):
         return await message.reply_text("Usage: /add_channel <link|id|@username>")
     target = parts[1]
     try:
-        chat = await resolve_chat_ref(target)
+        chat = await resolve_chat_ref(target, client)
         doc = {"channel_id": chat.id, "channel_title": getattr(chat, "title", None), "added_by": uid, "added_at": datetime.now(timezone.utc), "enabled": True}
         await channels_col.update_one({"channel_id": chat.id}, {"$set": doc}, upsert=True)
         await log_action("add_channel", by=uid, target=chat.id, extra={"title": doc["channel_title"]})
@@ -709,7 +705,7 @@ async def cmd_remove_channel(client, message: Message):
         return await message.reply_text("Usage: /remove_channel <link|id|@username>")
     target = parts[1]
     try:
-        chat = await resolve_chat_ref(target)
+        chat = await resolve_chat_ref(target, client)
         await channels_col.delete_one({"channel_id": chat.id})
         await log_action("remove_channel", by=uid, target=chat.id)
         await message.reply_text(f"✅ Channel removed: {getattr(chat,'title', chat.id)} ({chat.id})")
@@ -1289,17 +1285,19 @@ async def cmd_reset_stats(client, message: Message):
         await message.reply_text("🚫 Admins only.")
         return
 
-    # Reset global statistics
-    global indexing_stats
+    # Reset statistics counters. The dict is shared via statistics_store.py
+    # (imported through indexing), so mutate it in place - rebinding the name
+    # would only reset this module's local reference and leave the counters
+    # that indexing.py keeps incrementing untouched.
     old_stats = indexing_stats.copy()
 
-    indexing_stats = {
+    indexing_stats.update({
         'total_attempts': 0,
         'successful_inserts': 0,
         'duplicate_errors': 0,
         'other_errors': 0,
         'concurrent_peak': 0
-    }
+    })
 
     await message.reply_text(
         f"✅ **Indexing Statistics Reset**\n\n"
@@ -1331,7 +1329,7 @@ async def cmd_update_db(client, message: Message):
     uid = message.from_user.id
 
     # Check if another indexing process is running
-    from .indexing import indexing_lock
+    from .config import indexing_lock
     if indexing_lock.locked():
         return await message.reply_text("⏳ Another indexing process is already running. Please wait.")
 
@@ -1514,154 +1512,51 @@ async def cmd_update_db(client, message: Message):
         errors = 0
         skipped_no_media = 0
         already_indexed = 0
+        paused = False  # Set when the scan is interrupted (e.g. FloodWait)
 
-        from .indexing import index_message
+        # The scan loop lives in scan_message_range() - a standalone helper so
+        # it can be unit-tested in isolation. This closure re-renders the
+        # Telegram progress message from the helper's state dict.
+        async def _render_progress(state):
+            try:
+                await status_msg.edit_text(
+                    f"🔄 **Database Update In Progress**\n\n"
+                    f"📺 Channel: {channel_title}\n"
+                    f"📍 Range: `{start_id}` → `{end_id}`\n\n"
+                    f"`[{state['bar']}]` {state['progress_pct']:.1f}%\n"
+                    f"⏳ ETA: {state['eta_str']}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🔍 Scanned: {state['scanned']}/{state['total_range']}\n"
+                    f"🗑️ Orphans Removed: {state['orphans_removed']}\n"
+                    f"➕ New Files Indexed: {state['new_indexed']}\n"
+                    f"📁 Already Indexed: {state['already_indexed']}\n"
+                    f"📭 No Media: {state['skipped_no_media']}\n"
+                    f"⚠️ Errors: {state['errors']}"
+                )
+            except Exception:
+                pass  # Ignore edit errors (rate limit, etc.)
 
         async with indexing_lock:
             try:
-                # Step 4a: Get all indexed entries for this channel in the range
-                existing_entries = await movies_col.find({
-                    "channel_id": channel_id,
-                    "message_id": {"$gte": start_id, "$lte": end_id}
-                }, {"message_id": 1, "_id": 1, "title": 1}).to_list(length=None)
-
-                existing_map = {doc["message_id"]: doc for doc in existing_entries}
-                existing_ids = set(existing_map.keys())
-
-                print(f"[UPDATE_DB] Found {len(existing_ids)} indexed entries in the specified range")
-
-                # Track which messages actually exist in channel
-                channel_message_ids = set()
-
-                # Step 4b: Iterate through messages in the range
-                last_update = 0
-                scan_start_time = datetime.now(timezone.utc).timestamp()
-
-                for msg_id in range(start_id, end_id + 1):
-                    scanned += 1
-
-                    # Update progress every 10 messages or at least every 3 seconds
-                    current_time = datetime.now(timezone.utc).timestamp()
-                    if scanned % 10 == 0 or (current_time - last_update) >= 3:
-                        last_update = current_time
-                        progress_pct = (scanned / total_range) * 100
-
-                        # Calculate ETA
-                        elapsed = current_time - scan_start_time
-                        if scanned > 0 and elapsed > 0:
-                            rate = scanned / elapsed  # messages per second
-                            remaining = total_range - scanned
-                            eta_seconds = remaining / rate if rate > 0 else 0
-                            if eta_seconds < 60:
-                                eta_str = f"{int(eta_seconds)}s"
-                            elif eta_seconds < 3600:
-                                eta_str = f"{int(eta_seconds // 60)}m {int(eta_seconds % 60)}s"
-                            else:
-                                eta_str = f"{int(eta_seconds // 3600)}h {int((eta_seconds % 3600) // 60)}m"
-                        else:
-                            eta_str = "calculating..."
-
-                        # Progress bar (20 chars wide)
-                        filled = int(progress_pct / 5)  # 20 segments = 100/5
-                        bar = "█" * filled + "░" * (20 - filled)
-
-                        try:
-                            await status_msg.edit_text(
-                                f"🔄 **Database Update In Progress**\n\n"
-                                f"📺 Channel: {channel_title}\n"
-                                f"📍 Range: `{start_id}` → `{end_id}`\n\n"
-                                f"`[{bar}]` {progress_pct:.1f}%\n"
-                                f"⏳ ETA: {eta_str}\n"
-                                f"━━━━━━━━━━━━━━━━━━━━\n"
-                                f"🔍 Scanned: {scanned}/{total_range}\n"
-                                f"🗑️ Orphans Removed: {orphans_removed}\n"
-                                f"➕ New Files Indexed: {new_indexed}\n"
-                                f"📁 Already Indexed: {already_indexed}\n"
-                                f"📭 No Media: {skipped_no_media}\n"
-                                f"⚠️ Errors: {errors}"
-                            )
-                        except Exception:
-                            pass  # Ignore edit errors (rate limit, etc.)
-
-                        # Terminal progress log every 50 messages
-                        if scanned % 50 == 0:
-                            print(f"[UPDATE_DB] Progress: {scanned}/{total_range} ({progress_pct:.1f}%) | "
-                                  f"Orphans: {orphans_removed} | New: {new_indexed} | ETA: {eta_str}")
-
-                    try:
-                        # Fetch the message from channel
-                        msg = await client.get_messages(channel_id, msg_id)
-
-                        if not msg or getattr(msg, "empty", False):
-                            # Message doesn't exist - check if we have it indexed
-                            if msg_id in existing_ids:
-                                # Remove orphaned entry
-                                doc = existing_map[msg_id]
-                                await movies_col.delete_one({"_id": doc["_id"]})
-                                orphans_removed += 1
-                                print(f"[UPDATE_DB] 🗑️ Removed orphan: {doc.get('title', 'Unknown')} (msg_id: {msg_id})")
-                            continue
-
-                        # Message exists - check if it has video content
-                        has_video = getattr(msg, "video", None) is not None
-                        has_doc = getattr(msg, "document", None) is not None and \
-                                 (getattr(getattr(msg, "document", None), "mime_type", "") or "").startswith("video")
-
-                        if not (has_video or has_doc):
-                            skipped_no_media += 1
-                            # If this non-media message is indexed, remove it (shouldn't happen but safety check)
-                            if msg_id in existing_ids:
-                                doc = existing_map[msg_id]
-                                await movies_col.delete_one({"_id": doc["_id"]})
-                                orphans_removed += 1
-                                print(f"[UPDATE_DB] 🗑️ Removed non-media entry: {doc.get('title', 'Unknown')} (msg_id: {msg_id})")
-                            continue
-
-                        channel_message_ids.add(msg_id)
-
-                        # Check if already indexed
-                        if msg_id in existing_ids:
-                            already_indexed += 1
-                            continue
-
-                        # Index this new file
-                        try:
-                            await index_message(msg)
-                            new_indexed += 1
-
-                            # Get filename for logging
-                            if has_video and msg.video:
-                                filename = getattr(msg.video, "file_name", None) or "Video"
-                            elif has_doc and msg.document:
-                                filename = getattr(msg.document, "file_name", None) or "Document"
-                            else:
-                                filename = "Unknown"
-
-                            print(f"[UPDATE_DB] ➕ Indexed new file: {filename} (msg_id: {msg_id})")
-
-                        except Exception as idx_err:
-                            # Check if it's a duplicate error (already indexed by race condition)
-                            if "duplicate key" in str(idx_err).lower():
-                                already_indexed += 1
-                            else:
-                                errors += 1
-                                print(f"[UPDATE_DB] ⚠️ Error indexing msg {msg_id}: {idx_err}")
-
-                    except Exception as e:
-                        # Error fetching message - might be deleted or inaccessible
-                        if msg_id in existing_ids:
-                            doc = existing_map[msg_id]
-                            try:
-                                await movies_col.delete_one({"_id": doc["_id"]})
-                                orphans_removed += 1
-                                print(f"[UPDATE_DB] 🗑️ Removed inaccessible entry: {doc.get('title', 'Unknown')} (msg_id: {msg_id})")
-                            except Exception as del_err:
-                                errors += 1
-                                print(f"[UPDATE_DB] ⚠️ Error removing orphan {msg_id}: {del_err}")
-                        else:
-                            # Log the error but continue
-                            if "MESSAGE_ID_INVALID" not in str(e):
-                                print(f"[UPDATE_DB] ⚠️ Error accessing msg {msg_id}: {e}")
+                # movies_col is passed EXPLICITLY: scan_message_range lives in
+                # database_scan.py with its own module-global default, and the
+                # end-to-end tests patch commands.movies_col - relying on the
+                # helper's default would bypass that patch.
+                result = await scan_message_range(
+                    client,
+                    channel_id,
+                    start_id,
+                    end_id,
+                    movies_col_ref=movies_col,
+                    progress_cb=_render_progress,
+                )
+                scanned = result["scanned"]
+                orphans_removed = result["orphans_removed"]
+                new_indexed = result["new_indexed"]
+                already_indexed = result["already_indexed"]
+                skipped_no_media = result["skipped_no_media"]
+                errors = result["errors"]
+                paused = result["paused"]
 
                 end_time = datetime.now(timezone.utc)
                 duration = (end_time - start_time).total_seconds()
@@ -1679,6 +1574,7 @@ async def cmd_update_db(client, message: Message):
                     "already_indexed": already_indexed,
                     "skipped_no_media": skipped_no_media,
                     "errors": errors,
+                    "paused": paused,
                     "duration_seconds": duration,
                     "start_time": start_time.isoformat(),
                     "end_time": end_time.isoformat()
@@ -1687,12 +1583,22 @@ async def cmd_update_db(client, message: Message):
                 # Calculate scan rate
                 scan_rate = scanned / duration if duration > 0 else 0
 
-                # Final status with completed progress bar
+                # Final status with completed progress bar (honest about pauses)
+                final_pct = (scanned / total_range) * 100 if total_range else 100
+                filled = int(final_pct / 5)
+                bar = "█" * filled + "░" * (20 - filled)
+                if paused:
+                    header = "⚠️ **Database Update Paused (FloodWait)**"
+                    pause_note = "🔄 Rate limited mid-scan - entries were kept safe. Re-run /update_db to finish.\n\n"
+                else:
+                    header = "✅ **Database Update Complete**"
+                    pause_note = ""
                 await status_msg.edit_text(
-                    f"✅ **Database Update Complete**\n\n"
+                    f"{header}\n\n"
                     f"📺 **Channel:** {channel_title}\n"
                     f"📍 **Range:** `{start_id}` → `{end_id}`\n\n"
-                    f"`[████████████████████]` 100%\n\n"
+                    f"`[{bar}]` {final_pct:.1f}%\n\n"
+                    f"{pause_note}"
                     f"**📊 Results:**\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"🔍 Messages Scanned: `{scanned}`\n"
@@ -1745,26 +1651,6 @@ async def cmd_update_db(client, message: Message):
         import traceback
         traceback.print_exc()
         await message.reply_text(f"❌ **Error:** {e}")
-
-        print(f"Database maintenance completed by user {uid}. "
-              f"Removed {duplicates_removed} duplicates, {orphans_removed} orphans, "
-              f"{verified_orphans} verified orphans (checked {checked}/{verify_limit}), "
-              f"indexed {new_files_indexed} new files in {duration:.2f}s")
-
-    except Exception as e:
-        # Handle unexpected errors
-        await log_action("update_db_error", by=uid, extra={
-            "error": str(e),
-            "error_type": type(e).__name__
-        })
-
-        await status_msg.edit_text(
-            f"**Database Maintenance Failed**\n\n"
-            f"Error: {str(e)}\n\n"
-            f"Please try again later or contact support."
-        )
-
-        print(f"Database maintenance failed for user {uid}: {e}")
 
 
 async def cmd_manual_deletion(client, message: Message):

@@ -3,3 +3,12 @@ module-root = "features"
 tests-root = "tests"
 test-framework = "pytest"
 formatter-cmds = ["disabled"]
+
+[tool.pytest.ini_options]
+# Run async test functions (test_request_feature, test_tmdb_integration, ...)
+# without requiring @pytest.mark.asyncio on every test.
+asyncio_mode = "auto"
+# motor's AsyncIOMotorClient caches the event loop from its first operation.
+# With per-test loops the cached loop gets closed between tests and later DB
+# calls raise "Event loop is closed"; a session-scoped loop keeps it alive.
+asyncio_default_test_loop_scope = "session"

@@ -11,10 +11,16 @@ Tests the parse_metadata() function with 5 test cases covering:
 """
 
 import sys
+import os
 from typing import Dict, Any
 
-# Import the parse_metadata function from main.py
-from main import parse_metadata
+# Ensure project root is on the path so the features package is importable
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+# parse_metadata now lives in the features package (was previously in main.py)
+from features.metadata_parser import parse_metadata
 
 
 class TestResult:
@@ -222,7 +228,7 @@ def test_case_5_avatar_dts_hd():
         "type": "Movie",
         "quality": "1080p",
         "rip": "BluRay",
-        "audio": "DTS-HD",
+        "audio": "DTS-HD MA",  # Filename says "DTS-HD.MA" (Master Audio)
         "audio_channels": "5.1CH",
         "video_codec": "x264/AVC"
     }

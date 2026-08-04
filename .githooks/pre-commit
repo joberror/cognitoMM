@@ -1,0 +1,36 @@
+#!/bin/sh
+#
+# Pre-commit hook: run the static re-export / broken-import / duplicate-def
+# check (scripts/check_reexports.py) before every commit.
+#
+# Skips when no Python source in the scan targets (features/ or main.py) is
+# staged, so doc-only/CI-only commits don't needlessly re-run the scan.
+#
+# Install (from the repo root):
+#   git config core.hooksPath .githooks
+# or
+#   make install-hooks
+#
+# The hook is versioned here (git does NOT track .git/hooks), so the install
+# step above must be run once per clone.
+
+set -eu
+
+# Repo root regardless of where the hook is invoked from.
+ROOT="$(git rev-parse --show-toplevel)"
+
+# Only run when anything under the scan targets (features/ or main.py) is
+# staged. Pathspec 'features/' covers nested files too, matching the scanner's
+# recursive glob (features/**/*.py).
+if ! git diff --cached --name-only -- "features/" "main.py" | grep -q '\.py$'; then
+    exit 0
+fi
+
+echo "🔍 Running static check (re-export chains / broken imports / duplicates)..."
+if ! (cd "$ROOT" && python scripts/check_reexports.py); then
+    echo "❌ Pre-commit static check FAILED — fix the violations above before committing."
+    echo '   (Hint: run make check to reproduce.)'
+    exit 1
+fi
+
+exit 0

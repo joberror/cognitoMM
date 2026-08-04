@@ -17,6 +17,7 @@ from .database import (
     requests_col, logs_col
 )
 from .config import BOT_START_TIME, client
+from .utils import format_file_size
 
 
 async def collect_comprehensive_stats(admin_id=None):
@@ -226,13 +227,13 @@ async def collect_comprehensive_stats(admin_id=None):
         premium_more_30 = 0
         
         for pu in premium_users:
-            expires_at = pu.get('expires_at')
-            if expires_at:
-                # Ensure expires_at is timezone-aware
-                if expires_at.tzinfo is None:
-                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+            expiry_date = pu.get('expiry_date')
+            if expiry_date:
+                # Ensure expiry_date is timezone-aware
+                if expiry_date.tzinfo is None:
+                    expiry_date = expiry_date.replace(tzinfo=timezone.utc)
                 
-                days_remaining = (expires_at - datetime.now(timezone.utc)).days
+                days_remaining = (expiry_date - datetime.now(timezone.utc)).days
                 days_remaining = max(0, days_remaining)
                 premium_details.append({
                     'user_id': pu.get('user_id'),
@@ -250,8 +251,12 @@ async def collect_comprehensive_stats(admin_id=None):
         stats['premium_more_30_days'] = premium_more_30
         
         # Indexing statistics
-        from .indexing import indexing_stats
+        from .statistics_store import indexing_stats
         stats['indexing_stats'] = indexing_stats.copy()
+
+        # Orphan prune monitor statistics (channel-deletion cleanup)
+        from .statistics_store import prune_stats
+        stats['prune_stats'] = prune_stats.copy()
 
         # Database size estimation (count-based)
         stats['db_estimated_size'] = (
@@ -369,6 +374,9 @@ async def collect_quick_stats():
             return_exceptions=True
         )
         
+        # Orphan prune monitor statistics (channel-deletion cleanup)
+        from .statistics_store import prune_stats
+
         return {
             'total_users': results[0],
             'total_content': results[1],
@@ -376,6 +384,7 @@ async def collect_quick_stats():
             'premium_users': results[3],
             'pending_requests': results[4],
             'active_users_7d': results[5],
+            'prune_stats': prune_stats.copy(),
             'generated_at': datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
@@ -494,15 +503,6 @@ def format_percentage(part, total):
     if total == 0:
         return "0.0%"
     return f"{(part / total * 100):.1f}%"
-
-
-def format_file_size_stat(bytes_size):
-    """Format byte size to human readable"""
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if bytes_size < 1024.0:
-            return f"{bytes_size:.2f} {unit}"
-        bytes_size /= 1024.0
-    return f"{bytes_size:.2f} PB"
 
 
 def format_stats_output(stats):
@@ -716,7 +716,7 @@ def format_stats_output(stats):
         for idx, ch in enumerate(channel_sizes[:5], 1):
             ch_name = (ch.get('channel_title') or 'Unknown')[:22]
             total_size = ch.get('total_size', 0)
-            size_str = format_file_size_stat(total_size)
+            size_str = format_file_size(total_size)
             # Add disk icon for largest storage
             disk = "💾 " if idx == 1 else ""
             if idx == len(channel_sizes[:5]):
@@ -738,15 +738,37 @@ def format_stats_output(stats):
     db_size = stats.get('db_estimated_size', 0)
     indexing_stats_data = stats.get('indexing_stats', {})
     
-    output.append(f"┎ <b>DB Est. Size:</b> {format_file_size_stat(db_size)}")
+    output.append(f"┎ <b>DB Est. Size:</b> {format_file_size(db_size)}")
     output.append(f"┠ <b>Total Logs:</b> {format_number(stats.get('total_logs', 0))}")
     output.append("")
     
+    # Orphan prune monitor (channel-deletion cleanup) - hidden until first run
+    prune_stats_data = stats.get('prune_stats', {})
+    has_prune_data = bool(prune_stats_data.get('last_run'))
+
     output.append("┠ <b>Indexing Performance:</b>")
     output.append(f"┠  • Total Attempts: {format_number(indexing_stats_data.get('total_attempts', 0))}")
     output.append(f"┠  • Successful: {format_number(indexing_stats_data.get('successful_inserts', 0))}")
     output.append(f"┠  • Duplicates: {format_number(indexing_stats_data.get('duplicate_errors', 0))}")
-    output.append(f"┖  • Errors: {format_number(indexing_stats_data.get('other_errors', 0))}")
+    # "┠" continues the tree into the prune block; "┖" closes it otherwise
+    errors_prefix = "┠" if has_prune_data else "┖"
+    output.append(f"{errors_prefix}  • Errors: {format_number(indexing_stats_data.get('other_errors', 0))}")
+
+    if has_prune_data:
+        last_run_raw = prune_stats_data.get('last_run')
+        try:
+            last_run_str = datetime.fromisoformat(last_run_raw).strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            last_run_str = str(last_run_raw)
+        pause_suffix = ", FloodWait Paused" if prune_stats_data.get('last_paused') else ""
+        last_error = prune_stats_data.get('last_error')
+        output.append("┠ <b>Orphan Prune (channel cleanup):</b>")
+        output.append(f"┠  • Runs: {format_number(prune_stats_data.get('runs', 0))}")
+        output.append(f"┠  • Last Run: {last_run_str} · {prune_stats_data.get('last_duration', 0)}s{pause_suffix}")
+        if last_error:
+            output.append(f"┠  • ⚠️ Last Error: {last_error}")
+        output.append(f"┠  • Last: Verified {format_number(prune_stats_data.get('last_verified', 0))} · Deleted {format_number(prune_stats_data.get('last_deleted', 0))} · Access-Skipped {format_number(prune_stats_data.get('last_skipped_access', 0))}")
+        output.append(f"┖  • Total Deleted: {format_number(prune_stats_data.get('total_deleted', 0))}")
     output.append("")
     
     # === ACTIVITY STATISTICS ===
@@ -839,7 +861,14 @@ def format_quick_stats_output(stats):
     output += f"⭐ Premium:         {format_number(premium_users)}\n"
     output += f"🎥 Content:         {format_number(total_content)}\n"
     output += f"📡 Channels:        {format_number(total_channels)}\n"
-    output += f"📝 Requests:        {format_number(pending_requests)}\n\n"
+    output += f"📝 Requests:        {format_number(pending_requests)}\n"
+
+    # Orphan prune monitor (channel-deletion cleanup) - hidden until first run
+    prune_stats_data = stats.get('prune_stats', {})
+    if prune_stats_data.get('last_run'):
+        output += f"🗑️ Prune Runs:      {format_number(prune_stats_data.get('runs', 0))} | Total Deleted: {format_number(prune_stats_data.get('total_deleted', 0))}\n"
+        output += f"🗑️ Last Prune:      {format_number(prune_stats_data.get('last_verified', 0))} verified · {format_number(prune_stats_data.get('last_deleted', 0))} deleted · {format_number(prune_stats_data.get('last_skipped_access', 0))} skipped\n"
+    output += "\n"
     
     gen_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     output += f"Generated: {gen_time}\n"
@@ -905,6 +934,21 @@ async def export_stats_csv(stats):
         # System statistics
         writer.writerow(['System', 'DB Size (bytes)', stats.get('db_estimated_size', 0)])
         writer.writerow(['System', 'Total Logs', stats.get('total_logs', 0)])
+
+        # Orphan prune monitor statistics (channel-deletion cleanup)
+        prune_stats_data = stats.get('prune_stats', {})
+        if prune_stats_data.get('last_run'):
+            writer.writerow(['Prune', 'Runs', prune_stats_data.get('runs', 0)])
+            writer.writerow(['Prune', 'Total Deleted', prune_stats_data.get('total_deleted', 0)])
+            writer.writerow(['Prune', 'Access-Skipped (Total)', prune_stats_data.get('total_skipped_access', 0)])
+            writer.writerow(['Prune', 'Last Run', prune_stats_data.get('last_run', '')])
+            writer.writerow(['Prune', 'Last Duration (s)', prune_stats_data.get('last_duration', 0)])
+            writer.writerow(['Prune', 'Last Verified', prune_stats_data.get('last_verified', 0)])
+            writer.writerow(['Prune', 'Last Deleted', prune_stats_data.get('last_deleted', 0)])
+            writer.writerow(['Prune', 'Last Access-Skipped', prune_stats_data.get('last_skipped_access', 0)])
+            writer.writerow(['Prune', 'Last Paused (FloodWait)', prune_stats_data.get('last_paused', False)])
+            if prune_stats_data.get('last_error'):
+                writer.writerow(['Prune', 'Last Error', prune_stats_data.get('last_error')])
         
         # Top searches
         top_searches = stats.get('top_searches', [])
@@ -956,9 +1000,9 @@ async def collect_user_stats(user_id: int):
         premium_doc = await premium_users_col.find_one({"user_id": user_id})
         if premium_doc:
             stats['is_premium'] = True
-            stats['premium_since'] = premium_doc.get('granted_at')
-            stats['premium_expires'] = premium_doc.get('expires_at')
-            stats['premium_granted_by'] = premium_doc.get('granted_by')
+            stats['premium_since'] = premium_doc.get('added_date')
+            stats['premium_expires'] = premium_doc.get('expiry_date')
+            stats['premium_granted_by'] = premium_doc.get('added_by')
             
             # Calculate days remaining
             if stats['premium_expires']:

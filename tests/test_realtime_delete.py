@@ -10,8 +10,15 @@ No actual Hydrogram dependency; we fabricate the update object and lightweight c
 """
 
 import asyncio
+import sys
+import os
 from types import SimpleNamespace
 import pytest
+
+# Ensure project root on path so the features package is importable
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 # Import the module under test
 import features.deletion_events as deletion_events

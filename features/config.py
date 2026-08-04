@@ -73,13 +73,6 @@ queue_processor_task = None
 # DIAGNOSTIC: Track concurrent indexing operations
 import threading
 active_indexing_threads = set()
-indexing_stats = {
-    'total_attempts': 0,
-    'successful_inserts': 0,
-    'duplicate_errors': 0,
-    'other_errors': 0,
-    'concurrent_peak': 0
-}
 
 # User input waiting system (replacement for client.listen)
 user_input_events = {}
@@ -94,20 +87,3 @@ temp_data = TempData()
 
 # Client will be initialized within async context
 client = None
-
-# Add missing variables for indexing functionality
-class temp_data:
-    CANCEL = False
-
-def get_readable_time(seconds):
-    """Convert seconds to readable time format"""
-    if seconds < 60:
-        return f"{int(seconds)}s"
-    elif seconds < 3600:
-        minutes = int(seconds // 60)
-        secs = int(seconds % 60)
-        return f"{minutes}m {secs}s"
-    else:
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        return f"{hours}h {minutes}m"

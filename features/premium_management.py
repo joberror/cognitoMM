@@ -8,7 +8,8 @@ and controlling premium features.
 
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Tuple
-from .database import premium_users_col, premium_features_col, log_action
+from .database import premium_users_col, premium_features_col
+from .user_management import log_action
 
 
 # Default premium features

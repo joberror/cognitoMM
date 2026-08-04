@@ -28,6 +28,11 @@ Notes / Limitations:
   attempting to fetch messages (done by prune_orphaned_index_entries in indexing.py).
 - This handler will catch deletions in groups/supergroups but will remain idle for channels.
 - The periodic orphan monitor (every 30 minutes) is the PRIMARY deletion detection mechanism.
+- Access-error safety: this handler performs NO message fetches (it deletes straight
+  from Telegram's raw update payload, which is authoritative), so access errors
+  (ChannelPrivate, banned/removed, etc.) cannot be raised here. ACCESS_ERRORS from
+  indexing.py is imported so any future fetch-based verification added to this
+  module inherits the same guarantee: access errors are never treated as deletions.
 
 Diagnostic Tags:
 - [REALTIME-DELETE] for visibility in runtime console.
@@ -38,6 +43,17 @@ from typing import Any, Iterable
 
 from .database import movies_col, channels_col
 from .user_management import log_action
+
+# Access-error guard shared with the orphan prune (indexing.py): exceptions in
+# this tuple mean the bot lost access to a channel itself (ChannelPrivate,
+# banned/removed, etc.), NOT that a message was deleted. They must never be
+# treated as deletions, or a single run can wipe a channel's entire index.
+#
+# This handler currently performs NO message fetches - it deletes straight from
+# Telegram's raw update payload, which is authoritative - so ACCESS_ERRORS
+# cannot fire here today. It is imported so any future fetch-based verification
+# added to this module inherits the same guarantee.
+from .indexing import ACCESS_ERRORS
 
 # Enable debug mode to see all raw updates (WARNING: Very verbose!)
 DEBUG_RAW_UPDATES = False

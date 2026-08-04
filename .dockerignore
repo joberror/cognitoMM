@@ -1,15 +1,20 @@
-__pycache__
-*.py[cod]
-*$py.class
-NON_EXISTENT_FILE_TO_FORCE_DOCKER_IGNORE_EVERYTHING_ELSE
-
-# Environment variables
-.env
-.env.local
-
 # Git
 .git
 .gitignore
+.github/
+
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+
+# Environment
+.env
+.env.local
+.env.*
 
 # Session files
 *.session
@@ -17,14 +22,42 @@ NON_EXISTENT_FILE_TO_FORCE_DOCKER_IGNORE_EVERYTHING_ELSE
 *.session-wal
 *.session-shm
 
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
 # Logs
 logs/
 *.log
 
-# IDEs
-.vscode/
-.idea/
+# Documentation (not needed at runtime)
+*.md
+CODEBASE_NOTES.md
+IMPLEMENTATION_SUMMARY.md
+*.txt
+info/
 
-# OS specific
-.DS_Store
-Thumbs.db
+# Agent config (not needed at runtime)
+.agent/
+.claude/
+.context-engine/
+.agents/
+
+# Test files (not needed at runtime)
+tests/
+scripts/
+
+# CI / Nix
+.idx/
+*.nix
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore

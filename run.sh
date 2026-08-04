@@ -1,60 +1,90 @@
 #!/bin/bash
+# ========================================================================
+#  MovieBot Launcher
+#  Usage: ./run.sh [--help] [--docker]
+# ========================================================================
+set -euo pipefail
 
-# MovieBot Launcher Script
-# This ensures we use the correct Python version and environment
+show_help() {
+    cat <<EOF
+MovieBot Launcher — CognitoMM
 
+Usage:
+  ./run.sh                  Start the bot directly (requires Python + .env)
+  ./run.sh --docker         Build and run via Docker Compose instead
+  ./run.sh --help           Show this message
+
+Environment:
+  cp .env.example .env   then edit with your values
+
+Developer tools:
+  make check             run the static import check
+  make test              run the full pytest suite
+  make install-hooks     install the pre-commit hook (runs the static check)
+
+See DEPLOYMENT.md for full Docker, VPS, and Hugging Face Spaces guides.
+
+EOF
+    exit 0
+}
+
+# --- Parse flags ---
+DOCKER_MODE=false
+for arg in "$@"; do
+    case "$arg" in
+        --help|-h) show_help ;;
+        --docker) DOCKER_MODE=true ;;
+        *) echo "❌ Unknown flag: $arg"; show_help ;;
+    esac
+done
+
+# --- Docker mode ---
+if $DOCKER_MODE; then
+    echo "🐳 Building and starting via Docker Compose..."
+    if [ ! -f ".env" ]; then
+        echo "❌ .env file not found. Create one before running."
+        exit 1
+    fi
+    docker compose build --pull
+    docker compose up -d
+    echo "✅ Bot started. Logs: docker compose logs -f"
+    exit 0
+fi
+
+# --- Direct mode ---
 echo "🚀 MovieBot Launcher"
 echo "===================="
 
-# Check if we're in the right directory
+# Check we're in the project root
 if [ ! -f "main.py" ]; then
-    echo "❌ Error: main.py not found. Please run this script from the project directory."
+    echo "❌ main.py not found — run this script from the project directory."
     exit 1
 fi
 
-# Check if .env file exists
+# Check .env
 if [ ! -f ".env" ]; then
-    echo "❌ Error: .env file not found. Please create it with your configuration."
+    echo "❌ .env file not found. Create it with your configuration."
     exit 1
 fi
 
-# Set Python version using pyenv
-echo "🔧 Setting Python version to 3.12.8..."
-pyenv local 3.12.8
-
-# Check Python version
+# Check Python version (informational only)
 PYTHON_VERSION=$(python --version 2>&1)
-echo "🐍 Using: $PYTHON_VERSION"
+echo "🐍 $PYTHON_VERSION"
 
-# Check if it's the right version
-if [[ "$PYTHON_VERSION" == *"3.12.8"* ]]; then
-    echo "✅ Correct Python version detected"
+# Check for Pyrogram/Hydrogram
+if python -c "import pyrogram" 2>/dev/null; then
+    echo "📦 Pyrogram: $(python -c 'import pyrogram; print(pyrogram.__version__)')"
+elif python -c "import hydrogram" 2>/dev/null; then
+    echo "📦 Hydrogram: $(python -c 'import hydrogram; print(hydrogram.__version__)')"
 else
-    echo "⚠️  Warning: Expected Python 3.12.8, got: $PYTHON_VERSION"
-    echo "⚠️  This may cause compatibility issues with Pyrogram"
+    echo "⚠️  Neither Pyrogram nor Hydrogram found — check requirements.txt"
 fi
 
-# Check Pyrogram version
-PYROGRAM_VERSION=$(python -c "import pyrogram; print(pyrogram.__version__)" 2>/dev/null)
-if [ $? -eq 0 ]; then
-    echo "📦 Pyrogram version: $PYROGRAM_VERSION"
-    if [[ "$PYROGRAM_VERSION" == "2.0.106" ]]; then
-        echo "✅ Correct Pyrogram version"
-    else
-        echo "⚠️  Warning: Expected Pyrogram 2.0.106, got: $PYROGRAM_VERSION"
-    fi
-else
-    echo "❌ Error: Pyrogram not found or not importable"
-    exit 1
-fi
-
-# Clean up any locked session files
-echo "🧹 Cleaning up session files..."
-rm -f *.session *.session-journal
+# Clean up stale session files
+echo "🧹 Cleaning stale session files..."
+rm -f *.session *.session-journal *.session-shm *.session-wal
 
 echo ""
 echo "🎬 Starting MovieBot..."
-echo "======================"
-
-# Run the application
-python main.py
+echo "========================"
+exec python main.py

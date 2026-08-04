@@ -30,7 +30,7 @@ class TelegramLogger:
         self.MAX_BUFFER_SIZE = 4000 # Telegram max is 4096, keep room for overhead
         
         # Patterns to ignore for Telegram logging (still printed to console)
-        self.ignore_patterns = ["[DIAGNOSTIC]", "[INDEXED]"]
+        self.ignore_patterns = ["[DIAGNOSTIC]", "[INDEXED]", "[PRUNE]"]
 
     def set_client(self, client, channel_id):
         """Update client and channel ID after initialization"""

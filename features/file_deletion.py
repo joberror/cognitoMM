@@ -11,24 +11,12 @@ import os
 import uuid
 from datetime import datetime, timezone, timedelta
 
-from .database import movies_col
 from .config import file_deletions, file_deletions_lock
 
-
-async def cleanup_expired_bulk_downloads(bulk_downloads):
-    """Remove bulk downloads older than 1 hour"""
-    current_time = datetime.now(timezone.utc)
-    expired_keys = []
-
-    for bulk_id, data in bulk_downloads.items():
-        if (current_time - data['created_at']).total_seconds() > 3600:  # 1 hour
-            expired_keys.append(bulk_id)
-
-    for key in expired_keys:
-        del bulk_downloads[key]
-
-    if expired_keys:
-        print(f"🧹 Cleaned up {len(expired_keys)} expired bulk downloads")
+# Canonical implementation lives in utils.py (optional dict argument, defaults
+# to the shared config.bulk_downloads); re-exported here for backward compat
+# (identity is pinned by tests/test_critical_fixes.py).
+from .utils import cleanup_expired_bulk_downloads
 
 
 async def cleanup_expired_file_deletions():

@@ -27,6 +27,9 @@ if ROOT_DIR not in sys.path:
 from features import indexing  # features/indexing.py
 from features import config     # features/config.py
 
+# Real hydrogram error classes used to simulate channel access loss
+from hydrogram.errors import ChannelPrivate, FloodWait, UserBannedInChannel
+
 # ---------------------------
 # Fake Async Mongo Collection
 # ---------------------------
@@ -100,15 +103,24 @@ class FakeMessage:
 class FakeClient:
     """
     get_messages behavior:
-    - For message_id in self.missing_ids: raise Exception (simulates inaccessible/deleted)
+    - For message_id in self.flood_ids: raise FloodWait (rate limited) -> PAUSE
+    - For message_id in self.access_errors: raise the mapped access error
+      (ChannelPrivate / UserBannedInChannel etc.) -> should be SKIPPED
+    - For message_id in self.missing_ids: raise generic Exception (deleted)
     - For message_id in self.empty_ids: return FakeMessage(empty=True)
     - Otherwise return a non-empty message object
     """
-    def __init__(self, missing_ids=None, empty_ids=None):
+    def __init__(self, missing_ids=None, empty_ids=None, access_errors=None, flood_ids=None):
         self.missing_ids = set(missing_ids or [])
         self.empty_ids = set(empty_ids or [])
+        self.access_errors = access_errors or {}  # message_id -> exception class
+        self.flood_ids = set(flood_ids or [])
 
     async def get_messages(self, channel_id, message_id):
+        if message_id in self.flood_ids:
+            raise FloodWait(42)  # simulate Telegram rate limiting
+        if message_id in self.access_errors:
+            raise self.access_errors[message_id]()
         if message_id in self.missing_ids:
             raise Exception("Message not found (deleted)")
         if message_id in self.empty_ids:
@@ -123,12 +135,19 @@ class FakeClient:
 async def run_test():
     """
     Scenario:
-      We insert 5 fake indexed docs:
+      We insert 9 fake indexed docs:
         1. Valid message -> should remain
-        2. Missing message (raises) -> should be deleted
-        3. Empty message object -> should be deleted
-        4. Malformed (missing channel_id) -> should be deleted
-        5. Malformed (missing message_id) -> should be deleted
+        2. Missing message (generic Exception raised) -> should be deleted
+        3. ChannelPrivate raised (bot lost channel access) -> should REMAIN,
+           and pruning must CONTINUE past it
+        4. Empty message object -> should be deleted (proves iteration continues
+           after an access error instead of aborting the run)
+        5. Malformed (missing channel_id) -> should be deleted
+        6. Malformed (missing message_id) -> should be deleted
+        7. UserBannedInChannel raised (bot removed from channel) -> should REMAIN
+        8. FloodWait raised (rate limited) -> should REMAIN and PAUSE the run
+        9. Empty message object after the FloodWait -> should REMAIN untouched,
+           proving the prune paused instead of continuing
     """
     now = datetime.now(timezone.utc)
 
@@ -145,6 +164,15 @@ async def run_test():
             "channel_id": -100111111,
             "message_id": 101,
             "title": "Missing Source",
+            "indexed_at": now
+        },
+        # Access-error entry deliberately placed MID-LIST: entries after it
+        # must still be processed, proving the prune skips rather than aborts.
+        {
+            "_id": "chatA_105",
+            "channel_id": -100111111,
+            "message_id": 105,
+            "title": "ChannelPrivate Source",
             "indexed_at": now
         },
         {
@@ -167,6 +195,30 @@ async def run_test():
             # Missing message_id
             "title": "Malformed Missing Message",
             "indexed_at": now
+        },
+        {
+            "_id": "chatA_106",
+            "channel_id": -100111111,
+            "message_id": 106,
+            "title": "UserBannedInChannel Source",
+            "indexed_at": now
+        },
+        # FloodWait entry placed so entries BEFORE it are still processed, but
+        # the run must PAUSE here - anything after it stays untouched (rate
+        # limiting is not proof of deletion).
+        {
+            "_id": "chatA_107",
+            "channel_id": -100111111,
+            "message_id": 107,
+            "title": "FloodWait Source",
+            "indexed_at": now
+        },
+        {
+            "_id": "chatA_108",
+            "channel_id": -100111111,
+            "message_id": 108,
+            "title": "Empty After FloodWait",
+            "indexed_at": now
         }
     ]
 
@@ -177,7 +229,12 @@ async def run_test():
     # Configure fake client
     fake_client = FakeClient(
         missing_ids={101},     # simulate deleted message
-        empty_ids={102}        # simulate empty message object
+        empty_ids={102},       # simulate empty message object
+        access_errors={        # simulate channel access loss - must be SKIPPED
+            105: ChannelPrivate,
+            106: UserBannedInChannel,
+        },
+        flood_ids={107}        # simulate Telegram rate limiting - must PAUSE
     )
     config.client = fake_client  # Provide to prune function via config
 
@@ -188,11 +245,23 @@ async def run_test():
     remaining_ids = set(fake_collection.docs.keys())
     deleted_ids = set(fake_collection.deleted_ids)
 
-    # Expect valid entry remains
-    assert "chatA_100" in remaining_ids, "Valid entry should remain"
-    # Expect orphaned or malformed removed
+    # Expect valid + access-error + flood entries remain (not proof of deletion)
+    for kept in ["chatA_100", "chatA_105", "chatA_106", "chatA_107", "chatA_108"]:
+        assert kept in remaining_ids, f"Entry {kept} should remain"
+    # Expect orphaned or malformed removed (everything before the FloodWait)
     for orphan in ["chatA_101", "chatA_102", "chatA_103", "chatA_104"]:
         assert orphan in deleted_ids, f"Orphan/malformed entry {orphan} should be deleted"
+
+    # Access-error entries must never have been touched
+    for kept in ["chatA_105", "chatA_106"]:
+        assert kept not in deleted_ids, f"Access-error entry {kept} must not be deleted"
+
+    # FloodWait pins pause-and-resume: chatA_108 sits AFTER the flood entry and
+    # is an empty stub - it would be deleted if the prune continued, so its
+    # survival proves the run paused at chatA_107 instead of carrying on.
+    assert "chatA_108" not in deleted_ids, (
+        "FloodWait must pause the run - entry after it must not be processed"
+    )
 
     print("✅ Orphan prune test passed")
     print(f"Remaining IDs: {remaining_ids}")

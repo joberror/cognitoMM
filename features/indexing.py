@@ -18,12 +18,21 @@ from collections import deque
 
 from hydrogram import enums
 from hydrogram.types import Message
-from hydrogram.errors import FloodWait
+from hydrogram.errors import (
+    ChannelBanned,
+    ChannelInvalid,
+    ChannelPrivate,
+    ChatAdminRequired,
+    ChatForbidden,
+    FloodWait,
+    UserBannedInChannel,
+)
 
-from .config import AUTO_INDEX_DEFAULT, INDEX_EXTENSIONS, indexing_lock, active_indexing_threads, indexing_stats, message_queue, queue_processor_task, temp_data
+from .config import AUTO_INDEX_DEFAULT, INDEX_EXTENSIONS, indexing_lock, active_indexing_threads, message_queue, queue_processor_task, temp_data
 from .database import movies_col, channels_col, settings_col
 from .metadata_parser import parse_metadata
 from .utils import get_readable_time
+from .statistics_store import prune_stats, indexing_stats  # re-exported; owned by the shared stats store
 
 
 async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
@@ -482,5 +491,174 @@ async def on_message(client, message):
         # Log message arrival for analysis
         print(f"[DIAGNOSTIC] {timestamp} - Message {message.id} queued for sequential processing")
         print(f"[DIAGNOSTIC] {timestamp} - Queue size: {len(message_queue)}")
+
+
+# -------------------------
+# Orphan Pruning (channel message deletion cleanup)
+# -------------------------
+
+# The prune_stats runtime dict is defined in the shared statistics store
+# (features/statistics_store.py); imported above and mutated by
+# prune_orphaned_index_entries below.
+
+# Exceptions raised when the bot no longer has access to a channel itself
+# (rather than a specific message being deleted). When get_messages raises one
+# of these, we cannot verify whether entries still exist, so they must NOT be
+# treated as deletions - doing so would wipe a channel's entire index in a
+# single prune run.
+ACCESS_ERRORS = (
+    ChannelPrivate,          # bot is not a member of this (private) channel
+    ChannelInvalid,          # channel does not exist / is an invalid peer
+    ChannelBanned,           # bot has been banned from the channel
+    UserBannedInChannel,     # bot has been banned inside the channel/supergroup
+    ChatAdminRequired,       # bot lacks the admin rights needed to read it
+    ChatForbidden,           # bot has no access to this chat
+)
+
+async def prune_orphaned_index_entries(limit: int = 100):
+    """
+    Verify indexed entries still exist in their source channels and remove
+    orphaned or malformed entries from the movies collection.
+
+    Why this exists (see deletion_events.py):
+    - Bots do NOT receive deletion updates for channel posts (Telegram API
+      limitation), so the only reliable way to detect channel deletions is to
+      periodically verify by attempting to fetch each indexed message.
+    - This function is the primary channel-deletion detection mechanism.
+
+    Strategy:
+    - Fetches up to `limit` of the most recently indexed entries.
+    - An entry is removed when:
+        * Its channel message fetch raises a generic error (message deleted /
+          inaccessible for any reason other than a channel access error)
+        * The fetched message is an empty stub (get_messages -> empty=True)
+        * It is malformed (missing channel_id or message_id)
+    - An entry is KEPT when the fetch raises a known channel access error
+      (ChannelPrivate, ChannelBanned, ChatAdminRequired, etc. - see
+      ACCESS_ERRORS). Those mean the bot no longer has access to the channel
+      itself, NOT that the message was deleted; deleting them would wipe a
+      channel's entire index in a single run.
+    - On FloodWait, pruning is paused for the current run (rate limiting is
+      not proof of deletion) and can resume on a later run.
+
+    ⚠️ PRODUCTION SAFETY: generic fetch exceptions are still treated as
+    "deleted" and remove the entry. Only run pruning for channels the bot
+    still has access to; a channel that becomes private/banned is now skipped
+    instead of wiped, but any other fetch failure still removes the entry.
+    Wired into the bot as a periodic background task via
+    start_orphan_prune_monitor (see features/bot.py). Run statistics are
+    recorded in prune_stats and shown on the /stat dashboard.
+
+    Args:
+        limit: Maximum number of entries to verify per run.
+
+    Returns:
+        int: Number of entries removed.
+    """
+    from .config import client
+
+    # Guard: never prune without a live client - a fetch failure on a dead
+    # client would otherwise be treated as a deletion and wipe entries.
+    if client is None:
+        print("⚠️ [PRUNE] Client not ready - skipping orphan prune")
+        return 0
+
+    deleted = 0
+    verified = 0
+    skipped_access = 0
+    paused = False
+    start_time = time.monotonic()
+    print("[PRUNE] Starting orphan prune...")
+    try:
+        cursor = movies_col.find(
+            {},
+            {"channel_id": 1, "message_id": 1, "title": 1, "indexed_at": 1}
+        )
+        cursor = cursor.sort("indexed_at", -1).limit(limit)
+
+        async for doc in cursor:
+            verified += 1
+            entry_id = doc.get("_id")
+            channel_id = doc.get("channel_id")
+            message_id = doc.get("message_id")
+
+            # Malformed entry - no way to verify it -> remove
+            if channel_id is None or message_id is None:
+                await movies_col.delete_one({"_id": entry_id})
+                deleted += 1
+                print(f"[PRUNE] Removed malformed entry {entry_id}")
+                continue
+
+            try:
+                msg = await client.get_messages(channel_id, message_id)
+                if not msg or getattr(msg, "empty", False):
+                    # Message reported as empty -> deleted
+                    await movies_col.delete_one({"_id": entry_id})
+                    deleted += 1
+                    print(f"[PRUNE] Removed deleted message {entry_id}")
+            except FloodWait as e:
+                # Rate limited - not proof of deletion; pause this run
+                paused = True
+                print(f"⚠️ [PRUNE] FloodWait {e.value}s - pausing orphan prune")
+                break
+            except ACCESS_ERRORS as e:
+                # Bot lost access to the channel itself (ChannelPrivate,
+                # banned/removed, etc.) - NOT proof the message was deleted.
+                # Skip so a single run cannot wipe a channel's whole index;
+                # these entries will be re-checked on a later run.
+                skipped_access += 1
+                print(f"⚠️ [PRUNE] {type(e).__name__} for {entry_id} - channel access lost, skipping")
+            except Exception:
+                # Message missing/inaccessible -> deleted
+                await movies_col.delete_one({"_id": entry_id})
+                deleted += 1
+                print(f"[PRUNE] Removed missing message {entry_id}")
+
+        # Record run statistics for the stats dashboard
+        prune_stats['runs'] += 1
+        prune_stats['total_deleted'] += deleted
+        prune_stats['total_skipped_access'] += skipped_access
+        prune_stats['last_run'] = datetime.now(timezone.utc).isoformat()
+        prune_stats['last_duration'] = round(time.monotonic() - start_time, 2)
+        prune_stats['last_verified'] = verified
+        prune_stats['last_deleted'] = deleted
+        prune_stats['last_skipped_access'] = skipped_access
+        prune_stats['last_paused'] = paused
+        prune_stats['last_error'] = None
+
+        print(f"✅ [PRUNE] Orphan prune complete: verified {verified}, deleted {deleted}")
+        return deleted
+    except Exception as e:
+        prune_stats['last_run'] = datetime.now(timezone.utc).isoformat()
+        prune_stats['last_duration'] = round(time.monotonic() - start_time, 2)
+        prune_stats['last_error'] = str(e)
+        print(f"❌ [PRUNE] Orphan prune error: {e}")
+        return deleted
+
+
+async def start_orphan_prune_monitor(interval_minutes: int = 30):
+    """
+    Background task: periodically verify indexed entries and remove orphaned
+    ones from the database.
+
+    Runs prune_orphaned_index_entries every `interval_minutes` minutes. This is
+    the PRIMARY channel-deletion detection mechanism (see deletion_events.py)
+    since Telegram does not push channel deletion updates to bots. Started from
+    features/bot.py alongside the file-deletion monitor.
+
+    ⚠️ Generic fetch failures are still treated as deletions, but known channel
+    access errors (ChannelPrivate, banned/removed, etc.) are skipped, so a
+    channel that becomes inaccessible will no longer have its index wiped in a
+    single run (see prune_orphaned_index_entries).
+
+    Run statistics are recorded in prune_stats (runs, last run, deleted,
+    access-skipped, FloodWait pauses) and exposed on the /stat dashboard.
+    """
+    while True:
+        try:
+            await prune_orphaned_index_entries(limit=100)
+        except Exception as e:
+            print(f"❌ [PRUNE] Monitor error: {e}")
+        await asyncio.sleep(interval_minutes * 60)
 
 
