@@ -1,0 +1,33 @@
+# Dependabot keeps the supply chain current with automatic pull requests:
+#   - GitHub Actions (workflow actions, e.g. checkout / setup-python)
+#   - Python dependencies (requirements.txt / pyproject.toml)
+#
+# Schema reference:
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  # GitHub Actions: all action majors in one grouped PR (low risk, keeps the
+  # Node-runtime bumps like checkout@v3 -> v5 arriving automatically).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # Python dependencies. Minor/patch bumps are grouped into a single PR;
+  # major-version bumps stay separate so breaking changes are reviewed alone.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
