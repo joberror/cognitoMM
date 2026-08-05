@@ -6,6 +6,13 @@ This test file validates the movie/series request functionality including:
 - Request validation
 - Duplicate detection
 - IMDB link validation
+
+The rate-limit and duplicate-detection tests run against an in-memory
+FakeRequestCollection instead of the real MongoDB (which is unavailable in CI):
+the production code paths are identical (features/request_management.py only
+talks to the collections through find_one/count_documents/find/insert_one/
+update_one/delete_many), so the tests are self-contained and never touch a
+live database.
 """
 
 import asyncio
@@ -16,6 +23,7 @@ from datetime import datetime, timezone, timedelta
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import features.request_management as request_management
 from features.request_management import (
     check_rate_limits,
     update_user_limits,
@@ -26,8 +34,116 @@ from features.request_management import (
     MAX_REQUESTS_PER_DAY_PER_USER,
     MAX_GLOBAL_REQUESTS_PER_DAY
 )
-from features.database import requests_col, user_request_limits_col, ensure_indexes
 
+
+# ---------------------------
+# In-memory collection fakes
+# ---------------------------
+
+class FakeCursor:
+    """Object with an async to_list(), returned by find()."""
+
+    def __init__(self, docs):
+        self._docs = docs
+
+    async def to_list(self, length=None):
+        return self._docs
+
+
+class FakeRequestCollection:
+    """In-memory stand-in for a motor collection.
+
+    Supports the subset of the collection API used by
+    features/request_management.py and these tests: find_one,
+    count_documents, find(...).to_list, insert_one, update_one ($set + upsert)
+    and delete_many. Comparison operators ($gte/$gt/$lte/$lt) are supported for
+    date-range queries.
+    """
+
+    def __init__(self, docs=None):
+        self.docs = list(docs or [])
+
+    @staticmethod
+    def _matches(doc, query):
+        for key, expected in (query or {}).items():
+            if isinstance(expected, dict):
+                # Comparison operators, e.g. {"request_date": {"$gte": t}}
+                value = doc.get(key)
+                for op, target in expected.items():
+                    if op == "$gte":
+                        if value is None or not (value >= target):
+                            return False
+                    elif op == "$gt":
+                        if value is None or not (value > target):
+                            return False
+                    elif op == "$lte":
+                        if value is None or not (value <= target):
+                            return False
+                    elif op == "$lt":
+                        if value is None or not (value < target):
+                            return False
+                    else:
+                        raise NotImplementedError(f"operator {op!r} not faked")
+            else:
+                if doc.get(key) != expected:
+                    return False
+        return True
+
+    async def find_one(self, query, **kwargs):
+        # **kwargs (e.g. sort) accepted for motor-signature parity even though
+        # the exercised code paths never pass them.
+        for doc in self.docs:
+            if self._matches(doc, query):
+                return dict(doc)
+        return None
+
+    async def count_documents(self, query):
+        return sum(1 for doc in self.docs if self._matches(doc, query))
+
+    def find(self, query):
+        return FakeCursor([
+            dict(doc) for doc in self.docs if self._matches(doc, query)
+        ])
+
+    async def insert_one(self, doc):
+        new_doc = dict(doc)
+        new_doc.setdefault("_id", len(self.docs) + 1)
+        self.docs.append(new_doc)
+
+    async def update_one(self, query, update, upsert=False):
+        for doc in self.docs:
+            if self._matches(doc, query):
+                for field, value in (update or {}).get("$set", {}).items():
+                    doc[field] = value
+                return
+        if upsert:
+            self.docs.append(dict((update or {}).get("$set", {})))
+
+    async def delete_many(self, query):
+        self.docs = [doc for doc in self.docs if not self._matches(doc, query)]
+
+
+def _install_fakes(monkeypatch=None):
+    """Swap request_management's collections for in-memory fakes.
+
+    Under pytest the fakes are installed via monkeypatch (auto-restored); when
+    run standalone (python tests/test_request_feature.py) they are assigned
+    directly on the module.
+    """
+    requests = FakeRequestCollection()
+    limits = FakeRequestCollection()
+    if monkeypatch is not None:
+        monkeypatch.setattr(request_management, "requests_col", requests)
+        monkeypatch.setattr(request_management, "user_request_limits_col", limits)
+    else:
+        request_management.requests_col = requests
+        request_management.user_request_limits_col = limits
+    return requests, limits
+
+
+# ---------------------------
+# Tests
+# ---------------------------
 
 async def test_imdb_validation():
     """Test IMDB link validation"""
@@ -63,15 +179,15 @@ async def test_imdb_validation():
     print("✅ IMDB validation tests passed!")
 
 
-async def test_rate_limits():
-    """Test rate limiting functionality"""
+async def _test_rate_limits():
+    """Test rate limiting functionality (in-memory collections)"""
     print("\n🧪 Testing Rate Limits...")
     
     test_user_id = 999999999  # Test user ID
     
     # Clean up any existing test data
-    await requests_col.delete_many({"user_id": test_user_id})
-    await user_request_limits_col.delete_many({"user_id": test_user_id})
+    await request_management.requests_col.delete_many({"user_id": test_user_id})
+    await request_management.user_request_limits_col.delete_many({"user_id": test_user_id})
     
     # Test 1: User should be able to request initially
     can_request, error = await check_rate_limits(test_user_id)
@@ -79,7 +195,7 @@ async def test_rate_limits():
     print("  ✅ First request allowed")
     
     # Simulate a request
-    await requests_col.insert_one({
+    await request_management.requests_col.insert_one({
         "user_id": test_user_id,
         "username": "test_user",
         "content_type": "Movie",
@@ -100,14 +216,14 @@ async def test_rate_limits():
     # Test 3: Add more pending requests to test max pending limit
     # First, set last_request_date to yesterday to bypass daily limit
     yesterday = datetime.now(timezone.utc) - timedelta(days=1)
-    await user_request_limits_col.update_one(
+    await request_management.user_request_limits_col.update_one(
         {"user_id": test_user_id},
         {"$set": {"last_request_date": yesterday}}
     )
     
     # Add 2 more pending requests (total 3)
     for i in range(2):
-        await requests_col.insert_one({
+        await request_management.requests_col.insert_one({
             "user_id": test_user_id,
             "username": "test_user",
             "content_type": "Movie",
@@ -125,23 +241,28 @@ async def test_rate_limits():
     print("  ✅ Max pending requests enforced")
     
     # Clean up
-    await requests_col.delete_many({"user_id": test_user_id})
-    await user_request_limits_col.delete_many({"user_id": test_user_id})
+    await request_management.requests_col.delete_many({"user_id": test_user_id})
+    await request_management.user_request_limits_col.delete_many({"user_id": test_user_id})
     
     print("✅ Rate limit tests passed!")
 
 
-async def test_duplicate_detection():
-    """Test duplicate request detection"""
+async def test_rate_limits(monkeypatch):
+    _install_fakes(monkeypatch)
+    await _test_rate_limits()
+
+
+async def _test_duplicate_detection():
+    """Test duplicate request detection (in-memory collections)"""
     print("\n🧪 Testing Duplicate Detection...")
     
     test_user_id = 999999998
     
     # Clean up
-    await requests_col.delete_many({"user_id": test_user_id})
+    await request_management.requests_col.delete_many({"user_id": test_user_id})
     
     # Add a request
-    await requests_col.insert_one({
+    await request_management.requests_col.insert_one({
         "user_id": test_user_id,
         "username": "test_user",
         "content_type": "Movie",
@@ -168,25 +289,28 @@ async def test_duplicate_detection():
     print("  ✅ Different year not detected as duplicate")
     
     # Clean up
-    await requests_col.delete_many({"user_id": test_user_id})
+    await request_management.requests_col.delete_many({"user_id": test_user_id})
     
     print("✅ Duplicate detection tests passed!")
 
 
+async def test_duplicate_detection(monkeypatch):
+    _install_fakes(monkeypatch)
+    await _test_duplicate_detection()
+
+
 async def main():
-    """Run all tests"""
+    """Run all tests standalone (python tests/test_request_feature.py)"""
     print("=" * 60)
     print("🧪 REQUEST FEATURE TEST SUITE")
     print("=" * 60)
     
+    _install_fakes()  # in-memory collections - no database required
+    
     try:
-        # Ensure database indexes
-        await ensure_indexes()
-        
-        # Run tests
         await test_imdb_validation()
-        await test_rate_limits()
-        await test_duplicate_detection()
+        await _test_rate_limits()
+        await _test_duplicate_detection()
         
         print("\n" + "=" * 60)
         print("✅ ALL TESTS PASSED!")
@@ -204,4 +328,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
