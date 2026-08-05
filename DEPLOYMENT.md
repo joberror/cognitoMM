@@ -145,15 +145,46 @@ server {
 }
 ```
 
-### Monitoring
+### Monitoring (UptimeRobot)
 
-The `/metrics` endpoint returns JSON with live database statistics when the bot is running:
+The bot exposes two endpoints for monitoring:
+
+| Endpoint | Purpose | Expected response |
+|----------|---------|-------------------|
+| `GET /health` | Liveness for Docker/K8s/UptimeRobot | `{"status":"healthy",...}` |
+| `GET /metrics` | Live DB/indexing stats — returns **HTTP 500** if stats collection fails | `{"status":"ok","timestamp":...,"data":{...}}` |
+
+**Quick start** — creates both monitors on your UptimeRobot account:
 
 ```bash
-curl http://localhost:7860/metrics
+UPTIMEROBOT_API_KEY=your-key python scripts/create_uptimerobot_monitors.py
 ```
 
-You can connect this to monitoring tools like BetterStack, Grafana, or Uptime Kuma.
+This creates (idempotently — monitors whose URL already exists are skipped):
+
+| Monitor | URL | Keyword check |
+|---------|-----|---------------|
+| `CognitoMM /health` | `https://iamjoberror-bot-media.hf.space/health` | contains `healthy` |
+| `CognitoMM /metrics` | `https://iamjoberror-bot-media.hf.space/metrics` | contains `"status":"ok"` |
+
+Point it at a different host with `--base-url http://localhost:7860` (local/dev)
+or your own domain (production). Uses the [UptimeRobot API v2](https://uptimerobot.com/api/).
+
+**Manual alternative** (dashboard, ~2 min):
+1. Sign up at [uptimerobot.com](https://uptimerobot.com) → *Add New Monitor*.
+2. Monitor 1: type **HTTP(s)**, URL `https://iamjoberror-bot-media.hf.space/health`,
+   interval **5 minutes**, keyword type *Exists*, keyword `healthy`.
+3. Monitor 2: same settings, URL `https://iamjoberror-bot-media.hf.space/metrics`,
+   keyword `"status":"ok"`.
+4. Set **alert contacts** (email/Slack) under *My Settings → Alert Contacts*.
+
+**Notes:**
+- Free tier: 50 monitors @ 5-minute checks, email alerts.
+- **HF Spaces sleep:** free Spaces pause after a period of inactivity, which shows
+  as downtime on the dashboard. The bot's webapp doubles as a keep-alive, but if
+  the Space sleeps anyway, expect an occasional "down" alert.
+- `/metrics` intentionally returns 500 when stats collection fails or exceeds
+  `METRICS_TIMEOUT` (default 30s) — monitors see a real failure, never `ok:null`.
 
 ---
 
