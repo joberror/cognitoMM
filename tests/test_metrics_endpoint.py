@@ -128,3 +128,35 @@ async def test_collect_bot_info_no_cache_no_client_uses_unknown():
     info = await statistics.collect_bot_info()
 
     assert "Unknown" in info["bot_username"]
+
+
+def test_metrics_provider_with_objectid_serializes(running_loop):
+    """Regression: stats carrying a bson.ObjectId (e.g. aggregation _id) must
+    serialize as a string, not 500 with 'Object of type ObjectId is not JSON
+    serializable'."""
+    from bson import ObjectId
+
+    async def provider():
+        return {
+            "recent_searches": [
+                {"_id": ObjectId("507f1f77bcf86cd799439011"), "query": "inception"}
+            ]
+        }
+
+    set_stats_provider(provider, loop=running_loop)
+    with app.test_client() as c:
+        r = c.get("/metrics")
+        body = r.get_json()
+
+    assert r.status_code == 200
+    assert body["status"] == "ok"
+    assert body["data"]["recent_searches"][0]["_id"] == "507f1f77bcf86cd799439011"
+    assert body["data"]["recent_searches"][0]["query"] == "inception"
+
+
+def test_mongo_json_provider_serializes_objectid():
+    """The Flask app's JSON provider handles bson.ObjectId directly."""
+    from bson import ObjectId
+
+    out = app.json.dumps({"id": ObjectId("507f1f77bcf86cd799439011")})
+    assert "507f1f77bcf86cd799439011" in out

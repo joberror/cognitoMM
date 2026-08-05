@@ -62,6 +62,38 @@ def set_stats_provider(fn: callable, loop=None):
 
 app = Flask(__name__)
 
+# ------------------------------------------------------------------ #
+#  JSON serialization: handle MongoDB/bson types                      #
+# ------------------------------------------------------------------ #
+
+try:
+    from flask.json.provider import DefaultJSONProvider
+except ImportError:  # very old Flask - rely on the projection fix instead
+    DefaultJSONProvider = None
+    print("⚠️ [Webapp] flask.json.provider unavailable - bson types will not auto-serialize")
+
+if DefaultJSONProvider is not None:
+    class _MongoJSONProvider(DefaultJSONProvider):
+        """Flask JSON provider that also serializes MongoDB/bson types.
+
+        Stats documents can carry bson types (ObjectId from aggregation `_id`,
+        Timestamp, Decimal128, Binary), which would otherwise make jsonify
+        raise "Object of type ... is not JSON serializable" and turn /metrics
+        into a 500.
+        """
+
+        @staticmethod
+        def default(o):
+            try:
+                from bson import Binary, Decimal128, ObjectId, Timestamp
+                if isinstance(o, (ObjectId, Decimal128, Binary, Timestamp)):
+                    return str(o)
+            except ImportError:
+                pass
+            return DefaultJSONProvider.default(o)
+
+    app.json = _MongoJSONProvider(app)
+
 
 @app.after_request
 def add_cors_headers(response):

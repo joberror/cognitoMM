@@ -100,7 +100,7 @@ async def collect_comprehensive_stats(admin_id=None):
         latest_content = await movies_col.find_one(
             {},
             sort=[("upload_date", -1)],
-            projection={"upload_date": 1, "title": 1}
+            projection={"_id": 0, "upload_date": 1, "title": 1}
         )
         if latest_content and latest_content.get('upload_date'):
             stats['latest_content_date'] = latest_content['upload_date']
@@ -230,7 +230,7 @@ async def collect_comprehensive_stats(admin_id=None):
             {"$unwind": "$search_history"},
             {"$sort": {"search_history.ts": -1}},
             {"$limit": 20},
-            {"$project": {"query": "$search_history.q", "timestamp": "$search_history.ts"}}
+            {"$project": {"_id": 0, "query": "$search_history.q", "timestamp": "$search_history.ts"}}
         ]
         recent_searches = await users_col.aggregate(recent_pipeline).to_list(length=20)
         stats['recent_searches'] = recent_searches
@@ -325,8 +325,9 @@ async def collect_comprehensive_stats(admin_id=None):
             {"$sort": {"search_count": -1}},
             # Limit to top 10 to allow filtering out config admins
             {"$limit": 20},
-            # Project needed fields
+            # Project needed fields (exclude _id - ObjectId is not JSON-serializable)
             {"$project": {
+                "_id": 0,
                 "user_id": 1,
                 "username": 1,
                 "first_name": 1,
