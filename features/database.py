@@ -5,15 +5,45 @@ This module handles MongoDB connection setup, database collections,
 and database index creation for the Movie Bot application.
 """
 
+from typing import Optional
+
 from motor.motor_asyncio import AsyncIOMotorClient
 from .config import MONGO_URI, MONGO_DB
 
 # -------------------------
 # DB (motor async)
 # -------------------------
+# Import safety: config.py defaults MONGO_URI to "" and CI/tests import this
+# module without a MONGO_URI env var or .env file. Passing "" straight into
+# AsyncIOMotorClient raises
+#   pymongo.errors.ConfigurationError: Empty host (or extra comma in host list)
+# at IMPORT time, which crashed every test module at collection (16 collection
+# errors in CI's `make test`). We therefore resolve an empty URI to a localhost
+# stand-in so the module always imports, and record the miss so
+# ensure_indexes() can fail fast with a clear message at bot startup instead of
+# silently probing localhost.
+
+MONGO_URI_WAS_EMPTY = not MONGO_URI
+
+
+def resolve_mongo_uri(uri: Optional[str]) -> str:
+    """Return `uri`, or a localhost stand-in when it is empty/None/blank.
+
+    The real connection string is required to RUN the bot; this fallback only
+    exists so ``features.database`` stays importable (tests/CI) without a
+    configured database.
+    """
+    return (uri or "").strip() or "mongodb://localhost:27017"
+
+
+if MONGO_URI_WAS_EMPTY:
+    print("⚠️ MONGO_URI is not set — imported with a localhost stand-in for "
+          "test compatibility. The bot will refuse to start until MONGO_URI "
+          "is configured.")
+
 # Configure MongoDB client with longer timeouts for better connectivity
 mongo = AsyncIOMotorClient(
-    MONGO_URI,
+    resolve_mongo_uri(MONGO_URI),
     connectTimeoutMS=60000,  # 60 seconds
     serverSelectionTimeoutMS=60000,  # 60 seconds
     socketTimeoutMS=60000,  # 60 seconds
@@ -34,6 +64,11 @@ broadcasts_col = db["broadcasts"]
 
 async def ensure_indexes():
     """Create database indexes with error handling"""
+    if MONGO_URI_WAS_EMPTY:
+        raise RuntimeError(
+            "MONGO_URI is not set: refusing to start without a database. "
+            "Set MONGO_URI (e.g. mongodb+srv://...) and restart."
+        )
     try:
         print("🔧 Creating database indexes...")
         
