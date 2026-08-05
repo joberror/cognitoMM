@@ -9,13 +9,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout GitHub Repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           lfs: true
 
       - name: Sync GitHub to Hugging Face Hub
-        uses: huggingface/hub-sync@v0.2.0
+        uses: huggingface/hub-sync@v0.2.1
         with:
           github_repo_id: joberror/cognitoMM
           huggingface_repo_id: iamjoberror/bot-media
