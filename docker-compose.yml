@@ -39,7 +39,7 @@ services:
     ports:
       - "127.0.0.1:27017:27017"
     healthcheck:
-      test: mongosh --quiet --eval "db.runCommand({ ping: 1 })" || mongosh --quiet --eval "db.adminCommand('ping')"
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"db.runCommand({ ping: 1 })\" || mongosh --quiet --eval \"db.adminCommand('ping')\""]
       interval: 15s
       timeout: 10s
       retries: 5

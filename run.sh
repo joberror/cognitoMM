@@ -19,7 +19,8 @@ Environment:
 
 Developer tools:
   make check             run the static import check
-  make test              run the full pytest suite
+  make test              install deps, then run the full pytest suite
+  make verify            run everything CI runs (check + test)
   make install-hooks     install the pre-commit hook (runs the static check)
 
 See DEPLOYMENT.md for full Docker, VPS, and Hugging Face Spaces guides.

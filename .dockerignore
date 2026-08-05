@@ -41,6 +41,8 @@ logs/
 CODEBASE_NOTES.md
 IMPLEMENTATION_SUMMARY.md
 *.txt
+# But requirements.txt MUST be in the build context (Dockerfile COPY step)
+!requirements.txt
 info/
 
 # Agent config (not needed at runtime)

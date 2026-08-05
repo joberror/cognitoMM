@@ -15,7 +15,8 @@ This is a Telegram bot hosted on Hugging Face Spaces.
 
 ```bash
 make check          # run the static import check (re-export chains / broken imports / duplicate definitions)
-make test           # run the full pytest suite
+make test           # install deps, then run the full pytest suite (mirrors CI's tests job)
+make verify         # run everything CI gates on: check + test
 make install-hooks  # install the pre-commit hook (runs `make check` before each commit)
 ```
 

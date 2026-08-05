@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Dockerfile
 # ========================================================================
 #  Multi-stage build: install deps, then copy only runtime essentials.
@@ -12,14 +13,33 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /build
 
 # Install system build deps (only needed for compilation)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# The slim base image ships an apt "docker-clean" hook that deletes downloaded
+# .deb archives after install; disable it so the BuildKit cache mounts below
+# actually retain packages/lists across rebuilds (apt is the slowest step).
+RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
+    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
+
+# apt cache mounts: downloaded .debs (/var/cache/apt) and package lists
+# (/var/lib/apt) persist across rebuilds. sharing=locked prevents concurrent
+# builds from corrupting the cache; id= scopes the cache to this project so a
+# shared builder (CI, other local images) can't pollute it. Lists stay in the
+# mount (not the layer) and are re-verified by the apt-get update below on every
+# build, so there's no need to rm them afterwards (don't reintroduce that).
+RUN --mount=type=cache,id=cognito-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=cognito-apt-var,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    libffi-dev \
-    && rm -rf /var/lib/apt/lists/*
+    libffi-dev
 
 # Install Python dependencies (cached separately from source)
+# BuildKit cache mount persists pip's wheel/http cache across rebuilds, so
+# dependency downloads happen once and rebuilds reuse them (faster + resilient
+# to network hiccups). sharing=locked prevents concurrent builds from corrupting
+# the cache. The syntax line above guarantees --mount support; if a builder ever
+# can't fetch the dockerfile:1 frontend, the line can be dropped (the default
+# BuildKit frontend on Docker 24+ supports cache mounts on its own).
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+RUN --mount=type=cache,id=cognito-pip-cache,target=/root/.cache/pip,sharing=locked pip install --user -r requirements.txt
 
 # ---- Runtime stage ----
 FROM python:3.12-slim

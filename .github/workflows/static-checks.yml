@@ -1,3 +1,5 @@
+# Delegates to the Makefile (make check / make test) so CI and the local
+# developer gates can never drift apart — see Makefile target docs.
 name: Static Checks
 
 on:
@@ -24,8 +26,9 @@ jobs:
       # name the source module neither defines nor imports (broken import),
       # targets a module that doesn't exist, or defines the same module-level
       # function/class in two different modules (duplicate definition).
-      - name: Check re-export chains / broken imports / duplicate definitions
-        run: python scripts/check_reexports.py
+      # Stdlib-only — intentionally does NOT install dependencies.
+      - name: Static import check (re-export / broken / duplicate)
+        run: make check
 
   # Full test suite — runs the standalone tests (also pytest-compatible) on
   # every push/PR so regressions are caught before merge. Does not require a
@@ -43,8 +46,6 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run pytest
-        run: python -m pytest tests/ -q
+      # make test = pip install -r requirements.txt + pytest (see Makefile).
+      - name: Install deps and run pytest
+        run: make test

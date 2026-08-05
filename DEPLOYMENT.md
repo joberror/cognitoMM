@@ -96,6 +96,13 @@ docker compose build --pull   # Pull latest base images
 docker compose up -d          # Start with new image
 ```
 
+> **Tip:** The `Dockerfile` uses BuildKit cache mounts for both **apt**
+> (`/var/cache/apt` + `/var/lib/apt`) and **pip** (`/root/.cache/pip`), so system
+> and Python packages download once and are reused across rebuilds. Rebuilding after
+> a source change only re-runs the fast steps, and a flaky network won't force a
+> full re-download. Run `docker builder prune` to clear the cache (including both
+> mounts) if you ever need a completely clean dependency fetch.
+
 ### MongoDB Shell Access
 
 ```bash
