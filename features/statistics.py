@@ -16,8 +16,23 @@ from .database import (
     users_col, movies_col, channels_col, premium_users_col,
     requests_col, logs_col
 )
-from .config import BOT_START_TIME, client
+from .config import BOT_START_TIME
 from .utils import format_file_size
+
+# Telegram bot identity fetched once at startup (see cache_bot_info). Kept
+# as a module-level cache so stats endpoints (/metrics, /stat) never call
+# Telegram's get_me() on every request - that call is bound to the bot's
+# main event loop and is the most fragile part of the stats path.
+_bot_info_cache: dict = {}
+
+
+def cache_bot_info(bot_info: dict):
+    """Cache Telegram bot identity so stats endpoints don't call Telegram per request.
+
+    Called once by the bot's main() right after a successful get_me().
+    """
+    global _bot_info_cache
+    _bot_info_cache = dict(bot_info or {})
 
 
 async def collect_comprehensive_stats(admin_id=None):
@@ -424,34 +439,34 @@ async def collect_bot_info(admin_id=None):
         bot_info['uptime_formatted'] = format_uptime(uptime_seconds)
         bot_info['start_time'] = BOT_START_TIME.isoformat()
         
-        # DIAGNOSTIC: Check client state
+        # Client state (used only for the no-cache fallback below)
         from . import config
         actual_client = config.client
-        print(f"🔍 [DIAGNOSTIC] Client check in collect_bot_info:")
-        print(f"   - Imported client is None: {client is None}")
-        print(f"   - config.client is None: {actual_client is None}")
-        print(f"   - Client type: {type(actual_client)}")
         
-        # Get bot details from Telegram - use fresh reference from config
-        if actual_client:
+        # Bot identity - prefer the cached values fetched once at startup so
+        # stats endpoints never call Telegram on every request (cross-loop
+        # + latency risk). Only fall back to a live lookup if no cache exists.
+        if _bot_info_cache:
+            # Coalesce to 'Unknown' so a partial cache never renders as None
+            # in the dashboard (a present-but-None key bypasses .get defaults).
+            bot_info['bot_username'] = _bot_info_cache.get('username') or 'Unknown'
+            bot_info['bot_id'] = _bot_info_cache.get('id') or 'Unknown'
+            bot_info['bot_name'] = _bot_info_cache.get('first_name') or 'Unknown'
+            bot_info['bot_dc_id'] = _bot_info_cache.get('dc_id')
+        elif actual_client:
+            # No cache (direct import / tests / pre-startup) - live lookup
             try:
-                print(f"🔍 [DIAGNOSTIC] Attempting to get bot info from Telegram...")
                 me = await actual_client.get_me()
-                print(f"✅ [DIAGNOSTIC] Successfully got bot info: @{me.username}")
                 bot_info['bot_username'] = me.username
                 bot_info['bot_id'] = me.id
                 bot_info['bot_name'] = me.first_name
-                bot_info['bot_dc_id'] = me.dc_id if hasattr(me, 'dc_id') else None
+                bot_info['bot_dc_id'] = getattr(me, 'dc_id', None)
             except Exception as e:
                 print(f"⚠️ Could not get bot info from Telegram: {e}")
-                import traceback
-                print(f"🔍 [DIAGNOSTIC] Full traceback:")
-                traceback.print_exc()
                 bot_info['bot_username'] = 'Unknown'
                 bot_info['bot_id'] = 'Unknown'
                 bot_info['bot_name'] = 'Unknown'
         else:
-            print(f"❌ [DIAGNOSTIC] Client is None - cannot fetch bot info")
             bot_info['bot_username'] = 'Unknown (No Client)'
             bot_info['bot_id'] = 'Unknown (No Client)'
             bot_info['bot_name'] = 'Unknown (No Client)'

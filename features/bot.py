@@ -25,7 +25,7 @@ from .file_deletion import start_deletion_monitor
 from .search import inline_handler
 from .deletion_events import handle_raw_update  # Real-time deletion heuristic handler
 from .webapp import start_webapp, set_stats_provider
-from .statistics import collect_comprehensive_stats
+from .statistics import collect_comprehensive_stats, cache_bot_info
 
 # -------------------------
 # CUSTOM BOT CLASS WITH iter_messages
@@ -117,6 +117,15 @@ async def main():
             print(f"✅ Bot authenticated: @{bot_info.username} ({bot_info.first_name})")
             print(f"🆔 Bot ID: {bot_info.id}")
 
+            # Cache Telegram bot identity once so stats endpoints (/metrics,
+            # /stat) never call Telegram's get_me() on every request.
+            cache_bot_info({
+                'username': bot_info.username,
+                'id': bot_info.id,
+                'first_name': bot_info.first_name,
+                'dc_id': getattr(bot_info, 'dc_id', None),
+            })
+
             # Set client reference in config for handlers
             from . import config
             config.client = app
@@ -143,8 +152,13 @@ async def main():
             except Exception:
                 pass  # Handler not available in this version
 
-            # Wire the /metrics endpoint with real stats
-            set_stats_provider(lambda: collect_comprehensive_stats())
+            # Wire the /metrics endpoint with real stats. Pass the bot's own
+            # event loop so the provider runs there (thread-safe) instead of
+            # on a fresh per-request loop.
+            set_stats_provider(
+                lambda: collect_comprehensive_stats(),
+                loop=asyncio.get_running_loop(),
+            )
 
             # Start deletion monitor background task
             asyncio.create_task(start_deletion_monitor())

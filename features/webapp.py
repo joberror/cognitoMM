@@ -30,14 +30,30 @@ except ImportError:
 _stats_provider: Optional[callable] = None
 """Optional async callable returning a dict for the /metrics endpoint."""
 
+_bot_loop = None
+"""Event loop the stats provider must run on (the bot's main loop).
 
-def set_stats_provider(fn: callable):
+The Motor and Hydrogram clients are bound to this loop, so /metrics must
+schedule the provider there instead of on a fresh per-request loop.
+"""
+
+# Hard cap on how long a /metrics request waits for stats collection. The
+# timeout is wall-clock and includes queue time on the bot's main loop, so
+# it can be raised via METRICS_TIMEOUT (seconds) for slow/sharded DBs.
+_METRICS_TIMEOUT = float(os.environ.get("METRICS_TIMEOUT", "30"))
+
+
+def set_stats_provider(fn: callable, loop=None):
     """Register a callable (async or sync) that returns stats dict.
 
-    Called by the bot's main() after the database is ready.
+    Called by the bot's main() after the database is ready. Pass `loop` =
+    the bot's running event loop so /metrics can schedule the provider on
+    it (thread-safe) rather than on a fresh per-request loop, which breaks
+    the Motor/Hydrogram clients bound to the main loop.
     """
-    global _stats_provider
+    global _stats_provider, _bot_loop
     _stats_provider = fn
+    _bot_loop = loop
 
 
 # ------------------------------------------------------------------ #
@@ -87,11 +103,31 @@ def metrics():
     if _stats_provider is not None:
         try:
             import asyncio
-            loop = asyncio.new_event_loop()
-            try:
-                data = loop.run_until_complete(_stats_provider())
-            finally:
-                loop.close()
+            if _bot_loop is not None:
+                # Run the provider on the bot's OWN event loop (thread-safe).
+                # A fresh per-request loop makes cross-loop calls to the
+                # Motor/Hydrogram clients fail, and those errors used to be
+                # swallowed and returned as `data: null`.
+                future = asyncio.run_coroutine_threadsafe(_stats_provider(), _bot_loop)
+                try:
+                    data = future.result(timeout=_METRICS_TIMEOUT)
+                except TimeoutError:
+                    # Don't leave the provider running forever on the bot's
+                    # loop - cancel it (best-effort) and report a failure.
+                    future.cancel()
+                    raise
+            else:
+                # No loop captured (e.g. direct import in tests/scripts).
+                print("⚠️ [Webapp] /metrics called without a bot loop - running "
+                      "provider on a fresh loop (cross-loop risk)")
+                data = asyncio.run(_stats_provider())
+            if data is None:
+                # Provider swallowed an error (see bot logs: "Error collecting
+                # stats: ..."). Surface it as 500 so monitors see a failure.
+                return jsonify({
+                    "status": "error",
+                    "error": "Stats provider returned None (check bot logs for 'Error collecting stats')",
+                }), 500
             return jsonify({
                 "status": "ok",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
