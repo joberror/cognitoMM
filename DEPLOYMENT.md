@@ -168,7 +168,9 @@ This creates (idempotently — monitors whose URL already exists are skipped):
 | `CognitoMM /metrics` | `https://iamjoberror-bot-media.hf.space/metrics` | contains `"status":"ok"` |
 
 Point it at a different host with `--base-url http://localhost:7860` (local/dev)
-or your own domain (production). Uses the [UptimeRobot API v2](https://uptimerobot.com/api/).
+or your own domain (production). Uses the current [UptimeRobot v3 API](https://uptimerobot.com/api/v3/)
+(Bearer auth). **Note:** the legacy v2 API rejects monitor creation on the free plan
+("You are not allowed to use some settings with your current plan") — v3 is required.
 
 **Manual alternative** (dashboard, ~2 min):
 1. Sign up at [uptimerobot.com](https://uptimerobot.com) → *Add New Monitor*.

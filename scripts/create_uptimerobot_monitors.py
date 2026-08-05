@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Create UptimeRobot monitors for the CognitoMM bot's web endpoints.
+Create UptimeRobot monitors for the CognitoMM bot's web endpoints (v3 API).
 
 Wires /health and /metrics to an UptimeRobot dashboard:
 
@@ -8,56 +8,58 @@ Wires /health and /metrics to an UptimeRobot dashboard:
         [--base-url https://iamjoberror-bot-media.hf.space] [--interval 300]
 
 Creates two HTTP monitors (5-minute interval by default - free tier):
-  - "CognitoMM /health"   -> <base>/health   (keyword must exist: "healthy")
-  - "CognitoMM /metrics"  -> <base>/metrics  (keyword must exist: "status":"ok")
+  - "CognitoMM /health"   -> <base>/health   (keyword exists: "healthy")
+  - "CognitoMM /metrics"  -> <base>/metrics  (keyword exists: "status":"ok")
 
-Why the keyword checks:
-  - /health: catches a 200-with-garbage response (e.g. app up but the webapp
-    route broken) instead of only raw HTTP status.
-  - /metrics: the endpoint returns HTTP 500 on any stats-collection failure
-    (see features/webapp.py), and the keyword "status":"ok" additionally
-    guards against a future regression back to 200 + {"status":"ok","data":null}.
-    The keyword is written WITHOUT spaces to match Flask's compact jsonify
-    output: {"status":"ok",...}.
+Uses the CURRENT v3 REST API (https://uptimerobot.com/api/v3/) with Bearer
+auth. IMPORTANT: the legacy v2 API (api.uptimerobot.com/v2/newMonitor)
+rejects monitor creation on the FREE plan with "You are not allowed to use
+some settings with your current plan" - use v3.
+
+The keyword checks guard against 200-with-garbage responses (e.g. app up but
+the webapp route broken) and, for /metrics, against any regression back to
+200 + {"status":"ok","data":null} (the endpoint returns HTTP 500 on stats
+collection failure - see features/webapp.py). Keywords are written WITHOUT
+spaces to match Flask's compact jsonify output: {"status":"ok",...}.
 
 Idempotent: monitors whose URL already exists are skipped, so re-running is
-safe. Uses the UptimeRobot REST API v2.0 (https://uptimerobot.com/api/).
-
-Requires `requests` (already in requirements.txt).
+safe. Requires `requests` (already in requirements.txt).
 """
 
 import argparse
 import os
-import sys
 
 import requests
 
-API_ENDPOINT = "https://api.uptimerobot.com/v2"
+API_ENDPOINT = "https://api.uptimerobot.com/v3/monitors"
 
 
-def api_call(api_key: str, method: str, params: dict) -> dict:
-    """POST to an UptimeRobot v2 API method and return the JSON body.
+def _headers(api_key: str) -> dict:
+    return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-    Raises RuntimeError with the API's own error message on failure (the
-    JSON body is far more useful than a bare HTTP status code).
+
+def _request(api_key: str, method: str, payload=None) -> dict:
+    """Send a v3 API request and return the JSON body.
+
+    Raises RuntimeError with the API's own message on failure (the JSON body
+    is far more useful than a bare HTTP status code).
     """
-    data = {"api_key": api_key, "format": "json", **params}
-    resp = requests.post(f"{API_ENDPOINT}/{method}", data=data, timeout=30)
+    resp = requests.request(
+        method, API_ENDPOINT, headers=_headers(api_key), json=payload, timeout=30
+    )
     if resp.status_code >= 400:
         try:
-            detail = resp.json().get("error", resp.text)
+            detail = resp.json().get("message", resp.text)
         except ValueError:
             detail = resp.text
-        raise RuntimeError(f"{method} failed (HTTP {resp.status_code}): {detail}")
+        raise RuntimeError(f"{method} {API_ENDPOINT} failed (HTTP {resp.status_code}): {detail}")
     return resp.json()
 
 
 def existing_monitor_urls(api_key: str) -> set:
     """Return the set of currently monitored URLs."""
-    data = api_call(api_key, "getMonitors", {})
-    if data.get("stat") != "ok":
-        raise RuntimeError(f"getMonitors failed: {data.get('error', data)}")
-    return {m.get("url") for m in data.get("monitors", []) if m.get("url")}
+    data = _request(api_key, "GET")
+    return {m.get("url") for m in data.get("data", []) if m.get("url")}
 
 
 def build_monitors(base_url: str) -> list:
@@ -65,14 +67,14 @@ def build_monitors(base_url: str) -> list:
     base = base_url.rstrip("/")
     return [
         {
-            "friendly_name": "CognitoMM /health",
+            "friendlyName": "CognitoMM /health",
             "url": f"{base}/health",
-            "keyword_value": "healthy",
+            "keywordValue": "healthy",
         },
         {
-            "friendly_name": "CognitoMM /metrics",
+            "friendlyName": "CognitoMM /metrics",
             "url": f"{base}/metrics",
-            "keyword_value": '"status":"ok"',
+            "keywordValue": '"status":"ok"',
         },
     ]
 
@@ -85,21 +87,20 @@ def create_monitors(api_key: str, base_url: str, interval: int = 300) -> int:
         if m["url"] in existing:
             print(f"⏭️  Already monitored, skipping: {m['url']}")
             continue
-        result = api_call(api_key, "newMonitor", {
-            "type": 1,  # HTTP(s)
-            "interval": interval,
-            "friendly_name": m["friendly_name"],
+        payload = {
+            "friendlyName": m["friendlyName"],
             "url": m["url"],
-            "keyword_type": 1,  # keyword should exist
-            "keyword_value": m["keyword_value"],
-            "keyword_case_type": 1,  # case-insensitive
-        })
-        if result.get("stat") != "ok":
-            raise RuntimeError(
-                f"newMonitor failed for {m['url']}: {result.get('error', result)}"
-            )
-        monitor_id = result.get("monitor", {}).get("id")
-        print(f"✅ Created '{m['friendly_name']}' (id {monitor_id}) -> {m['url']}")
+            "type": "HTTP",
+            "interval": interval,
+            "timeout": 30,
+            # Alert when the keyword is NOT found in the response body
+            "keywordType": "ALERT_EXISTS",
+            "keywordValue": m["keywordValue"],
+            "keywordCaseType": 1,  # case-insensitive
+        }
+        result = _request(api_key, "POST", payload)
+        monitor_id = result.get("id")
+        print(f"✅ Created '{m['friendlyName']}' (id {monitor_id}) -> {m['url']}")
         created += 1
     return created
 

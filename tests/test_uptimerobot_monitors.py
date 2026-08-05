@@ -1,6 +1,6 @@
 """
 Tests for the UptimeRobot monitor-creation script
-(scripts/create_uptimerobot_monitors.py).
+(scripts/create_uptimerobot_monitors.py, v3 API).
 
 Pins the two monitors (/health keyword "healthy", /metrics keyword
 "status":"ok" matching Flask's compact jsonify output), idempotency
@@ -31,10 +31,10 @@ def test_build_monitors_urls_and_keywords():
         "https://iamjoberror-bot-media.hf.space/metrics",
     }
     # /health alerts when the word "healthy" is missing from the response
-    assert by_url["https://iamjoberror-bot-media.hf.space/health"]["keyword_value"] == "healthy"
+    assert by_url["https://iamjoberror-bot-media.hf.space/health"]["keywordValue"] == "healthy"
     # /metrics keyword matches Flask's COMPACT jsonify output (no spaces),
     # guarding against a regression back to 200 + ok:null
-    assert by_url["https://iamjoberror-bot-media.hf.space/metrics"]["keyword_value"] == '"status":"ok"'
+    assert by_url["https://iamjoberror-bot-media.hf.space/metrics"]["keywordValue"] == '"status":"ok"'
 
 
 def test_create_monitors_creates_both(monkeypatch):
@@ -43,24 +43,29 @@ def test_create_monitors_creates_both(monkeypatch):
     def fake_existing(key):
         return set()
 
-    def fake_new(api_key, method, params):
-        calls.append((method, params))
-        return {"stat": "ok", "monitor": {"id": len(calls)}}
+    def fake_request(api_key, method, payload=None):
+        calls.append((method, payload))
+        return {"id": len(calls), "friendlyName": "x"}
 
     monkeypatch.setattr(script, "existing_monitor_urls", fake_existing)
-    monkeypatch.setattr(script, "api_call", fake_new)
+    monkeypatch.setattr(script, "_request", fake_request)
 
     created = script.create_monitors("key", "https://example.com", interval=300)
 
     assert created == 2
-    assert [m for m, _ in calls] == ["newMonitor", "newMonitor"]
+    assert [m for m, _ in calls] == ["POST", "POST"]
     urls = [p["url"] for _, p in calls]
     assert urls == ["https://example.com/health", "https://example.com/metrics"]
-    kw = {p["url"]: p["keyword_value"] for _, p in calls}
+    kw = {p["url"]: p["keywordValue"] for _, p in calls}
     assert kw["https://example.com/health"] == "healthy"
     assert kw["https://example.com/metrics"] == '"status":"ok"'
-    # Every payload must be an HTTP monitor with the requested interval
-    assert all(p["type"] == 1 and p["interval"] == 300 for _, p in calls)
+    # Every payload must be an HTTP monitor with the requested interval and
+    # the keyword-exists check (ALERT_EXISTS)
+    assert all(
+        p["type"] == "HTTP" and p["interval"] == 300
+        and p["keywordType"] == "ALERT_EXISTS" and p["keywordCaseType"] == 1
+        for _, p in calls
+    )
 
 
 def test_create_monitors_skips_existing(monkeypatch):
@@ -68,78 +73,83 @@ def test_create_monitors_skips_existing(monkeypatch):
         "https://example.com/health",
         "https://example.com/metrics",
     })
-    new_calls = []
+    post_calls = []
     monkeypatch.setattr(
-        script,
-        "api_call",
-        lambda k, m, p: new_calls.append(m) or {"stat": "ok", "monitor": {"id": 1}},
+        script, "_request",
+        lambda k, m, p=None: post_calls.append(m) or {"id": 1},
     )
 
     created = script.create_monitors("key", "https://example.com")
 
     assert created == 0
-    assert new_calls == []
+    assert post_calls == []
 
 
-def test_api_call_posts_to_endpoint(monkeypatch):
+def test_existing_monitor_urls_extracts_urls(monkeypatch):
+    monkeypatch.setattr(script, "_request", lambda k, m, p=None: {
+        "data": [
+            {"url": "https://a.example/health"},
+            {"url": "https://a.example/metrics"},
+            {},  # malformed entry without a url
+        ]
+    })
+
+    assert script.existing_monitor_urls("key") == {
+        "https://a.example/health",
+        "https://a.example/metrics",
+    }
+
+
+def test_request_uses_bearer_auth(monkeypatch):
     captured = {}
 
     class FakeResp:
         status_code = 200
+        text = "{}"
 
         def json(self):
-            return {"stat": "ok"}
+            return {"data": []}
 
-    def fake_post(url, data, timeout):
+    def fake_request(method, url, headers, json, timeout):
+        captured["method"] = method
         captured["url"] = url
-        captured["data"] = data
+        captured["headers"] = headers
         return FakeResp()
 
-    monkeypatch.setattr(script.requests, "post", fake_post)
+    monkeypatch.setattr(script.requests, "request", fake_request)
 
-    out = script.api_call("k", "getMonitors", {"a": 1})
+    out = script._request("key123", "GET")
 
-    assert out == {"stat": "ok"}
-    assert captured["url"] == "https://api.uptimerobot.com/v2/getMonitors"
-    assert captured["data"] == {"api_key": "k", "format": "json", "a": 1}
+    assert out == {"data": []}
+    assert captured["method"] == "GET"
+    assert captured["url"] == "https://api.uptimerobot.com/v3/monitors"
+    assert captured["headers"]["Authorization"] == "Bearer key123"
 
 
-def test_api_call_surfaces_api_error_body(monkeypatch):
-    """A 4xx/5xx must raise with the API's own error message, not a bare
-    HTTP status (this is what made the 403 so hard to diagnose)."""
+def test_request_surfaces_api_error_body(monkeypatch):
+    """A 4xx/5xx must raise with the API's own message, not a bare HTTP
+    status (this is what made the v2 403 so hard to diagnose)."""
+
     class FakeResp:
         status_code = 403
-        text = "{\"stat\":\"fail\",...}"  # requests.Response always exposes .text
+        text = "{\"stat\":\"fail\",...}"
 
         def json(self):
-            return {
-                "stat": "fail",
-                "error": {
-                    "type": "access_denied",
-                    "message": "You are not allowed to use some settings with your current plan.",
-                },
-            }
+            return {"message": "You are not allowed to use some settings with your current plan."}
 
-    monkeypatch.setattr(script.requests, "post", lambda *a, **k: FakeResp())
+    monkeypatch.setattr(script.requests, "request", lambda *a, **k: FakeResp())
 
-    with pytest.raises(RuntimeError, match="newMonitor failed.*access_denied"):
-        script.api_call("k", "newMonitor", {})
-
-
-def test_existing_monitor_urls_error_raises(monkeypatch):
-    monkeypatch.setattr(
-        script, "api_call",
-        lambda k, m, p: {"stat": "fail", "error": {"type": "bad_api_key"}},
-    )
-    with pytest.raises(RuntimeError, match="getMonitors failed"):
-        script.existing_monitor_urls("key")
+    with pytest.raises(RuntimeError, match="403.*not allowed to use some settings"):
+        script._request("k", "POST", {})
 
 
 def test_create_monitors_api_error_raises(monkeypatch):
     monkeypatch.setattr(script, "existing_monitor_urls", lambda key: set())
     monkeypatch.setattr(
-        script, "api_call",
-        lambda k, m, p: {"stat": "fail", "error": {"type": "invalid_url"}},
+        script, "_request",
+        lambda k, m, p=None: (_ for _ in ()).throw(
+            RuntimeError("POST https://api.uptimerobot.com/v3/monitors failed (HTTP 500): Internal Server Error")
+        ),
     )
-    with pytest.raises(RuntimeError, match="newMonitor failed"):
+    with pytest.raises(RuntimeError, match="500"):
         script.create_monitors("key", "https://example.com")
