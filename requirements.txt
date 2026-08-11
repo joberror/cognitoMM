@@ -16,5 +16,5 @@ waitress  # production WSGI server for the health-check webapp
 # Test dependencies
 # pytest-asyncio >= 1.0 guarantees asyncio_default_test_loop_scope (used in
 # pyproject.toml [tool.pytest.ini_options]) is supported.
-pytest>=7.0
+pytest>=9.1.1
 pytest-asyncio>=1.0
