@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from fuzzywuzzy import fuzz
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, LinkPreviewOptions
 from pyrogram.enums import ParseMode, ChatType
 
 # Import from our modules
@@ -311,7 +311,7 @@ async def cmd_start(client, message: Message):
         await message.reply_text(
             terms_content,
             reply_markup=keyboard,
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
             parse_mode=ParseMode.MARKDOWN
         )
     else:
@@ -320,7 +320,7 @@ async def cmd_start(client, message: Message):
         first_part = terms_content[:max_length]
         await message.reply_text(
             first_part,
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
             parse_mode=ParseMode.MARKDOWN
         )
 
@@ -330,7 +330,7 @@ async def cmd_start(client, message: Message):
             chunk = remaining[:max_length]
             await message.reply_text(
                 chunk,
-                disable_web_page_preview=True,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
                 parse_mode=ParseMode.MARKDOWN
             )
             remaining = remaining[max_length:]
@@ -344,7 +344,7 @@ async def cmd_start(client, message: Message):
         await message.reply_text(
             remaining,
             reply_markup=keyboard,
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
             parse_mode=ParseMode.MARKDOWN
         )
 
@@ -478,7 +478,7 @@ async def cmd_my_history(client, message: Message):
     await message.reply_text(
         text,
         parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
+        link_preview_options=LinkPreviewOptions(is_disabled=True)
     )
 
 
@@ -604,7 +604,7 @@ async def cmd_recent(client, message: Message):
         await message.reply_text(
             formatted_output,
             parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True
+            link_preview_options=LinkPreviewOptions(is_disabled=True)
         )
 
         # Log successful usage
@@ -665,7 +665,7 @@ async def cmd_trending(client, message: Message):
         await status_msg.edit_text(
             output,
             reply_markup=InlineKeyboardMarkup(buttons),
-            disable_web_page_preview=True
+            link_preview_options=LinkPreviewOptions(is_disabled=True)
         )
 
     except Exception as e:
@@ -739,10 +739,11 @@ async def cmd_index_channel(client, message: Message):
                     chat_id = int(("-100" + chat_id))
             except:
                 return await message.reply_text('❌ Invalid message link!')
-        elif response.forward_from_chat and response.forward_from_chat.type == ChatType.CHANNEL:
-            # Handle forwarded message
-            last_msg_id = response.forward_from_message_id
-            chat_id = response.forward_from_chat.username or response.forward_from_chat.id
+        elif getattr(response, "forward_origin", None) and getattr(response.forward_origin, "chat", None) and response.forward_origin.chat.type == ChatType.CHANNEL:
+            # Handle forwarded message (forward_origin replaces the deprecated
+            # forward_from_chat / forward_from_message_id properties)
+            last_msg_id = response.forward_origin.message_id
+            chat_id = response.forward_origin.chat.username or response.forward_origin.chat.id
         else:
             return await message.reply_text('❌ This is not a forwarded message or valid link.')
 
@@ -1272,7 +1273,7 @@ async def cmd_indexing_stats(client, message: Message):
     stats_text += f"🔄 **RESET STATISTICS**: Use /reset_stats to clear counters\n"
     stats_text += f"```"
 
-    await message.reply_text(stats_text, disable_web_page_preview=True)
+    await message.reply_text(stats_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
     # Log statistics viewing
     await log_action("indexing_stats_viewed", by=message.from_user.id, extra=indexing_stats)
@@ -2353,7 +2354,7 @@ async def cmd_stat(client, message: Message):
         keyboard = InlineKeyboardMarkup(buttons)
         
         # Send statistics
-        await loading_msg.edit_text(output, reply_markup=keyboard, disable_web_page_preview=True, parse_mode=ParseMode.HTML)
+        await loading_msg.edit_text(output, reply_markup=keyboard, link_preview_options=LinkPreviewOptions(is_disabled=True), parse_mode=ParseMode.HTML)
         
         # Log action
         await log_action("stat_command", by=uid, extra={
@@ -2406,7 +2407,7 @@ async def cmd_quickstat(client, message: Message):
         # Format and send quick stats
         output = format_quick_stats_output(stats)
         
-        await loading_msg.edit_text(output, disable_web_page_preview=True)
+        await loading_msg.edit_text(output, link_preview_options=LinkPreviewOptions(is_disabled=True))
         
         # Log action
         await log_action("quickstat_command", by=uid, extra={

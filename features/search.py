@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fuzzywuzzy import fuzz
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, LinkPreviewOptions
 
 from .config import FUZZY_THRESHOLD
 from .database import movies_col
@@ -253,7 +253,7 @@ async def send_search_results(client, message: Message, results, query, page=1):
     await message.reply_text(
         search_text,
         reply_markup=keyboard,
-        disable_web_page_preview=True
+        link_preview_options=LinkPreviewOptions(is_disabled=True)
     )
 
 
@@ -305,9 +305,8 @@ async def inline_handler(client, inline_query):
                     f"🎬 **{title}**\n"
                     f"📅 Year: {year or 'N/A'}\n"
                     f"🎞️ Quality: {quality or 'N/A'}\n"
-                    f"📺 Channel: {result.get('channel_title', 'N/A')}"
-                ),
-                thumb_url=None,
+                    f"📺 Channel: {result.get('channel_title', 'N/A')}"                    ),
+                thumbnail_url=None,
                 id=f"movie_{result.get('_id')}"
             )
         )
@@ -352,7 +351,7 @@ async def inline_handler(client, inline_query):
                         f"📺 Channel: {movie.get('channel_title', 'N/A')}\n"
                         f"🔍 Fuzzy Match: {score}%"
                     ),
-                    thumb_url=None,
+                    thumbnail_url=None,
                     id=f"fuzzy_{movie.get('_id')}"
                 )
             )

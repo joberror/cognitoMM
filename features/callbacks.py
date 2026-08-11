@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import io
 from bson import ObjectId
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, LinkPreviewOptions
 from pyrogram.enums import ParseMode
 
 # Import from our modules
@@ -360,7 +360,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
             await callback_query.edit_message_text(
                 search_text,
                 reply_markup=keyboard,
-                disable_web_page_preview=True
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
             )
 
         elif data.startswith("index#"):
@@ -1365,7 +1365,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 await callback_query.message.edit_text(
                     output,
                     reply_markup=InlineKeyboardMarkup(buttons),
-                    disable_web_page_preview=True
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
                 )
 
             except Exception as e:

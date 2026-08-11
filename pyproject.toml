@@ -12,3 +12,21 @@ asyncio_mode = "auto"
 # With per-test loops the cached loop gets closed between tests and later DB
 # calls raise "Event loop is closed"; a session-scoped loop keeps it alive.
 asyncio_default_test_loop_scope = "session"
+
+# Fail on DeprecationWarnings raised from the PROJECT'S OWN modules, so a
+# deprecated stdlib/Python-warning API can't slip back in without failing CI.
+# Scoped to project modules: third-party internals (e.g. pyrogram's own
+# asyncio.get_event_loop()) and the pre-existing unittest-style harness
+# warnings in test_logger.py stay as warnings, not errors.
+#
+# NOTE: pyroblack's *API* deprecations ("This property is deprecated...")
+# are emitted via logging, not Python warnings - those are turned into test
+# failures by the guard handler installed in tests/conftest.py.
+filterwarnings = [
+    "error::DeprecationWarning:^features",
+    "error::DeprecationWarning:^main$",
+    "error::DeprecationWarning:^scripts",
+    # Test modules too - the pre-existing harness warnings originate from
+    # unittest.case / pytest internals, so their modules never match ^tests.
+    "error::DeprecationWarning:^tests",
+]

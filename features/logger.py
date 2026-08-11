@@ -12,6 +12,7 @@ import io
 import traceback
 from datetime import datetime
 import html
+from pyrogram.types import LinkPreviewOptions
 
 class TelegramLogger:
     def __init__(self, client=None, channel_id=None):
@@ -129,7 +130,7 @@ class TelegramLogger:
                 await self.client.send_message(
                     self.channel_id, 
                     escaped_text,
-                    disable_web_page_preview=True
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
                 )
             except Exception as e:
                 # Fallback to stderr if sending fails, don't recurse
