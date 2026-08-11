@@ -9,6 +9,8 @@ pinned: false
 
 # CognitoMM Telegram Bot
 
+[![CI](https://github.com/joberror/cognitoMM/actions/workflows/static-checks.yml/badge.svg)](https://github.com/joberror/cognitoMM/actions/workflows/static-checks.yml) [![Deploy](https://github.com/joberror/cognitoMM/actions/workflows/deploy.yml/badge.svg)](https://github.com/joberror/cognitoMM/actions/workflows/deploy.yml)
+
 This is a Telegram bot hosted on Hugging Face Spaces.
 
 ## Developer tools

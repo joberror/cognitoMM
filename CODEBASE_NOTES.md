@@ -252,6 +252,7 @@ Gate checks inline: is_feature_premium_only(name) && !is_premium_user && !is_adm
 10. **Callback data size** — bulk search/download state is stored in `bulk_downloads` keyed by short UUIDs because callback data has a 64-byte limit.
 11. **Queue processor** — `message_queue` (deque, maxlen 100) serializes auto-indexing to avoid duplicate-key races; `queue_processor_task` is started once.
 12. **Message edit flood** — progress edits are wrapped in try/except and throttled (every 10 msgs or 3s in `update_db`; every 30 msgs in indexing).
+13. **pyroblack deprecation safety net** — the CI gates turn any deprecated-API usage into a test failure (two mechanisms: `filterwarnings` in `pyproject.toml` + the `_PyrogramDeprecationGuard` logging handler in `tests/conftest.py`), and dedicated pin/guard tests enforce the modern API spellings. See §12.1. When adding send/edit/reply/inline-result code, always use the modern kwargs (`link_preview_options=`, `reply_parameters=`, `thumbnail_*`).
 
 ---
 
@@ -300,3 +301,26 @@ Gate checks inline: is_feature_premium_only(name) && !is_premium_user && !is_adm
 - **Deploy:** GitHub Actions (`.github/workflows/deploy.yml`) syncs `main` → HF Space `iamjoberror/bot-media` (needs `HF_TOKEN` secret)
 - **Docker:** `Dockerfile` (python:3.11-slim, port 7860, `python main.py`); `docker-compose.yml` adds a MongoDB service; `run.sh` is the local dev launcher (pyenv, session cleanup)
 - **Known stale bits:** ✅ **FIXED** — parser tests now import `parse_metadata` from `features.metadata_parser` (with `sys.path` setup); `test_orphan_prune.py` now exercises the real `prune_orphaned_index_entries()` in `features/indexing.py` (implemented so the documented orphan-prune mechanism actually exists).
+
+### 12.1 pyroblack deprecation safety net
+
+pyroblack (installed as the `pyrogram` package) deprecates APIs in **two different ways**, so the safety net has **two complementary mechanisms** — both are active for every `pytest` run, including CI:
+
+1. **Python `DeprecationWarning` gate** — `filterwarnings` in `pyproject.toml` turns `DeprecationWarning`s raised from the project's own modules (`^features`, `^main$`, `^scripts`, `^tests`) into test errors. Module-scoped deliberately: pyrogram's own internals (e.g. `asyncio.get_event_loop()` in `pyrogram/utils.py`) and the pre-existing `unittest.case` harness warnings stay as warnings, not errors.
+2. **pyroblack log-warning gate** — `_PyrogramDeprecationGuard` in `tests/conftest.py`: a logging `Handler` on the `pyrogram` root logger whose `filter()` raises `AssertionError` when a record contains `"is deprecated"`. This exists because pyroblack announces API deprecations via `log.warning(...)` (logging module), **not** Python warnings — `filterwarnings` cannot see them. Logging *filters* only run on the emitting logger, but *handler* filters run on records propagating to ancestor handlers, so one handler catches every submodule's deprecation log. Known limitation: a broad `except Exception` around a deprecated call in app code would swallow the raised error (documented in the conftest docstring).
+
+On top of the gates, **pin/guard tests** freeze the modern API spellings so regressions fail with a clear message:
+
+- **`tests/test_pyroblack_api_cleanup.py`** (behavioral spy pins) — recorder fakes spy on receiver methods (`reply_text` / `edit_text` / `edit_message_text` / `send_message` / `InlineQueryResultArticle` constructor) and assert the modern kwargs on every call:
+  - `forward_origin` in `cmd_index_channel` (fakes expose ONLY `forward_origin`, so reverting to `forward_from_chat` raises `AttributeError` and fails)
+  - `thumbnail_url` in the inline handler (constructor spy records kwargs; no deprecated `thumb_*` keys allowed)
+  - `link_preview_options` across all 14 call sites in `logger.py` / `search.py` / `callbacks.py` / `commands.py` (spy asserts key presence **and** value semantics — `LinkPreviewOptions.is_disabled is True`), plus a source-level scan pinning the exact per-file counts (logger 1, search 1, callbacks 2, commands 10)
+- **`tests/test_pyroblack_api_guards.py`** (source-level guards) — the remaining deprecated kwarg families that the project doesn't use yet must never be introduced: `reply_to_message_id/chat_id/sender_id/story_id=` (→ `reply_parameters=`), `thumb_url/width/height/mime_type=` (→ `thumbnail_*`), `force_document=`, `offset_id=`, `placeholder=`. Scans `features/**`, `main.py`, `scripts/` (recursive; `#` line comments are stripped so prose can't trip it).
+
+**Contributor rules:**
+
+- Send/edit text → `link_preview_options=LinkPreviewOptions(is_disabled=True)` — never `disable_web_page_preview`
+- Reply to a message → `reply_parameters=` — never `reply_to_message_id`/`reply_to_chat_id`/`reply_to_sender_id`/`reply_to_story_id`
+- Inline results → `thumbnail_url`/`thumbnail_width`/`thumbnail_height`/`thumbnail_mime_type` — never `thumb_*`
+- If a pyroblack API is deliberately changed, update the pin counts in `test_pyroblack_api_cleanup.py` / `test_pyroblack_api_guards.py` — do **not** loosen the matchers to "fix" a failing test
+- Both test files are standalone scripts (`python tests/test_<name>.py`) and pytest-compatible
