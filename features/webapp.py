@@ -33,7 +33,7 @@ _stats_provider: Optional[callable] = None
 _bot_loop = None
 """Event loop the stats provider must run on (the bot's main loop).
 
-The Motor and Hydrogram clients are bound to this loop, so /metrics must
+The Motor and Pyroblack clients are bound to this loop, so /metrics must
 schedule the provider there instead of on a fresh per-request loop.
 """
 
@@ -49,7 +49,7 @@ def set_stats_provider(fn: callable, loop=None):
     Called by the bot's main() after the database is ready. Pass `loop` =
     the bot's running event loop so /metrics can schedule the provider on
     it (thread-safe) rather than on a fresh per-request loop, which breaks
-    the Motor/Hydrogram clients bound to the main loop.
+    the Motor/Pyroblack clients bound to the main loop.
     """
     global _stats_provider, _bot_loop
     _stats_provider = fn
@@ -138,7 +138,7 @@ def metrics():
             if _bot_loop is not None:
                 # Run the provider on the bot's OWN event loop (thread-safe).
                 # A fresh per-request loop makes cross-loop calls to the
-                # Motor/Hydrogram clients fail, and those errors used to be
+                # Motor/Pyroblack clients fail, and those errors used to be
                 # swallowed and returned as `data: null`.
                 future = asyncio.run_coroutine_threadsafe(_stats_provider(), _bot_loop)
                 try:

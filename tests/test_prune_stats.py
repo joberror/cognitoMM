@@ -30,8 +30,8 @@ if ROOT_DIR not in sys.path:
 from features import indexing  # features/indexing.py
 from features import config     # features/config.py
 
-# Real hydrogram error classes used to simulate channel access loss / flooding
-from hydrogram.errors import ChannelPrivate, FloodWait
+# Real pyrogram error classes used to simulate channel access loss / flooding
+from pyrogram.errors import ChannelPrivate, FloodWait
 
 # ---------------------------
 # Fake Async Mongo Collection

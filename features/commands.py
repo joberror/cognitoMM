@@ -12,9 +12,9 @@ import uuid
 import logging
 from datetime import datetime, timezone, timedelta
 from fuzzywuzzy import fuzz
-from hydrogram import Client, filters
-from hydrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from hydrogram.enums import ParseMode, ChatType
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.enums import ParseMode, ChatType
 
 # Import from our modules
 from .config import API_ID, API_HASH, BOT_TOKEN, BOT_ID, MONGO_URI, MONGO_DB, ADMINS, LOG_CHANNEL, FUZZY_THRESHOLD, AUTO_INDEX_DEFAULT, temp_data, user_input_events, bulk_downloads, START_MESSAGE, SUPPORT_LINK

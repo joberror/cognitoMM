@@ -9,9 +9,9 @@ rate limiting, error handling, and progress tracking.
 import asyncio
 from datetime import datetime, timezone
 from collections import defaultdict
-from hydrogram import Client
-from hydrogram.types import Message
-from hydrogram.errors import (
+from pyrogram import Client
+from pyrogram.types import Message
+from pyrogram.errors import (
     UserIsBlocked,
     PeerIdInvalid,
     FloodWait,
@@ -76,7 +76,7 @@ async def send_broadcast_message(
     Send message to single user with comprehensive error handling
     
     Args:
-        client: Hydrogram client instance
+        client: Pyroblack client instance
         user_id: Target user ID
         message_text: Message content
         parse_mode: Optional parse mode (Markdown/HTML)
@@ -222,7 +222,7 @@ async def execute_broadcast(
     Execute broadcast to all users with progress tracking
     
     Args:
-        client: Hydrogram client instance
+        client: Pyroblack client instance
         admin_message: Original message from admin
         user_ids: List of user IDs to broadcast to
         message_text: Message content

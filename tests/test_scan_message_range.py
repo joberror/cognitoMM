@@ -32,8 +32,8 @@ if ROOT_DIR not in sys.path:
 
 from features.database_scan import scan_message_range
 
-# Real hydrogram error classes used to simulate channel access loss / flooding
-from hydrogram.errors import ChannelPrivate, FloodWait
+# Real pyrogram error classes used to simulate channel access loss / flooding
+from pyrogram.errors import ChannelPrivate, FloodWait
 
 # ---------------------------
 # Fakes

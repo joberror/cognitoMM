@@ -15,7 +15,7 @@ A production **Telegram movie bot** (hosted on Hugging Face Spaces) that:
 - Lets users **search** (exact + fuzzy), **request** missing titles, **download files** via inline buttons with **auto-deletion**, **premium tiers**, admin **broadcast**, and a **stats dashboard**
 - Serves a Flask **health endpoint** for keep-alive/monitoring
 
-**Stack:** Python 3.11 · **Hydrogram** (Pyrogram fork) · Motor/PyMongo · FuzzyWuzzy · TMDb API · Flask · aiohttp · Docker
+**Stack:** Python 3.11 · **Pyroblack** (Pyrogram fork) · Motor/PyMongo · FuzzyWuzzy · TMDb API · Flask · aiohttp · Docker
 
 ---
 
@@ -56,7 +56,7 @@ run_bot()
 ```
 
 ### `CognitoBot`
-Subclasses Hydrogram `Client` and adds `iter_messages(chat_id, limit, offset)` (borrowed from Auto-Filter-Bot) — fetches messages in batches of 200 via `get_messages` — used by the manual indexing process.
+Subclasses Pyroblack `Client` and adds `iter_messages(chat_id, limit, offset)` (borrowed from Auto-Filter-Bot) — fetches messages in batches of 200 via `get_messages` — used by the manual indexing process.
 
 ---
 
@@ -257,7 +257,7 @@ Gate checks inline: is_feature_premium_only(name) && !is_premium_user && !is_adm
 
 ## 10. Conventions
 
-- Async everywhere (Hydrogram + Motor); `await` all DB calls (`to_list(length=None)` for full results)
+- Async everywhere (Pyroblack + Motor); `await` all DB calls (`to_list(length=None)` for full results)
 - `snake_case` functions/vars, type hints on public functions, docstrings on modules/functions
 - Emoji-rich Telegram UI; HTML parse mode for fancy messages, markdown elsewhere
 - Errors are caught, printed to console (logger picks them up), and surfaced as friendly Telegram messages

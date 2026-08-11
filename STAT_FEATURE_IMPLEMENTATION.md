@@ -297,7 +297,7 @@ Bot: [Shows compact summary in ~2 seconds]
 - `asyncio` - Async operations
 - `datetime` - Timestamps
 - `motor` - MongoDB async driver
-- `hydrogram` - Telegram bot framework
+- `pyroblack` - Telegram bot framework
 
 ### New
 - `json` - JSON export

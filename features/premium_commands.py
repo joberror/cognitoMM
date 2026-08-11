@@ -7,7 +7,7 @@ It processes user inputs during interactive premium management operations.
 
 import asyncio
 from datetime import datetime, timezone
-from hydrogram.types import Message
+from pyrogram.types import Message
 from .database import premium_users_col, premium_features_col, users_col
 from .user_management import is_admin, log_action
 from .premium_management import add_premium_user, edit_premium_user, remove_premium_user, get_premium_user, get_days_remaining, add_premium_feature

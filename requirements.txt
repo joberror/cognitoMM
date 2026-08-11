@@ -1,4 +1,4 @@
-hydrogram
+pyroblack>=3.0.3  # Telegram MTProto framework (installs the `pyrogram` package); successor to hydrogram
 pymongo
 python-dotenv>=1.0.0
 motor>=3.1.1

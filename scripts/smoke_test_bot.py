@@ -7,15 +7,15 @@ WARNING: This script connects to the REAL Telegram API using the credentials
 in .env and prints API_ID to stdout. It is for ad-hoc verification only - do
 not run it in CI or on shared machines.
 
-Note: it uses the pyrogram library (legacy); the production bot runs on
-hydrogram (see features/bot.py).
+Note: it uses the same Telegram library as production - pyroblack (installed
+as the `pyrogram` package; see features/bot.py).
 """
 
 import os
 import asyncio
 from dotenv import load_dotenv
-from hydrogram import Client, filters
-from hydrogram.types import Message
+from pyrogram import Client, filters
+from pyrogram.types import Message
 
 load_dotenv()
 

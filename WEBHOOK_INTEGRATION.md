@@ -13,7 +13,7 @@ I have integrated a Flask-based web server into the CognitoMM bot to support Bet
 
 2.  **Bot Startup Logic (`features/bot.py`)**
     *   The web server is automatically started in a background thread when the bot runs.
-    *   This ensures the web server doesn't block the main Hydrogram event loop.
+    *   This ensures the web server doesn't block the main Pyroblack event loop.
 
 3.  **Dependency Update (`requirements.txt`)**
     *   Added `Flask` to the project dependencies.

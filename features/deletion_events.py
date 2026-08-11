@@ -1,7 +1,9 @@
 """
 Real-Time Channel Message Deletion Handling
 
-Hydrogram currently (similar to Pyrogram) may not expose a high-level DeletedMessagesHandler.
+Pyroblack (installed as the `pyrogram` package) does ship a high-level
+DeletedMessagesHandler, but Telegram does NOT deliver channel-post deletion
+updates to bots, so it is of no use for indexed channels.
 To ensure we react to deletions, we register a RawUpdateHandler and heuristically inspect
 the low-level update object for attributes that look like deletion updates.
 
@@ -109,7 +111,7 @@ async def handle_raw_update(client, update, users, chats):
     """
     Raw update handler for real-time deletion detection.
 
-    Signature mirrors Hydrogram RawUpdateHandler expectations:
+    Signature mirrors Pyroblack RawUpdateHandler expectations:
         (client, update, users, chats)
 
     We only act if heuristic detects deletion: presence of channel/chat id plus

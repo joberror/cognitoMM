@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fuzzywuzzy import fuzz
-from hydrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 from .config import FUZZY_THRESHOLD
 from .database import movies_col
@@ -262,7 +262,7 @@ async def inline_handler(client, inline_query):
     from .config import FUZZY_THRESHOLD
     from .database import movies_col, users_col
     from fuzzywuzzy import fuzz
-    from hydrogram.types import InlineQueryResultArticle, InputTextMessageContent
+    from pyrogram.types import InlineQueryResultArticle, InputTextMessageContent
     from datetime import datetime, timezone
     
     query = inline_query.query.strip()

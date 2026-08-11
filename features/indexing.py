@@ -16,9 +16,9 @@ import uuid
 from datetime import datetime, timezone
 from collections import deque
 
-from hydrogram import enums
-from hydrogram.types import Message
-from hydrogram.errors import (
+from pyrogram import enums
+from pyrogram.types import Message
+from pyrogram.errors import (
     ChannelBanned,
     ChannelInvalid,
     ChannelPrivate,
@@ -36,7 +36,7 @@ from .statistics_store import prune_stats, indexing_stats  # re-exported; owned 
 
 
 async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
-    """Enhanced indexing process using Hydrogram's get_chat_history"""
+    """Enhanced indexing process using Pyroblack's get_chat_history"""
     start_time = time.time()
     total_files = 0
     duplicate = 0
@@ -82,7 +82,7 @@ async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
                     # Update progress every 30 messages
                     if current % 30 == 0:
                         try:
-                            from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                            from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
                             btn = [[InlineKeyboardButton('🛑 CANCEL', callback_data='index#cancel')]]
                             await msg.edit_text(
                                 f"🔄 **Indexing In Progress**\n\n"
@@ -163,12 +163,12 @@ async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
                 print(f"❌ iter_messages not available: {e}")
                 await msg.edit_text(
                     f"❌ **Method Not Available**\n\n"
-                    f"The `iter_messages` method is not available in this version of Hydrogram.\n\n"
+                    f"The `iter_messages` method is not available in this version of Pyroblack.\n\n"
                     f"**Error:** {e}\n\n"
                     f"**Available alternatives:**\n"
                     f"• Use real-time auto-indexing instead\n"
                     f"• Forward messages manually for indexing\n"
-                    f"• Check Hydrogram version compatibility"
+                    f"• Check Pyroblack version compatibility"
                 )
                 return
             except Exception as e:
@@ -190,7 +190,7 @@ async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
 
 
 async def save_file_to_db(media, message):
-    """Enhanced file saving function compatible with Hydrogram"""
+    """Enhanced file saving function compatible with Pyroblack"""
     try:
         # Extract file information
         if hasattr(media, 'file_name') and media.file_name:

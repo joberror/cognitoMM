@@ -8,8 +8,8 @@ banning/unbanning users, and verifying terms acceptance.
 
 import asyncio
 from datetime import datetime, timezone
-from hydrogram.types import Message
-from hydrogram.enums import ChatType
+from pyrogram.types import Message
+from pyrogram.enums import ChatType
 
 from .config import ADMINS
 from .database import users_col, logs_col, channels_col
@@ -114,7 +114,7 @@ async def should_process_command(message: Message) -> bool:
 
     This prevents the bot from responding to commands in random groups.
 
-    Note: chat.type is a hydrogram ChatType enum (not a plain string), so it
+    Note: chat.type is a pyrogram ChatType enum (not a plain string), so it
     is compared against the enum values directly.
     """
     # Always process private messages (direct messages to bot)

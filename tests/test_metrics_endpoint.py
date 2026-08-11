@@ -4,7 +4,7 @@ Tests for the /metrics endpoint and bot-identity caching.
 Regression: /metrics used to return {"status": "ok", "data": null} whenever
 stats collection failed, because collect_comprehensive_stats() swallows
 exceptions and returns None, and the handler ran the async provider on a
-fresh per-request event loop (cross-loop calls to the Motor/Hydrogram
+fresh per-request event loop (cross-loop calls to the Motor/Pyroblack
 clients bound to the bot's main loop).
 
 Fixed behavior pinned here:

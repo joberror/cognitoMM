@@ -6,7 +6,7 @@ It initializes the database connection and starts the bot using the modular stru
 from the features package.
 
 The application uses:
-- Hydrogram for Telegram bot functionality
+- Pyroblack for Telegram bot functionality
 - MongoDB for data storage
 - Modular architecture for maintainability
 """

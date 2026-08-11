@@ -9,7 +9,7 @@ logic can be unit-tested in isolation without the interactive command flow
 
 from datetime import datetime, timezone
 
-from hydrogram.errors import FloodWait
+from pyrogram.errors import FloodWait
 
 from .database import movies_col
 from .indexing import ACCESS_ERRORS, index_message

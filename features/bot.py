@@ -2,17 +2,17 @@
 Bot Initialization and Main Loop Module
 
 This module contains the bot initialization, main function, and event loop handling.
-It sets up the Hydrogram client, registers handlers, and manages the bot lifecycle.
+It sets up the Pyroblack client, registers handlers, and manages the bot lifecycle.
 """
 
 import sys
 import asyncio
 import threading
 from datetime import datetime, timezone
-from hydrogram import Client, filters
-from hydrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from hydrogram.handlers import MessageHandler, InlineQueryHandler, CallbackQueryHandler
-from hydrogram.enums import ChatType
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.handlers import MessageHandler, InlineQueryHandler, CallbackQueryHandler
+from pyrogram.enums import ChatType
 
 # Import from our modules
 from .config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL, client
@@ -32,7 +32,7 @@ from .statistics import collect_comprehensive_stats, cache_bot_info
 # -------------------------
 
 class CognitoBot(Client):
-    """Extended Hydrogram Client with iter_messages method from Auto-Filter-Bot"""
+    """Extended Pyroblack Client with iter_messages method from Auto-Filter-Bot"""
 
     def __init__(self):
         super().__init__(
@@ -70,9 +70,9 @@ class CognitoBot(Client):
 # Main Function with Event Loop Handling
 # -------------------------
 def run_bot():
-    """Run bot with Kurigram - simplified approach"""
+    """Run bot with Pyroblack - simplified approach"""
     try:
-        print("🔄 Starting bot with Kurigram...")
+        print("🔄 Starting bot with Pyroblack...")
         
         # Start the health check webapp for BetterStack/Hosting platforms
         start_webapp()
@@ -147,7 +147,7 @@ async def main():
 
             # Register RawUpdateHandler for real-time deletions (if available)
             try:
-                from hydrogram.handlers import RawUpdateHandler
+                from pyrogram.handlers import RawUpdateHandler
                 app.add_handler(RawUpdateHandler(handle_raw_update))
             except Exception:
                 pass  # Handler not available in this version

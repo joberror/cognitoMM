@@ -1,7 +1,7 @@
 # main.py
 """
-Telegram Movie Bot - Hydrogram Bot Session
-- Hydrogram bot session for better channel access and compatibility
+Telegram Movie Bot - Pyroblack Bot Session
+- Pyroblack bot session for better channel access and compatibility
 - MongoDB Atlas (motor) for async storage
 - Advanced indexing system with proper file handling
 - Robust metadata parsing, exact + fuzzy search, channel management
@@ -24,12 +24,12 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 # Time synchronization patches removed - using system time as-is
 
-# Import Hydrogram - Telegram MTProto API Framework
-from hydrogram import Client, filters
-from hydrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from hydrogram.handlers import MessageHandler, InlineQueryHandler, CallbackQueryHandler
-from hydrogram.errors import FloodWait, UserNotParticipant
-from hydrogram import enums
+# Import Pyroblack - Telegram MTProto API Framework
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.handlers import MessageHandler, InlineQueryHandler, CallbackQueryHandler
+from pyrogram.errors import FloodWait, UserNotParticipant
+from pyrogram import enums
 
 load_dotenv()
 
@@ -468,7 +468,7 @@ def get_readable_time(seconds):
     return result
 
 async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
-    """Enhanced indexing process using Hydrogram's get_chat_history"""
+    """Enhanced indexing process using Pyroblack's get_chat_history"""
     start_time = time.time()
     total_files = 0
     duplicate = 0
@@ -594,12 +594,12 @@ async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
                 print(f"❌ iter_messages not available: {e}")
                 await msg.edit_text(
                     f"❌ **Method Not Available**\n\n"
-                    f"The `iter_messages` method is not available in this version of Hydrogram.\n\n"
+                    f"The `iter_messages` method is not available in this version of Pyroblack.\n\n"
                     f"**Error:** {e}\n\n"
                     f"**Available alternatives:**\n"
                     f"• Use real-time auto-indexing instead\n"
                     f"• Forward messages manually for indexing\n"
-                    f"• Check Hydrogram version compatibility"
+                    f"• Check Pyroblack version compatibility"
                 )
                 return
             except Exception as e:
@@ -620,7 +620,7 @@ async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
             print(f"❌ Indexing error: {e}")
 
 async def save_file_to_db(media, message):
-    """Enhanced file saving function compatible with Hydrogram"""
+    """Enhanced file saving function compatible with Pyroblack"""
     try:
         # Extract file information
         if hasattr(media, 'file_name') and media.file_name:
@@ -3152,7 +3152,7 @@ def run_bot():
 # -------------------------
 
 class CognitoBot(Client):
-    """Extended Hydrogram Client with iter_messages method from Auto-Filter-Bot"""
+    """Extended Pyroblack Client with iter_messages method from Auto-Filter-Bot"""
 
     def __init__(self):
         super().__init__(
@@ -3225,7 +3225,7 @@ async def main():
             print("✅ Auto-delete monitor started")
 
             print("✅ Bot session started successfully")
-            print("✅ MovieBot running with Hydrogram!")
+            print("✅ MovieBot running with Pyroblack!")
             print("📱 Bot is ready to receive commands and monitor channels!")
             print("🛑 Press Ctrl+C to stop")
 

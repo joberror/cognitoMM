@@ -10,9 +10,9 @@ import uuid
 from datetime import datetime, timezone
 import io
 from bson import ObjectId
-from hydrogram import Client, filters
-from hydrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from hydrogram.enums import ParseMode
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.enums import ParseMode
 
 # Import from our modules
 from .config import LOG_CHANNEL, client

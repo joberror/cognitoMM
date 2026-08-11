@@ -20,7 +20,7 @@ This document outlines the complete architecture for implementing a broadcast me
 - **Command Handler**: [`handle_command()`](features/commands.py:35-126) in [`features/commands.py`](features/commands.py)
 - **User Management**: [`is_admin()`](features/user_management.py:22-27), [`log_action()`](features/user_management.py:53-74)
 - **Database**: MongoDB [`users_col`](features/database.py:27), new `broadcasts_col`
-- **Message Sending**: Hydrogram `client.send_message()`
+- **Message Sending**: Pyroblack `client.send_message()`
 
 ---
 
@@ -362,7 +362,7 @@ async def cmd_broadcast(client: Client, message: Message):
     Handle /broadcast command for admin message broadcasting
     
     Args:
-        client: Hydrogram client instance
+        client: Pyroblack client instance
         message: Message object from admin
     
     Flow:

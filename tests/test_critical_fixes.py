@@ -5,7 +5,7 @@ Test: critical bug fixes
 Covers three fixes:
 
 1. should_process_command access control (features/user_management.py):
-   - private chats always allowed (hydrogram ChatType enum, not string)
+   - private chats always allowed (pyrogram ChatType enum, not string)
    - admins allowed anywhere
    - groups/supergroups/channels only when registered & enabled in channels_col
    - random groups are rejected (no unconditional group-command bypass)
@@ -29,7 +29,7 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from hydrogram.enums import ChatType
+from pyrogram.enums import ChatType
 
 from features import user_management, utils, commands, file_deletion
 from features.config import bulk_downloads
@@ -53,7 +53,7 @@ class FakeChannelsCol:
 
 
 def make_message(chat_type, chat_id, user_id, text="/start"):
-    """Build a minimal hydrogram-style message object."""
+    """Build a minimal pyrogram-style message object."""
     return SimpleNamespace(
         chat=SimpleNamespace(type=chat_type, id=chat_id),
         from_user=SimpleNamespace(id=user_id),

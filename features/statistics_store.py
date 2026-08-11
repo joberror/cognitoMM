@@ -7,7 +7,7 @@ tasks / services and consumed by the statistics dashboard.
 Why this module exists:
 - Previously prune_stats lived inside features/indexing.py, forcing consumers
   (features/statistics.py) to import the whole indexing module (and its heavy
-  dependencies: hydrogram, database connections, etc.) just to read a dict.
+  dependencies: pyrogram, database connections, etc.) just to read a dict.
 - By keeping the dicts here - a module with zero imports - producers can
   populate them and consumers can read them without import-time coupling or
   circular-import risk, and tests have a single place to reset state.

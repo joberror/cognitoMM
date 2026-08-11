@@ -1,12 +1,12 @@
 """
 Test: Real-time deletion handler removes indexed DB entries immediately.
 
-We simulate a RawUpdate deletion-like update received from Hydrogram and ensure:
+We simulate a RawUpdate deletion-like update received from Pyroblack and ensure:
 - Documents with (channel_id, message_id) matching update.message_ids are deleted.
 - Non-listed message IDs remain.
 - Handler is resilient and logs via log_action without raising.
 
-No actual Hydrogram dependency; we fabricate the update object and lightweight collection stubs.
+No actual Pyroblack dependency; we fabricate the update object and lightweight collection stubs.
 """
 
 import asyncio

@@ -228,7 +228,7 @@ Tests validate:
 ✅ All validation requirements met
 ✅ All technical implementation notes followed
 ✅ Database schema matches specifications
-✅ Uses Hydrogram for bot session
+✅ Uses Pyroblack for bot session
 ✅ Follows Auto-Filter-Bot patterns
 ✅ No icons - text symbols only
 ✅ Clean, minimal formatting
