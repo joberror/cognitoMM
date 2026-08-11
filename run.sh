@@ -39,6 +39,17 @@ for arg in "$@"; do
     esac
 done
 
+# --- Resolve the Python interpreter ---
+# Prefer the project virtualenv (.venv) — it holds pyroblack (the Telegram
+# framework this bot runs on). Fall back to the plain `python` on PATH for
+# environments without a .venv (e.g. the Docker image, where the image's own
+# python is already set up).
+if [ -x ".venv/bin/python" ]; then
+    PYTHON=".venv/bin/python"
+else
+    PYTHON="python"
+fi
+
 # --- Docker mode ---
 if $DOCKER_MODE; then
     echo "🐳 Building and starting via Docker Compose..."
@@ -69,16 +80,13 @@ if [ ! -f ".env" ]; then
 fi
 
 # Check Python version (informational only)
-PYTHON_VERSION=$(python --version 2>&1)
-echo "🐍 $PYTHON_VERSION"
+echo "🐍 $("$PYTHON" --version 2>&1)"
 
-# Check for Pyrogram/Hydrogram
-if python -c "import pyrogram" 2>/dev/null; then
-    echo "📦 Pyrogram: $(python -c 'import pyrogram; print(pyrogram.__version__)')"
-elif python -c "import hydrogram" 2>/dev/null; then
-    echo "📦 Hydrogram: $(python -c 'import hydrogram; print(hydrogram.__version__)')"
+# Check for the Telegram library (pyroblack — installs as the `pyrogram` package)
+if "$PYTHON" -c "import pyrogram" 2>/dev/null; then
+    echo "📦 Pyroblack (pyrogram): $("$PYTHON" -c 'import pyrogram; print(pyrogram.__version__)')"
 else
-    echo "⚠️  Neither Pyrogram nor Hydrogram found — check requirements.txt"
+    echo "⚠️  Pyroblack not found in $PYTHON — install it with 'pip install pyroblack' (see requirements.txt)"
 fi
 
 # Clean up stale session files
@@ -86,6 +94,6 @@ echo "🧹 Cleaning stale session files..."
 rm -f *.session *.session-journal *.session-shm *.session-wal
 
 echo ""
-echo "🎬 Starting MovieBot..."
+echo "🎬 Starting MovieBot (using $PYTHON)..."
 echo "========================"
-exec python main.py
+exec "$PYTHON" main.py

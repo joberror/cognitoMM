@@ -26,8 +26,16 @@ if ! git diff --cached --name-only -- "features/" "main.py" | grep -q '\.py$'; t
     exit 0
 fi
 
+# Prefer the project virtualenv (.venv, holds pyroblack) like the Makefile
+# does; fall back to the plain `python` on PATH.
+if [ -x "$ROOT/.venv/bin/python" ]; then
+    PY="$ROOT/.venv/bin/python"
+else
+    PY="python"
+fi
+
 echo "🔍 Running static check (re-export chains / broken imports / duplicates)..."
-if ! (cd "$ROOT" && python scripts/check_reexports.py); then
+if ! (cd "$ROOT" && "$PY" scripts/check_reexports.py); then
     echo "❌ Pre-commit static check FAILED — fix the violations above before committing."
     echo '   (Hint: run make check to reproduce.)'
     exit 1

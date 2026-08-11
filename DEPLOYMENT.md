@@ -19,6 +19,16 @@ This guide covers deploying the CognitoMM Telegram bot in three environments:
 | Telegram API credentials | — | Get from [my.telegram.org/apps](https://my.telegram.org/apps) |
 | Bot Token | — | Get from [@BotFather](https://t.me/BotFather) |
 
+> **📦 Telegram library (pyroblack).** The bot's MTProto framework is
+> **pyroblack**, the actively maintained successor to hydrogram. Pyroblack
+> installs as the **`pyrogram`** package: `pip install pyroblack` provides
+> `import pyrogram`, so every import in the codebase reads
+> `from pyrogram import ...` (`Client`, `filters`, `types`, `handlers`,
+> `errors`) — there is no separate `pyroblack` import namespace. This matters
+> when setting up a local environment: after `pip install -r requirements.txt`
+> you will import from `pyrogram`, and `./run.sh` / `make` select the project
+> venv (`.venv`, which holds pyroblack) automatically when present.
+
 ---
 
 ## ⚙️ Environment Variables
@@ -157,7 +167,9 @@ The bot exposes two endpoints for monitoring:
 **Quick start** — creates both monitors on your UptimeRobot account:
 
 ```bash
-UPTIMEROBOT_API_KEY=your-key python scripts/create_uptimerobot_monitors.py
+# Prefer the project venv (has all deps); plain `python` also works if you
+# installed requirements into your default interpreter.
+UPTIMEROBOT_API_KEY=your-key .venv/bin/python scripts/create_uptimerobot_monitors.py
 ```
 
 This creates (idempotently — monitors whose URL already exists are skipped):

@@ -8,17 +8,24 @@
 #   make deps      install Python dependencies (pip install -r requirements.txt)
 #   make verify    run everything CI gates on: check + test
 #   make install-hooks  install the pre-commit hook (git config core.hooksPath)
+#
+# Python interpreter: prefer the project virtualenv (.venv) — it holds
+# pyroblack — and fall back to the plain `python` on PATH (CI installs deps
+# into the runner's python, so there is no .venv there).
+
+PYTHON := $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python; fi)
+PIP    := $(shell if [ -x .venv/bin/pip ]; then echo .venv/bin/pip; else echo pip; fi)
 
 .PHONY: check test deps verify install-hooks
 
 check:
-	python scripts/check_reexports.py
+	$(PYTHON) scripts/check_reexports.py
 
 deps:
-	pip install -r requirements.txt
+	$(PIP) install -r requirements.txt
 
 test: deps
-	python -m pytest tests/ -q
+	$(PYTHON) -m pytest tests/ -q
 
 verify: check test
 	@echo "✅ verify: static check + pytest both passed"
@@ -26,4 +33,4 @@ verify: check test
 install-hooks:
 	git config core.hooksPath .githooks
 	@echo "✅ Pre-commit hook installed (core.hooksPath = .githooks)"
-	@echo "   It runs 'python scripts/check_reexports.py' before each commit."
+	@echo "   It runs '$(PYTHON) scripts/check_reexports.py' before each commit."
