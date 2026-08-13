@@ -19,9 +19,10 @@ from typing import Optional
 from flask import Flask, jsonify, request
 
 try:
-    from .config import BOT_START_TIME
+    from .config import BOT_START_TIME, BOT_VERSION
 except ImportError:
     BOT_START_TIME = datetime.now(timezone.utc)
+    BOT_VERSION = "unknown"
 
 # ------------------------------------------------------------------ #
 #  Store / stats callbacks (set by the bot at startup)                #
@@ -110,7 +111,9 @@ def index():
     return jsonify({
         "status": "running",
         "bot": "CognitoMM",
-        "version": os.environ.get("BOT_VERSION", "unknown"),
+        # Version comes from the canonical constant; BOT_VERSION env var
+        # remains a deploy-time override (e.g. custom HF builds).
+        "version": os.environ.get("BOT_VERSION", BOT_VERSION),
         "uptime": str(datetime.now(timezone.utc) - BOT_START_TIME),
         "message": "Bot is alive and healthy!",
     })

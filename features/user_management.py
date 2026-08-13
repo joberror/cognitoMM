@@ -75,6 +75,117 @@ async def log_action(action: str, by: int = None, target: int = None, extra: dic
             pass
 
 
+# ------------------------------------------------------------------ #
+#  Watchlist (notify users when a watched title gets indexed)          #
+# ------------------------------------------------------------------ #
+
+
+def _watch_key(title: str) -> str:
+    """Normalized lowercase key used for watchlist matching."""
+    return (title or "").strip().lower()
+
+
+async def add_to_watchlist(user_id: int, title: str, year=None, type_=None) -> bool:
+    """Add a title to a user's watchlist (idempotent). Returns True if added."""
+    if not title or not str(title).strip():
+        return False
+    key = _watch_key(title)
+    entry = {
+        "title": str(title).strip(),
+        "title_key": key,
+        "year": year,
+        "type": type_ or "Movie",
+        "added_at": datetime.now(timezone.utc),
+    }
+    try:
+        # Ensure the user document exists FIRST (upsert on user_id alone). A
+        # $ne-filtered upsert would insert a SECOND user document whenever the
+        # title is already watched (filter matches nothing -> upsert inserts).
+        await users_col.update_one(
+            {"user_id": user_id},
+            {"$setOnInsert": {"user_id": user_id, "watchlist": []}},
+            upsert=True,
+        )
+        result = await users_col.update_one(
+            {"user_id": user_id, "watchlist.title_key": {"$ne": key}},
+            {"$push": {"watchlist": entry}},
+        )
+        return bool(result.modified_count)
+    except Exception as e:
+        print(f"⚠️ add_to_watchlist failed for {user_id}: {e}")
+        return False
+
+
+async def remove_from_watchlist(user_id: int, title: str) -> bool:
+    """Remove a title from a user's watchlist. Returns True if removed."""
+    key = _watch_key(title)
+    try:
+        result = await users_col.update_one(
+            {"user_id": user_id},
+            {"$pull": {"watchlist": {"title_key": key}}},
+        )
+        return bool(result.modified_count)
+    except Exception as e:
+        print(f"⚠️ remove_from_watchlist failed for {user_id}: {e}")
+        return False
+
+
+async def get_watchlist(user_id: int):
+    """Return the user's watchlist (list of entries) or []."""
+    try:
+        doc = await users_col.find_one({"user_id": user_id}, {"watchlist": 1})
+    except Exception as e:
+        print(f"⚠️ get_watchlist failed for {user_id}: {e}")
+        return []
+    return (doc or {}).get("watchlist") or []
+
+
+async def notify_watchlist(entry: dict) -> int:
+    """DM every user watching a title when a new copy is indexed.
+
+    Matching is by normalized title (exact, case-insensitive) so a new season
+    or episode of a watched series notifies too. The DM carries a Get button
+    for the freshly indexed copy. Returns the number of users notified.
+    """
+    from .config import client
+    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+    title = (entry.get("title") or "").strip()
+    if not title or client is None:
+        return 0
+    key = _watch_key(title)
+
+    try:
+        docs = await users_col.find({"watchlist.title_key": key}).to_list(length=200)
+    except Exception as e:
+        print(f"⚠️ notify_watchlist query failed: {e}")
+        return 0
+
+    notified = 0
+    channel_id = entry.get("channel_id")
+    message_id = entry.get("message_id")
+    for doc in docs:
+        uid = doc.get("user_id")
+        try:
+            text = (
+                f"🎬 **{title}** is now available!\n\n"
+                f"You're watching this title - grab it below."
+            )
+            reply_markup = None
+            if channel_id and message_id:
+                reply_markup = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "📥 Get File",
+                        callback_data=f"get_file:{channel_id}:{message_id}",
+                    )
+                ]])
+            await client.send_message(uid, text, reply_markup=reply_markup)
+            notified += 1
+        except Exception as e:
+            print(f"⚠️ notify_watchlist DM failed for {uid}: {e}")
+    return notified
+
+
 async def check_banned(message: Message) -> bool:
     """Check if user is banned and send message if they are"""
     uid = message.from_user.id

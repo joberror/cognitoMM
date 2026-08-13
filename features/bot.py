@@ -15,7 +15,7 @@ from pyrogram.handlers import MessageHandler, InlineQueryHandler, CallbackQueryH
 from pyrogram.enums import ChatType
 
 # Import from our modules
-from .config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL, client
+from .config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL, BOT_VERSION, client
 from .logger import logger
 from .database import ensure_indexes
 from .commands import handle_command
@@ -27,6 +27,7 @@ from .deletion_events import handle_raw_update  # Real-time deletion heuristic h
 from .webapp import start_webapp, set_stats_provider
 from .statistics import collect_comprehensive_stats, cache_bot_info
 from .keepalive import start_keep_alive
+from .database_scan import start_db_rescan_monitor
 
 # -------------------------
 # CUSTOM BOT CLASS WITH iter_messages
@@ -173,12 +174,15 @@ async def main():
             # Start orphan prune monitor (primary channel-deletion cleanup)
             asyncio.create_task(start_orphan_prune_monitor())
 
+            # Scheduled /update_db: periodically rescan channels for new content
+            asyncio.create_task(start_db_rescan_monitor())
+
             # Self-keep-alive: ping the public URL so managed hosts (HF
             # Spaces) never put the container to sleep. No-op when no public
             # URL is configured (local dev, VPS, Docker).
             start_keep_alive()
 
-            print("✅ MovieBot is running!")
+            print(f"✅ MovieBot is running! (v{BOT_VERSION})")
             print("🛑 Press Ctrl+C to stop")
 
             # Keep the program running

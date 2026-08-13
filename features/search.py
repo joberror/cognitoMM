@@ -9,6 +9,7 @@ provides the search engine (perform_search), the paginated result sender
 (send_search_results), and the inline query handler (inline_handler).
 """
 
+import asyncio
 import re
 import uuid
 from datetime import datetime, timezone
@@ -85,15 +86,22 @@ async def send_search_results(client, message: Message, results, query, page=1):
     end_idx = min(start_idx + RESULTS_PER_PAGE, total_results)
     page_results = results[start_idx:end_idx]
 
+    # Group duplicate copies (same title/year/type) so each line shows the
+    # best-quality copy; groups with more than one copy get a "Pick" chooser.
+    from .utils import group_duplicate_copies, pick_best_quality
+    groups = group_duplicate_copies(page_results)
+
     # Create header
     search_text = f"```\n"
     search_text += f"Search: \"{query}\"\n"
     search_text += f"Total Results: {total_results} | Page {page}/{total_pages}\n\n"
 
-    # Format each result on current page
+    # Format each group (best copy) on current page
     button_data = []
 
-    for i, result in enumerate(page_results, start=start_idx + 1):
+    for i, group in enumerate(groups, start=start_idx + 1):
+        best, others = pick_best_quality(group)
+        result = best
         title = result.get('title', 'Unknown Title')
         year = result.get('year')
         quality = result.get('quality')
@@ -148,31 +156,74 @@ async def send_search_results(client, message: Message, results, query, page=1):
 
         info_string = ".".join(info_parts) if info_parts else "N/A"
 
-        # Create result line in new refined format
-        search_text += f"{i}. {title} [{info_string}]\n"
+        # Create result line in new refined format, marking duplicate copies
+        line = f"{i}. {title} [{info_string}]"
+        if others:
+            line += f" 🔁+{len(others)}"
+        search_text += line + "\n"
 
         # Store button data
         if channel_id and message_id:
             button_data.append({
                 'number': i,
                 'channel_id': channel_id,
-                'message_id': message_id
+                'message_id': message_id,
+                'group_index': i - (start_idx + 1),
+                'group_size': len(group),
             })
 
     search_text += f"```"
 
+    # TMDb enrichment (cached per title; no-op without an API key) - a compact
+    # details block below the results with rating/genres/IMDb links. Fetched
+    # concurrently so a page of 9 results doesn't serialize 9 HTTP round-trips.
+    from .tmdb_integration import enrich_title, format_enrichment_line
+    best_copies = [pick_best_quality(group)[0] for group in groups]
+    metas = await asyncio.gather(*[
+        enrich_title(b.get("title"), b.get("year"), b.get("type", "Movie"))
+        for b in best_copies
+    ], return_exceptions=True)
+    details_lines = []
+    for i, (_, meta) in enumerate(zip(best_copies, metas), start=start_idx + 1):
+        suffix = format_enrichment_line(meta if isinstance(meta, dict) else None)
+        if suffix:
+            details_lines.append(f"{i}. {suffix}")
+    if details_lines:
+        search_text += "\n" + "\n".join(details_lines)
+
     # Create buttons
     buttons = []
     if button_data:
-        # Create individual file buttons in rows of 3
+        # Store search results for pagination (using UUID to avoid callback data size limits)
+        search_id = str(uuid.uuid4())[:8]
+        from .utils import cleanup_expired_bulk_downloads
+        await cleanup_expired_bulk_downloads(bulk_downloads)
+
+        bulk_downloads[search_id] = {
+            'results': results,  # Store all results for pagination
+            'groups': groups,    # Dedup groups for the quality chooser
+            'query': query,
+            'created_at': datetime.now(timezone.utc),
+            'user_id': message.from_user.id
+        }
+
+        # Create individual file buttons in rows of 3 (Pick = multiple copies)
         current_row = []
         for btn in button_data:
-            current_row.append(
-                InlineKeyboardButton(
-                    f"Get [{btn['number']}]",
-                    callback_data=f"get_file:{btn['channel_id']}:{btn['message_id']}"
+            if btn['group_size'] > 1:
+                current_row.append(
+                    InlineKeyboardButton(
+                        f"Pick [{btn['number']}]",
+                        callback_data=f"choose:{search_id}:{btn['group_index']}"
+                    )
                 )
-            )
+            else:
+                current_row.append(
+                    InlineKeyboardButton(
+                        f"Get [{btn['number']}]",
+                        callback_data=f"get_file:{btn['channel_id']}:{btn['message_id']}"
+                    )
+                )
 
             # Add row when we have 3 buttons or it's last button
             if len(current_row) == 3 or btn == button_data[-1]:
@@ -181,18 +232,6 @@ async def send_search_results(client, message: Message, results, query, page=1):
 
         # Create navigation row with Prev, Get All, and Next buttons
         nav_row = []
-
-        # Store search results for pagination (using UUID to avoid callback data size limits)
-        search_id = str(uuid.uuid4())[:8]
-        from .utils import cleanup_expired_bulk_downloads
-        await cleanup_expired_bulk_downloads(bulk_downloads)
-
-        bulk_downloads[search_id] = {
-            'results': results,  # Store all results for pagination
-            'query': query,
-            'created_at': datetime.now(timezone.utc),
-            'user_id': message.from_user.id
-        }
 
         # Previous button
         if page > 1:
@@ -286,7 +325,19 @@ async def inline_handler(client, inline_query):
     # Exact matches first
     exact_cursor = movies_col.find({"title": {"$regex": query, "$options": "i"}}).limit(10)
     exact_results = await exact_cursor.to_list(length=10)
-    
+
+    # Attach TMDb poster thumbnails to the first few exact matches (cached per
+    # title; no-op when no TMDB_API key is configured).
+    from .tmdb_integration import enrich_title
+    poster_map = {}
+    metas = await asyncio.gather(*[
+        enrich_title(r.get("title"), r.get("year"), r.get("type", "Movie"))
+        for r in exact_results[:5]
+    ], return_exceptions=True)
+    for r, meta in zip(exact_results[:5], metas):
+        if isinstance(meta, dict) and meta.get("poster_url"):
+            poster_map[r.get("_id")] = meta["poster_url"]
+
     # Add exact matches to results
     for result in exact_results:
         title = result.get('title', 'Unknown')
@@ -306,7 +357,7 @@ async def inline_handler(client, inline_query):
                     f"📅 Year: {year or 'N/A'}\n"
                     f"🎞️ Quality: {quality or 'N/A'}\n"
                     f"📺 Channel: {result.get('channel_title', 'N/A')}"                    ),
-                thumbnail_url=None,
+                thumbnail_url=poster_map.get(result.get('_id')),
                 id=f"movie_{result.get('_id')}"
             )
         )

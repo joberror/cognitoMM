@@ -169,9 +169,32 @@ All callbacks (except `terms#`) require `should_process_command_for_user` + term
 
 ---
 
-## 8. Data flows (memorize)
+## 8. Data flows (memorize)### Feature cluster (added 2026-08)
+
+- **Quality dedup (`utils.py`)** — `quality_rank` / `pick_best_quality` /
+  `group_duplicate_copies`; `/search` shows the best-quality copy per title
+  (🔁+N marker) and a `Pick [n]` button opens a quality chooser (`choose:`
+  callback in `callbacks.py`).
+- **TMDb enrichment (`tmdb_integration.py`)** — `enrich_title` (search +
+  details API, cached 6h per title+year; no-op without `TMDB_API`). Newly
+  indexed entries get `tmdb_poster`/`tmdb_rating`/`tmdb_genres`/
+  `tmdb_overview`/`imdb_id` (gate: `TMDB_ENRICH_INDEX`). Search results show a
+  ⭐/🎭/IMDb details block; inline results use poster `thumbnail_url`;
+  `/enrich` backfills older entries.
+- **Watchlist (`user_management.py`)** — `/watch` `/unwatch` `/watchlist`;
+  `notify_watchlist` DMs watchers (normalized-title match) when a new copy is
+  indexed.
+- **Scheduled rescan (`database_scan.py`)** — `start_db_rescan_monitor`
+  (started in `bot.py`) runs `incremental_rescan` per channel every
+  `DB_RESCAN_INTERVAL_MINUTES`; cursor stored in `settings_col`
+  (`scan_cursor:<channel_id>`), first run bounded to the last 1000 msgs.
+- **Admin `/logs [n]`** — recent `logs_col` entries in-chat. **`/random`** —
+  random indexed title (poster photo when available). **`/genres`** — browse
+  by stored `tmdb_genres` (aggregation with counts; `$regex` array match).
 
 ### Indexing
+
+
 ```
 channel post → on_message (indexing.py)
   ├─ user input routing (user_input_events key "chatid_userid"; premium_* input_type → premium_commands)
@@ -290,12 +313,37 @@ Gate checks inline: is_feature_premium_only(name) && !is_premium_user && !is_adm
 | `BROADCAST_TEST_MODE` | False | use test users |
 | `BROADCAST_TEST_USERS` | "" | comma-separated IDs |
 | `PORT` | 7860 | Flask port (webapp.py) |
+| `TMDB_ENRICH_INDEX` | true | enrich new indexed entries with TMDb poster/genres/rating/imdb (powers /genres, posters) |
+| `DB_RESCAN_ENABLED` | true | scheduled incremental rescan (background /update_db) |
+| `DB_RESCAN_INTERVAL_MINUTES` | 360 | rescan cadence (every 6 hours) |
 | `KEEP_ALIVE_URL` | None | public URL the bot pings to keep HF Spaces awake; else auto-derived from `SPACE_HOST`/`SPACE_ID` |
 | `KEEP_ALIVE_INTERVAL` | 240 | self-ping seconds (must stay below the host's sleep timer, e.g. HF's 15 min) |
 | `KEEP_ALIVE_ENABLED` | true | `false` disables the self-keep-alive |
 | `CLEAN_SESSIONS` | 0 | `1` wipes `.session` files at startup (`run.sh` only) |
 
 ---
+
+## 11.5 Versioning (BOT_VERSION)
+
+The bot version has ONE source of truth: `BOT_VERSION` in `features/config.py`
+(re-exported as `features.__version__`). It's surfaced on the webapp `/`
+endpoint and in the startup banner (`MovieBot is running! (vX.Y.Z)`).
+
+**Policy: every new feature bumps the version.** The pre-commit hook runs
+`scripts/check_version_bump.py`, which rejects a staged commit that adds a new
+feature — a new `cmd_*`/`handle_*` handler, a new `elif command ==` router
+entry, or a new module under `features/` — without a corresponding `BOT_VERSION`
+change. Bump with:
+
+```bash
+make bump          # minor: new feature (default)
+make bump-patch    # patch: small change / bugfix
+make bump-major    # major
+```
+
+`scripts/bump_version.py` rewrites the constant and writes the new version to
+`LATEST_RELEASE`. Deploy-time override: `BOT_VERSION` env var (webapp reads it
+first). Bypass the hook with `SKIP_VERSION_CHECK=1` (not recommended).
 
 ## 12. Testing & deployment
 

@@ -147,6 +147,22 @@ async def handle_command(client, message: Message):
         await cmd_stat(client, message)
     elif command == 'quickstat':
         await cmd_quickstat(client, message)
+    elif command == 'random':
+        await cmd_random(client, message)
+    elif command == 'genres':
+        await cmd_genres(client, message)
+    elif command == 'watch':
+        await cmd_watch(client, message)
+    elif command == 'unwatch':
+        await cmd_unwatch(client, message)
+    elif command == 'watchlist':
+        await cmd_watchlist(client, message)
+    elif command == 'logs':
+        await cmd_logs(client, message)
+    elif command == 'enrich':
+        await cmd_enrich(client, message)
+    elif command == 'enrich_status':
+        await cmd_enrich_status(client, message)
     else:
         # Unknown command
         await message.reply_text("❓ Unknown command. Use /help to see available commands.")
@@ -168,12 +184,16 @@ USER_HELP = """
 ╭─ 📌 Discover
 │ /recent                Newly added
 │ /trending              Trending now
+│ /random                Surprise me
+│ /genres                Browse by genre
 │ /request               Request missing title
 ╰─────────────────────
 
 ╭─ 👤 Me
 │ /my_history            Your searches
 │ /my_stat               Usage + premium info
+│ /watch <title>         Watchlist (get notified)
+│ /watchlist             Your watched titles
 │ /help                  This menu
 ╰─────────────────────
 
@@ -220,6 +240,9 @@ ADMIN_HELP = """
 │ /manual_deletion <t>   Delete by title
 │ /indexing_stats        Diagnose indexing skips
 │ /reset_stats           Reset counters
+│ /logs [n]              Recent audit log entries
+│ /enrich [n]            Backfill TMDb metadata
+│ /enrich_status         TMDb backfill progress
 │ /reset                 WIPE all indexed data (confirm)
 ╰─────────────────────
 
@@ -674,6 +697,301 @@ async def cmd_trending(client, message: Message):
             "**Trending**\n\n"
             "Unable to fetch trending data. Please try again later."
         )
+
+
+async def cmd_random(client, message: Message):
+    """Handle /random - pick a random indexed title (poster when available)"""
+    import random
+
+    if await check_banned(message):
+        return
+
+    try:
+        total = await movies_col.count_documents({})
+        if not total:
+            return await message.reply_text(
+                "📭 <b>No Content Found</b>\n\nNo movies or series are indexed yet.",
+                parse_mode=ParseMode.HTML,
+            )
+        skip = random.randrange(total)
+        doc = await movies_col.find_one({}, skip=skip)
+        if not doc:
+            return await message.reply_text("📭 No content found.")
+
+        title = doc.get("title", "Unknown")
+        year = doc.get("year")
+        quality = doc.get("quality")
+        movie_type = doc.get("type", "Movie")
+        poster = doc.get("tmdb_poster")
+
+        meta = {}
+        if doc.get("tmdb_rating"):
+            meta["rating"] = doc.get("tmdb_rating")
+        if doc.get("tmdb_genres"):
+            meta["genres"] = doc.get("tmdb_genres")
+        if doc.get("imdb_id"):
+            meta["imdb_id"] = doc.get("imdb_id")
+        from .tmdb_integration import format_enrichment_line
+        suffix = format_enrichment_line(meta or None)
+
+        caption = (
+            f"🎲 <b>Random Pick</b>\n\n"
+            f"🎬 <b>{title}</b> ({year or 'N/A'}) · {movie_type}\n"
+            f"🎞️ Quality: {quality or 'N/A'}"
+        )
+        if suffix:
+            caption += f"\n{suffix}"
+
+        buttons = None
+        if doc.get("channel_id") and doc.get("message_id"):
+            buttons = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "📥 Get File",
+                    callback_data=f"get_file:{doc['channel_id']}:{doc['message_id']}",
+                )
+            ]])
+
+        if poster:
+            try:
+                await message.reply_photo(poster, caption=caption, reply_markup=buttons)
+                return
+            except Exception as e:
+                print(f"⚠️ /random poster send failed ({poster}): {e}")
+        await message.reply_text(
+            caption,
+            reply_markup=buttons,
+            parse_mode=ParseMode.HTML,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+    except Exception as e:
+        print(f"Error in random command: {e}")
+        await message.reply_text("❌ Unable to pick a random title. Please try again later.")
+
+
+async def cmd_genres(client, message: Message):
+    """Handle /genres - browse indexed titles by TMDb genre.
+
+    /genres            -> list genres with counts
+    /genres <name>     -> browse titles in that genre
+    """
+    if await check_banned(message):
+        return
+
+    parts = message.text.split(maxsplit=1)
+    genre_query = parts[1].strip() if len(parts) > 1 else ""
+
+    try:
+        if not genre_query:
+            pipeline = [
+                {"$unwind": "$tmdb_genres"},
+                {"$group": {"_id": "$tmdb_genres", "count": {"$sum": 1}}},
+                {"$sort": {"count": -1}},
+            ]
+            counts = await movies_col.aggregate(pipeline).to_list(length=100)
+            if not counts:
+                return await message.reply_text(
+                    "🎭 <b>No genre data yet</b>\n\n"
+                    "Run <code>/enrich</code> (admin) to backfill TMDb genres for indexed titles.",
+                    parse_mode=ParseMode.HTML,
+                )
+            lines = [f"{i}. {c['_id']} — {c['count']}" for i, c in enumerate(counts, 1)]
+            text = "🎭 <b>Genres</b>\n\n" + "\n".join(lines)
+            text += "\n\nSend <code>/genres &lt;name&gt;</code> to browse a genre."
+            return await message.reply_text(text, parse_mode=ParseMode.HTML)
+
+        # Browse a genre (case-insensitive match on stored genre names)
+        entries = await movies_col.find(
+            {"tmdb_genres": {"$regex": f"^{re.escape(genre_query)}$", "$options": "i"}},
+            {"title": 1, "year": 1, "quality": 1, "channel_id": 1, "message_id": 1, "type": 1, "tmdb_rating": 1},
+        ).limit(12).to_list(length=12)
+
+        if not entries:
+            return await message.reply_text(f"🎭 No indexed titles found in genre <b>{genre_query}</b>.", parse_mode=ParseMode.HTML)
+
+        lines = []
+        buttons = []
+        for i, e in enumerate(entries, 1):
+            rating = f" ⭐{e.get('tmdb_rating')}" if e.get("tmdb_rating") else ""
+            lines.append(f"{i}. <b>{e.get('title')}</b> ({e.get('year') or 'N/A'}) [{e.get('quality') or 'N/A'}]{rating}")
+            if e.get("channel_id") and e.get("message_id"):
+                buttons.append(InlineKeyboardButton(
+                    f"Get {i}", callback_data=f"get_file:{e['channel_id']}:{e['message_id']}"
+                ))
+        text = f"🎭 <b>{genre_query}</b> ({len(entries)} titles)\n\n" + "\n".join(lines)
+        reply_markup = InlineKeyboardMarkup([buttons[i:i+4] for i in range(0, len(buttons), 4)]) if buttons else None
+        await message.reply_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+    except Exception as e:
+        print(f"Error in genres command: {e}")
+        await message.reply_text("❌ Unable to browse genres. Please try again later.")
+
+
+async def cmd_watch(client, message: Message):
+    """Handle /watch <title> - add a title to your watchlist."""
+    from .user_management import add_to_watchlist
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        return await message.reply_text(
+            "👁️ <b>Watchlist</b>\n\nUsage: <code>/watch &lt;title&gt;</code>\n"
+            "You'll be notified when a new copy of the title is indexed.",
+            parse_mode=ParseMode.HTML,
+        )
+    title = parts[1].strip()
+    added = await add_to_watchlist(message.from_user.id, title)
+    if added:
+        await message.reply_text(f"👁️ <b>{title}</b> added to your watchlist.\n\nYou'll be notified when it's available.", parse_mode=ParseMode.HTML)
+    else:
+        await message.reply_text(f"👁️ <b>{title}</b> is already on your watchlist.", parse_mode=ParseMode.HTML)
+
+
+async def cmd_unwatch(client, message: Message):
+    """Handle /unwatch <title> - remove a title from your watchlist."""
+    from .user_management import remove_from_watchlist
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        return await message.reply_text("👁️ Usage: <code>/unwatch &lt;title&gt;</code>", parse_mode=ParseMode.HTML)
+    removed = await remove_from_watchlist(message.from_user.id, parts[1].strip())
+    if removed:
+        await message.reply_text(f"✅ <b>{parts[1].strip()}</b> removed from your watchlist.", parse_mode=ParseMode.HTML)
+    else:
+        await message.reply_text(f"👁️ <b>{parts[1].strip()}</b> is not on your watchlist.", parse_mode=ParseMode.HTML)
+
+
+async def cmd_watchlist(client, message: Message):
+    """Handle /watchlist - show your watched titles."""
+    from .user_management import get_watchlist
+
+    entries = await get_watchlist(message.from_user.id)
+    if not entries:
+        return await message.reply_text(
+            "👁️ <b>Your watchlist is empty</b>\n\n"
+            "Use <code>/watch &lt;title&gt;</code> to get notified when a title is indexed.",
+            parse_mode=ParseMode.HTML,
+        )
+    lines = [f"{i}. <b>{e.get('title')}</b> ({e.get('type') or 'Movie'})" for i, e in enumerate(entries, 1)]
+    text = "👁️ <b>Your Watchlist</b>\n\n" + "\n".join(lines)
+    text += "\n\nRemove with <code>/unwatch &lt;title&gt;</code>"
+    await message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def cmd_logs(client, message: Message):
+    """Admin: view the most recent audit-log entries from the database."""
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+
+    parts = message.text.split()
+    limit = 10
+    if len(parts) > 1 and parts[1].isdigit():
+        limit = min(int(parts[1]), 50)
+
+    try:
+        docs = await logs_col.find({}).sort("ts", -1).limit(limit).to_list(length=limit)
+        if not docs:
+            return await message.reply_text("📋 No log entries yet.")
+
+        lines = []
+        for d in docs:
+            ts = d.get("ts")
+            ts_str = ts.strftime("%m-%d %H:%M") if hasattr(ts, "strftime") else str(ts)[:16]
+            by = d.get("by")
+            target = d.get("target")
+            extra = d.get("extra") or {}
+            detail = ", ".join(f"{k}: {v}" for k, v in list(extra.items())[:3])
+            line = f"<code>{ts_str}</code> <b>{d.get('action')}</b>"
+            if by:
+                line += f" by {by}"
+            if target:
+                line += f" → {target}"
+            if detail:
+                line += f" | {detail}"
+            lines.append(line)
+
+        text = f"📋 <b>Recent Logs</b> (last {len(docs)})\n\n" + "\n".join(lines)
+        await message.reply_text(text, parse_mode=ParseMode.HTML, link_preview_options=LinkPreviewOptions(is_disabled=True))
+    except Exception as e:
+        print(f"Error in logs command: {e}")
+        await message.reply_text("❌ Unable to fetch logs.")
+
+
+async def cmd_enrich(client, message: Message):
+    """Admin: backfill TMDb metadata (poster/genres/rating/imdb) for indexed entries."""
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+
+    from .tmdb_integration import enrich_title, TMDB_ENRICH_INDEX
+    if not TMDB_ENRICH_INDEX:
+        return await message.reply_text("ℹ️ TMDb enrichment is disabled (set TMDB_ENRICH_INDEX=true in .env).")
+
+    parts = message.text.split()
+    limit = 30
+    if len(parts) > 1 and parts[1].isdigit():
+        limit = min(int(parts[1]), 200)
+
+    status = await message.reply_text("🔍 Enriching entries with TMDb metadata...")
+    try:
+        docs = await movies_col.find(
+            {"tmdb_genres": {"$exists": False}},
+            {"title": 1, "year": 1, "type": 1, "_id": 1, "imdb": 1},
+        ).limit(limit).to_list(length=limit)
+
+        enriched = 0
+        for doc in docs:
+            meta = await enrich_title(doc.get("title"), doc.get("year"), doc.get("type", "Movie"))
+            if meta:
+                set_fields = {
+                    "tmdb_poster": meta.get("poster_url"),
+                    "tmdb_rating": meta.get("rating"),
+                    "tmdb_genres": meta.get("genres"),
+                    "tmdb_overview": meta.get("overview"),
+                    "imdb_id": meta.get("imdb_id") or doc.get("imdb"),
+                }
+                await movies_col.update_one({"_id": doc["_id"]}, {"$set": set_fields})
+                enriched += 1
+            await asyncio.sleep(0.2)  # gentle pace toward TMDb rate limits
+
+        await status.edit_text(f"✅ Enriched <b>{enriched}/{len(docs)}</b> entries with TMDb metadata.", parse_mode=ParseMode.HTML)
+    except Exception as e:
+        print(f"Error in enrich command: {e}")
+        await status.edit_text("❌ Enrichment failed. Please try again later.")
+
+
+async def cmd_enrich_status(client, message: Message):
+    """Admin: show how many indexed titles still lack TMDb metadata."""
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+
+    try:
+        total = await movies_col.count_documents({})
+        pending = await movies_col.count_documents({"tmdb_genres": {"$exists": False}})
+        no_match = await movies_col.count_documents({"tmdb_genres": []})
+        enriched = total - pending - no_match
+
+        done_pct = (enriched / total * 100) if total else 100.0
+        filled = int(done_pct / 5)
+        bar = "█" * filled + "░" * (20 - filled)
+
+        text = (
+            "📊 <b>TMDb Enrichment Status</b>\n\n"
+            f"🎬 Total indexed: <b>{total}</b>\n"
+            f"✅ Enriched: <b>{enriched}</b> ({done_pct:.1f}%)\n"
+            f"⏳ Pending: <b>{pending}</b>\n"
+            f"🚫 No TMDb match: <b>{no_match}</b>\n\n"
+            f"<code>{bar}</code>\n\n"
+            f"💡 Run <code>/enrich</code> or <code>scripts/backfill_enrichment.py</code> to backfill pending titles."
+        )
+        await message.reply_text(text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        print(f"Error in enrich_status command: {e}")
+        await message.reply_text("❌ Unable to fetch enrichment status.")
 
 
 # -------------------------

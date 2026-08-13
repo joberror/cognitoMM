@@ -20,6 +20,16 @@ print("🎬 MovieBot - Bot Session")
 BOT_START_TIME = datetime.now(timezone.utc)
 
 # -------------------------
+# VERSION
+# -------------------------
+# Canonical bot version (single source of truth). Bump with
+# `make bump` (minor) / `make bump-patch` / `make bump-major`, or
+# `scripts/bump_version.py --set X.Y.Z`. The pre-commit hook fails commits
+# that add a new feature without bumping this constant. The webapp `/`
+# endpoint exposes it (overridable via the BOT_VERSION env var).
+BOT_VERSION = "1.1.0"
+
+# -------------------------
 # CONFIG / ENV
 # -------------------------
 API_ID = int(os.getenv("API_ID", "0"))
@@ -31,6 +41,9 @@ MONGO_DB = os.getenv("MONGO_DB", "moviebot")
 ADMINS = [int(x) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 LOG_CHANNEL = os.getenv("LOG_CHANNEL")             # optional - e.g. -1001234567890
 FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", "68"))
+# Scheduled /update_db background rescan (incremental per channel)
+DB_RESCAN_ENABLED = os.getenv("DB_RESCAN_ENABLED", "true").lower() in ("1", "true", "yes")
+DB_RESCAN_INTERVAL_MINUTES = int(os.getenv("DB_RESCAN_INTERVAL_MINUTES", "360"))
 AUTO_INDEX_DEFAULT = os.getenv("AUTO_INDEXING", "True").lower() in ("1", "true", "yes")
 TMDB_API = os.getenv("TMDB_API", "")               # TMDb API key for request feature
 START_MESSAGE = os.getenv("START_MESSAGE", os.getenv("START_MESSAGEE", "Welcome to the bot! Use buttons below to navigate."))

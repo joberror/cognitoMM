@@ -340,9 +340,33 @@ async def index_message(msg):
             await movies_col.insert_one(entry)
             print(f"[DIAGNOSTIC] {timestamp} - Successfully inserted message {msg.id} into database")
             indexing_stats['successful_inserts'] += 1
-            from .user_management import log_action
+            from .user_management import log_action, notify_watchlist
             await log_action("indexed_message", extra={"title": entry["title"], "channel_id": entry["channel_id"], "message_id": entry["message_id"]})
             print(f"[INDEXED] {entry['title']} from {entry['channel_title']}")
+
+            # Post-index side effects (both fire-and-forget tolerant):
+            # 1. Enrich the entry with TMDb metadata (poster/genres/rating) -
+            #    cached per title so per-episode series indexing is cheap.
+            # 2. Notify users watching this title (watchlist).
+            try:
+                from .tmdb_integration import TMDB_ENRICH_INDEX, enrich_title
+                if TMDB_ENRICH_INDEX:
+                    meta = await enrich_title(entry.get("title"), entry.get("year"), entry.get("type", "Movie"))
+                    if meta:
+                        set_fields = {
+                            "tmdb_poster": meta.get("poster_url"),
+                            "tmdb_rating": meta.get("rating"),
+                            "tmdb_genres": meta.get("genres"),
+                            "tmdb_overview": meta.get("overview"),
+                            "imdb_id": meta.get("imdb_id") or entry.get("imdb"),
+                        }
+                        await movies_col.update_one({"_id": entry["_id"]}, {"$set": set_fields})
+            except Exception as enrich_err:
+                print(f"⚠️ TMDb enrichment failed for {entry.get('title')}: {enrich_err}")
+            try:
+                await notify_watchlist(entry)
+            except Exception as notify_err:
+                print(f"⚠️ Watchlist notify failed for {entry.get('title')}: {notify_err}")
         except Exception as db_error:
             print(f"[DIAGNOSTIC] {timestamp} - Database insertion failed for message {msg.id}: {str(db_error)}")
             # Check if it's a duplicate key error

@@ -348,6 +348,70 @@ def format_recent_output(categorized_results, total_files=None, total_movies=Non
 
     return output_text
 
+# ------------------------------------------------------------------ #
+#  Quality ranking & best-copy selection (search dedup / chooser)      #
+# ------------------------------------------------------------------ #
+
+# Resolution ranks: higher is better. Keys are matched as substrings of the
+# stored quality string (e.g. "1080p", "4K UHD", "720p HEVC").
+QUALITY_RANKS = {
+    "2160p": 5, "4k": 5,
+    "1080p": 4, "fhd": 4,
+    "720p": 3, "hd": 3,
+    "480p": 2,
+    "360p": 1,
+}
+
+
+def quality_rank(quality) -> int:
+    """Rank a quality string (e.g. '1080p', '4K') from 0 (unknown) to 5 (4K)."""
+    q = str(quality or "").lower()
+    for key, rank in QUALITY_RANKS.items():
+        if key in q:
+            return rank
+    return 0
+
+
+def pick_best_quality(entries) -> tuple:
+    """Return (best, others) for a list of duplicate copies.
+
+    ``best`` is the highest-ranked quality copy (ties broken by keeping the
+    first-seen entry); ``others`` are the remaining copies in original order.
+    """
+    if not entries:
+        return None, []
+    best = entries[0]
+    others = []
+    for entry in entries[1:]:
+        if quality_rank(entry.get("quality")) > quality_rank(best.get("quality")):
+            others.append(best)
+            best = entry
+        else:
+            others.append(entry)
+    return best, others
+
+
+def group_duplicate_copies(entries):
+    """Group a list of DB entries into (title, year, type) buckets.
+
+    Returns a list of groups (each a list of entry dicts). Copies of the same
+    title are grouped so search can dedupe and offer a quality chooser.
+    """
+    buckets = {}
+    order = []
+    for entry in entries:
+        key = (
+            str(entry.get("title") or "").strip().lower(),
+            entry.get("year"),
+            (entry.get("type") or "Movie").lower(),
+        )
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append(entry)
+    return [buckets[key] for key in order]
+
+
 async def resolve_chat_ref(ref: str, client):
     """Use client to resolve a channel reference (id, t.me/slug, @username)."""
     r = ref.strip()

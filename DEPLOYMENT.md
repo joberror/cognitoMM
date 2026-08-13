@@ -67,6 +67,9 @@ cp .env.example .env
 | `KEEP_ALIVE_INTERVAL` | `240` | Self-ping interval in seconds (must stay below the host's sleep timer, e.g. HF's 15 min) |
 | `KEEP_ALIVE_ENABLED` | `true` | Set `false` to disable the self-keep-alive |
 | `CLEAN_SESSIONS` | `0` | Set `1` to wipe `.session` files at startup (`run.sh` only) — see *Session file issues* below |
+| `TMDB_ENRICH_INDEX` | `true` | Enrich newly indexed entries with TMDb metadata (poster, genres, rating, IMDb) — powers `/genres` and posters on `/random`/inline |
+| `DB_RESCAN_ENABLED` | `true` | Scheduled incremental rescan (background `/update_db`) for all registered channels |
+| `DB_RESCAN_INTERVAL_MINUTES` | `360` | Rescan cadence (every 6 hours) |
 
 > **Keep-alive on VPS/Docker:** the self-ping exists for managed hosts (HF Spaces) —
 > VPS/Docker containers don't sleep, so `.env.example` ships with
@@ -98,6 +101,22 @@ The stack starts two containers:
 
 - **`cognito_bot`** — The Telegram bot (auto-restarts on crash)
 - **`cognito_mongo`** — MongoDB 7 (data persisted in a Docker volume)
+
+### Smoke-test the commands
+
+Once the stack is up, message the bot in Telegram (admin commands only work for
+the user IDs listed in `ADMINS`):
+
+| Command | What to expect |
+|---------|----------------|
+| `/search <title>` | Results with deduplicated copies + `Pick [n]` quality chooser; TMDb rating/genres/IMDb when `TMDB_API` is set |
+| `/random` | A random indexed title (poster photo once metadata is enriched) |
+| `/genres` | Genre list with counts (needs enriched metadata — run `/enrich` once to backfill) |
+| `/watch <title>` / `/watchlist` | Adds to your watchlist; you get a DM the moment a new copy is indexed |
+| `/logs` | Recent audit-log entries from `logs_col` |
+| `/enrich [n]` / `/enrich_status` | Backfill TMDb metadata / show enriched–pending–no-match progress |
+
+See `info/commands.md` for the full command reference.
 
 ### Health Checks
 

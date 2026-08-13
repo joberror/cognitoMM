@@ -98,6 +98,51 @@ async def callback_handler(client, callback_query: CallbackQuery):
             )
             return
 
+        if data.startswith("choose:"):
+            # Quality chooser: pick a specific copy of a deduped search result
+            try:
+                _, search_id, group_idx = data.split(":")
+                group_idx = int(group_idx)
+            except (ValueError, IndexError):
+                return await callback_query.answer("⚠️ Invalid chooser data.")
+
+            group_data = bulk_downloads.get(search_id, {})
+            # Ownership check: a callback can only open a chooser for a search
+            # this user initiated (mirrors the page: flow's user_id guard).
+            if group_data.get("user_id") != user_id:
+                return await callback_query.answer("🚫 This search belongs to another user.")
+
+            groups = group_data.get("groups") or []
+            if group_idx >= len(groups) or not groups:
+                return await callback_query.answer("⚠️ This search expired. Run /search again.")
+
+            copies = groups[group_idx]
+            title = copies[0].get("title", "Unknown")
+            lines = []
+            buttons = []
+            for i, copy in enumerate(copies, 1):
+                quality = copy.get("quality") or "N/A"
+                rip = copy.get("rip") or ""
+                size_str = format_file_size(copy.get("file_size"))
+                details = ", ".join(x for x in (quality, rip, size_str) if x and x != "N/A")
+                lines.append(f"{i}. {details or 'N/A'}")
+                if copy.get("channel_id") and copy.get("message_id"):
+                    buttons.append(InlineKeyboardButton(
+                        f"{quality}",
+                        callback_data=f"get_file:{copy['channel_id']}:{copy['message_id']}",
+                    ))
+
+            text = f"🎞️ <b>{title}</b> — choose a copy:\n\n" + "\n".join(lines)
+            reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
+            await callback_query.message.edit_text(
+                text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.HTML,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+            await callback_query.answer("📥 Select a copy")
+            return
+
         if data.startswith("get_file:"):
             # Handle single file request
             _, channel_id, message_id = data.split(":")

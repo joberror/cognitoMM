@@ -16,7 +16,7 @@ from .database import (
     users_col, movies_col, channels_col, premium_users_col,
     requests_col, logs_col
 )
-from .config import BOT_START_TIME
+from .config import BOT_START_TIME, BOT_VERSION
 from .utils import format_file_size
 
 # Telegram bot identity fetched once at startup (see cache_bot_info). Kept
@@ -473,6 +473,7 @@ async def collect_bot_info(admin_id=None):
             bot_info['bot_name'] = 'Unknown (No Client)'
         
         # System information
+        bot_info['bot_version'] = BOT_VERSION
         bot_info['python_version'] = sys.version.split()[0]
         bot_info['platform'] = platform.system()
         bot_info['platform_release'] = platform.release()
@@ -554,6 +555,7 @@ def format_stats_output(stats):
                 pass
         
         output.append("")
+        output.append(f"┠ <b>Version:</b> <code>{bot_info.get('bot_version', 'Unknown')}</code>")
         output.append(f"┠ <b>Python:</b> {bot_info.get('python_version', 'Unknown')}")
         output.append(f"┠ <b>Platform:</b> {bot_info.get('platform', 'Unknown')} {bot_info.get('platform_release', '')}")
         output.append(f"┠ <b>Architecture:</b> {bot_info.get('architecture', 'Unknown')}")
@@ -922,6 +924,7 @@ async def export_stats_csv(stats):
             writer.writerow(['Bot', 'Username', bot_info.get('bot_username', 'Unknown')])
             writer.writerow(['Bot', 'Bot ID', bot_info.get('bot_id', 'Unknown')])
             writer.writerow(['Bot', 'Uptime', bot_info.get('uptime_formatted', 'Unknown')])
+            writer.writerow(['Bot', 'Bot Version', bot_info.get('bot_version', 'Unknown')])
             writer.writerow(['Bot', 'Python Version', bot_info.get('python_version', 'Unknown')])
             writer.writerow(['Bot', 'Platform', bot_info.get('platform', 'Unknown')])
             if bot_info.get('invoked_by_admin_id'):

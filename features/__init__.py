@@ -17,7 +17,7 @@ from .config import (
     ADMINS, LOG_CHANNEL, FUZZY_THRESHOLD, AUTO_INDEX_DEFAULT,
     bulk_downloads, file_deletions, file_deletions_lock, INDEX_EXTENSIONS,
     message_queue, queue_processor_task, active_indexing_threads,
-    user_input_events, TempData, temp_data,
+    user_input_events, TempData, temp_data, BOT_VERSION,
     client
 )
 
@@ -85,7 +85,7 @@ __all__ = [
     'bulk_downloads', 'file_deletions', 'file_deletions_lock', 'INDEX_EXTENSIONS',
     'message_queue', 'queue_processor_task', 'active_indexing_threads',
     'indexing_stats', 'prune_stats', 'user_input_events', 'TempData', 'temp_data',
-    'client', 'get_readable_time',
+    'client', 'BOT_VERSION', 'get_readable_time',
     
     # Database module exports
     'mongo', 'db', 'movies_col', 'users_col', 'channels_col',
@@ -124,4 +124,6 @@ __all__ = [
     'cleanup_expired_premium'
 ]
 
-__version__ = '1.0.0'
+# Version lives in config.py (single source of truth); re-exported here so
+# `from features import __version__` stays accurate.
+__version__ = BOT_VERSION

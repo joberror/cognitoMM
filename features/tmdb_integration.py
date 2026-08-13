@@ -5,6 +5,7 @@ This module handles all interactions with The Movie Database (TMDb) API
 for searching movies and TV series.
 """
 
+import os
 import aiohttp
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
@@ -13,6 +14,11 @@ import random
 
 
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
+TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
+
+# Enrich new indexed entries with TMDb metadata (poster/genres/rating) when a
+# TMDB_API key is configured. Set TMDB_ENRICH_INDEX=false to disable.
+TMDB_ENRICH_INDEX = os.getenv("TMDB_ENRICH_INDEX", "true").lower() in ("1", "true", "yes")
 
 # Cache for trending data (session-based)
 _trending_cache = {
@@ -398,6 +404,143 @@ def format_trending_list(items: List[Dict], category: str) -> str:
             lines.append(f"{i}. `{title}` - {year}, {rating}, {link}")
 
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------------ #
+#  Title enrichment (posters, genres, ratings for indexed/search content) #
+# ------------------------------------------------------------------ #
+
+# TTL cache keyed by (content_type|title|year) so repeat displays and
+# per-episode series indexing only cost one TMDb lookup per unique title.
+_enrich_cache: Dict[str, dict] = {}
+_ENRICH_CACHE_TTL = timedelta(hours=6)
+
+
+def _enrich_key(title: str, year=None, content_type: str = "Movie") -> str:
+    return f"{(content_type or 'Movie').lower()}|{str(title or '').strip().lower()}|{year or ''}"
+
+
+def get_cached_enrichment(title: str, year=None, content_type: str = "Movie") -> Optional[Dict]:
+    """Return cached enrichment data if still fresh, else None."""
+    item = _enrich_cache.get(_enrich_key(title, year, content_type))
+    if item and item.get("expires") and datetime.now() < item["expires"]:
+        return item["data"]
+    return None
+
+
+def set_cached_enrichment(title: str, year=None, content_type: str = "Movie", data=None):
+    """Cache enrichment data (data=None caches a miss so we don't re-hit TMDb)."""
+    _enrich_cache[_enrich_key(title, year, content_type)] = {
+        "data": data,
+        "expires": datetime.now() + _ENRICH_CACHE_TTL,
+    }
+
+
+async def enrich_title(title: str, year=None, content_type: str = "Movie", use_cache: bool = True) -> Optional[Dict]:
+    """
+    Fetch TMDb details (poster, rating, genres, overview, imdb_id) for a title.
+
+    Uses the TMDb search endpoint (title+year) then the details endpoint (genre
+    names, overview). Results are cached per title+year for 6 hours.
+
+    Returns a dict or None when the API is unconfigured, nothing matches, or
+    the network fails - callers must tolerate None.
+    """
+    if not TMDB_API or TMDB_API == "your_api_key_here" or not title:
+        return None
+
+    if use_cache:
+        cached = get_cached_enrichment(title, year, content_type)
+        if cached is not None:
+            return cached
+
+    endpoint = "movie" if (content_type or "Movie") == "Movie" else "tv"
+    params = {"api_key": TMDB_API, "query": title, "language": "en-US", "page": 1}
+    if year and str(year).isdigit():
+        if endpoint == "movie":
+            params["year"] = str(year)
+        else:
+            params["first_air_date_year"] = str(year)
+
+    data = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            for attempt in range(3):
+                async with session.get(f"{TMDB_BASE_URL}/search/{endpoint}", params=params, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        break
+                    # Non-200 (typically 429 rate limit on bulk backfills) - back
+                    # off and retry so throttled titles aren't counted as misses.
+                    if attempt < 2:
+                        await asyncio.sleep(1.5 * (attempt + 1))
+    except Exception as e:
+        # Network/API error: do NOT cache a miss (6h TTL would block re-enriching
+        # a title after a transient outage). Only genuine no-results are cached.
+        print(f"TMDb enrich search error: {e}")
+        return None
+
+    results = (data or {}).get("results", [])
+    if not results:
+        # Genuine no-match - cache the miss so we don't re-hit TMDb repeatedly.
+        set_cached_enrichment(title, year, content_type, None)
+        return None
+
+    item = results[0]
+    tmdb_id = item.get("id")
+
+    # Details call for genre names + full overview (search results only carry
+    # numeric genre ids).
+    details = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            for attempt in range(3):
+                async with session.get(
+                    f"{TMDB_BASE_URL}/{endpoint}/{tmdb_id}",
+                    params={"api_key": TMDB_API, "language": "en-US"},
+                    timeout=10,
+                ) as response:
+                    if response.status == 200:
+                        details = await response.json()
+                        break
+                    if attempt < 2:
+                        await asyncio.sleep(1.5 * (attempt + 1))
+    except Exception as e:
+        print(f"TMDb enrich details error: {e}")
+        # Details failure is not a no-match - skip caching so a later call can
+        # pick up genre names/overview once the API recovers.
+        return None
+
+    source = details or item
+    # The details response includes imdb_id directly - no extra external_ids
+    # call needed (saves 1/3 of the API calls on bulk enrichment runs).
+    imdb_id = source.get("imdb_id") or (await get_imdb_id(tmdb_id, endpoint) if not details else None)
+
+    enrichment = {
+        "poster_url": (TMDB_IMAGE_BASE + item["poster_path"]) if item.get("poster_path") else None,
+        "rating": round(source.get("vote_average", 0) or 0, 1),
+        "genres": [g.get("name") for g in (source.get("genres") or []) if g.get("name")],
+        "overview": (source.get("overview") or "")[:200],
+        "imdb_id": imdb_id,
+        "tmdb_id": tmdb_id,
+    }
+    set_cached_enrichment(title, year, content_type, enrichment)
+    return enrichment
+
+
+def format_enrichment_line(meta: Optional[Dict]) -> str:
+    """One-line enrichment suffix: ⭐ rating · 🎭 genres · IMDb link."""
+    if not meta:
+        return ""
+    parts = []
+    if meta.get("rating"):
+        parts.append(f"⭐ {meta['rating']}")
+    if meta.get("genres"):
+        parts.append(f"🎭 {', '.join(meta['genres'][:3])}")
+    line = " · ".join(parts)
+    if meta.get("imdb_id"):
+        line += f" · [IMDb](https://imdb.com/title/{meta['imdb_id']})"
+    return line
 
 
 async def get_random_background_image() -> Optional[str]:

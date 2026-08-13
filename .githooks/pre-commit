@@ -1,10 +1,15 @@
 #!/bin/sh
 #
 # Pre-commit hook: run the static re-export / broken-import / duplicate-def
-# check (scripts/check_reexports.py) before every commit.
+# check (scripts/check_reexports.py) AND the version-bump gate
+# (scripts/check_version_bump.py) before every commit.
+#
+# The version-bump gate fails a commit that adds a new feature (new command,
+# new handler, new feature module) without bumping BOT_VERSION — run
+# `make bump` first (see scripts/bump_version.py).
 #
 # Skips when no Python source in the scan targets (features/ or main.py) is
-# staged, so doc-only/CI-only commits don't needlessly re-run the scan.
+# staged, so doc-only/CI-only commits don't needlessly re-run the checks.
 #
 # Install (from the repo root):
 #   git config core.hooksPath .githooks
@@ -38,6 +43,13 @@ echo "🔍 Running static check (re-export chains / broken imports / duplicates)
 if ! (cd "$ROOT" && "$PY" scripts/check_reexports.py); then
     echo "❌ Pre-commit static check FAILED — fix the violations above before committing."
     echo '   (Hint: run make check to reproduce.)'
+    exit 1
+fi
+
+echo "🔍 Running version-bump check (new feature -> BOT_VERSION bump)..."
+if ! (cd "$ROOT" && "$PY" scripts/check_version_bump.py); then
+    echo "❌ Pre-commit version-bump check FAILED — bump the version and re-stage before committing."
+    echo '   (Hint: run make bump, then `git add features/config.py LATEST_RELEASE`.)'
     exit 1
 fi
 

@@ -8,6 +8,9 @@
 #   make deps      install Python dependencies (pip install -r requirements.txt)
 #   make verify    run everything CI gates on: check + test
 #   make install-hooks  install the pre-commit hook (git config core.hooksPath)
+#   make bump      bump the bot version (minor) — run before committing a
+#                  new feature (pre-commit hook enforces this)
+#   make bump-patch / bump-major   bump patch / major instead
 #
 # Python interpreter: prefer the project virtualenv (.venv) — it holds
 # pyroblack — and fall back to the plain `python` on PATH (CI installs deps
@@ -16,7 +19,7 @@
 PYTHON := $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python; fi)
 PIP    := $(shell if [ -x .venv/bin/pip ]; then echo .venv/bin/pip; else echo pip; fi)
 
-.PHONY: check test deps verify install-hooks
+.PHONY: check test deps verify install-hooks bump bump-patch bump-major
 
 check:
 	$(PYTHON) scripts/check_reexports.py
@@ -33,4 +36,14 @@ verify: check test
 install-hooks:
 	git config core.hooksPath .githooks
 	@echo "✅ Pre-commit hook installed (core.hooksPath = .githooks)"
-	@echo "   It runs '$(PYTHON) scripts/check_reexports.py' before each commit."
+	@echo "   It runs '$(PYTHON) scripts/check_reexports.py' + version-bump"
+	@echo "   check before each commit."
+
+bump:
+	$(PYTHON) scripts/bump_version.py
+
+bump-patch:
+	$(PYTHON) scripts/bump_version.py --patch
+
+bump-major:
+	$(PYTHON) scripts/bump_version.py --major

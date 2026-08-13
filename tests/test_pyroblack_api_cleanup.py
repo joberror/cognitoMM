@@ -586,17 +586,19 @@ async def test_trending_callback_uses_link_preview_options():
 
 
 def test_link_preview_options_migration_fully_applied():
-    """Source-level scan: pins ALL 14 call sites across the 4 files.
+    """Source-level scan: pins ALL link_preview_options call sites (18).
 
-    The exact per-file counts are the pin: adding a 15th site or refactoring
-    the kwarg construction (e.g. into a helper) fails until the counts here
-    are deliberately updated - do NOT loosen the matcher to "fix" it.
+    The exact per-file counts are the pin: adding a site or refactoring the
+    kwarg construction (e.g. into a helper) fails until the counts here are
+    deliberately updated - do NOT loosen the matcher to "fix" it. (Counts
+    grew from 14 to 18 when the /random, /genres, /logs commands and the
+    choose: quality-chooser callback were added.)
     """
     expected = {
         "features/logger.py": 1,
         "features/search.py": 1,
-        "features/callbacks.py": 2,
-        "features/commands.py": 10,
+        "features/callbacks.py": 3,
+        "features/commands.py": 13,
     }
     total = 0
     for rel, count in expected.items():
@@ -608,7 +610,7 @@ def test_link_preview_options_migration_fully_applied():
         assert found == count, \
             f"{rel}: expected {count} link_preview_options sites, found {found}"
         total += found
-    assert total == 14, f"expected 14 total sites, found {total}"
+    assert total == 18, f"expected 18 total sites, found {total}"
 
 
 # ---------------------------
