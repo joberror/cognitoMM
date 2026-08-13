@@ -63,6 +63,15 @@ cp .env.example .env
 | `BROADCAST_TEST_MODE` | `False` | Enable broadcast test mode |
 | `SUPPORT_LINK` | `https://t.me/` | Support group link for /start |
 | `START_MESSAGE` | `Welcome to the bot!...` | Custom /start message |
+| `KEEP_ALIVE_URL` | — | Public URL the bot pings to keep managed hosts (HF Spaces) awake. Auto-derived from `SPACE_HOST`/`SPACE_ID` on HF — only needed for custom domains / other hosts |
+| `KEEP_ALIVE_INTERVAL` | `240` | Self-ping interval in seconds (must stay below the host's sleep timer, e.g. HF's 15 min) |
+| `KEEP_ALIVE_ENABLED` | `true` | Set `false` to disable the self-keep-alive |
+| `CLEAN_SESSIONS` | `0` | Set `1` to wipe `.session` files at startup (`run.sh` only) — see *Session file issues* below |
+
+> **Keep-alive on VPS/Docker:** the self-ping exists for managed hosts (HF Spaces) —
+> VPS/Docker containers don't sleep, so `.env.example` ships with
+> `KEEP_ALIVE_ENABLED=false`. On HF Spaces leave it unset (or `true`); the URL is
+> auto-derived from `SPACE_HOST`/`SPACE_ID`.
 
 ---
 
@@ -195,8 +204,12 @@ or your own domain (production). Uses the current [UptimeRobot v3 API](https://u
 **Notes:**
 - Free tier: 50 monitors @ 5-minute checks, email alerts.
 - **HF Spaces sleep:** free Spaces pause after a period of inactivity, which shows
-  as downtime on the dashboard. The bot's webapp doubles as a keep-alive, but if
-  the Space sleeps anyway, expect an occasional "down" alert.
+  as downtime on the dashboard. The bot now runs a **built-in self-keep-alive**:
+  it pings its own public URL (`/health`) every 240s, so the Space never reaches
+  HF's minimum sleep timer. UptimeRobot is the belt-and-braces external watchdog
+  for cold starts (the self-ping can't fire while the container is asleep, so an
+  external ping is what wakes it). Expect occasional "down" alerts only if the
+  Space is cold-starting.
 - `/metrics` intentionally returns 500 when stats collection fails or exceeds
   `METRICS_TIMEOUT` (default 30s) — monitors see a real failure, never `ok:null`.
 
@@ -263,7 +276,14 @@ Once deployed, your Space will:
 1. Build the Docker image (using the `Dockerfile`)
 2. Start the bot → it connects to Telegram
 3. The embedded web server starts on port 7860 (HF automatically routes traffic)
-4. Visit `https://iamjoberror-bot-media.hf.space/health` to verify
+4. The bot self-pings its public URL every 240s (**keep-alive**) so the Space
+   never goes to sleep — verify with
+   `https://iamjoberror-bot-media.hf.space/health`
+
+> **Note:** to *wake* an already-sleeping Space, an external request is needed
+> (visiting the URL, or an UptimeRobot monitor — see *Monitoring* above). The
+> self-ping only runs while the container is awake, which is why it's paired
+> with the UptimeRobot monitors.
 
 ---
 
@@ -297,14 +317,37 @@ docker compose exec app python -c "from pymongo import MongoClient; c=MongoClien
 
 ### Session file issues
 
-The bot creates a `.session` file in the working directory. If you see "session revoked" or "logged out" errors:
+The bot creates a `.session` file in the working directory. This file stores the
+bot's auth **and the Telegram peer cache (access hashes)**. **Keep it across
+restarts** — deleting it makes log sends fail with `[403 PEER_ID_INVALID]` until
+each peer re-resolves (e.g. the admin messages the bot again). `run.sh` keeps
+sessions by default. If you see "session revoked" or "logged out" errors and need
+to wipe them:
 
 ```bash
-# Remove stale session files and restart
+# Remove stale session files and restart (run.sh) - or set CLEAN_SESSIONS=1
 docker compose down
 rm -f *.session *.session-journal
 docker compose up -d
 ```
+
+### "Failed to send log to Telegram: [403 PEER_ID_INVALID]"
+
+This happens on a **fresh session** (HF rebuild, or after manually deleting the
+`.session` file): the bot hasn't cached the peer (access hash) for `LOG_CHANNEL`
+yet, so `send_message` fails until an update from that chat caches it. The bot
+now handles this automatically:
+
+- At startup it resolves the log peer via `get_chat()` (fixes channels/groups
+  immediately).
+- On a `PEER_ID_INVALID` send it re-resolves once per flush, so it recovers the
+  moment the peer is reachable — normally as soon as the admin sends the bot
+  any message/command.
+
+If the error persists even after messaging the bot, double-check `LOG_CHANNEL`:
+- For a **private chat**, use your numeric user ID and make sure you have
+  started the bot (sent it at least one message).
+- For a **channel/group**, use the `-100...` ID and confirm the bot is a member.
 
 ### Docker build fails
 

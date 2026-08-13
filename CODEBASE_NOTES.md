@@ -253,6 +253,7 @@ Gate checks inline: is_feature_premium_only(name) && !is_premium_user && !is_adm
 11. **Queue processor** — `message_queue` (deque, maxlen 100) serializes auto-indexing to avoid duplicate-key races; `queue_processor_task` is started once.
 12. **Message edit flood** — progress edits are wrapped in try/except and throttled (every 10 msgs or 3s in `update_db`; every 30 msgs in indexing).
 13. **pyroblack deprecation safety net** — the CI gates turn any deprecated-API usage into a test failure (two mechanisms: `filterwarnings` in `pyproject.toml` + the `_PyrogramDeprecationGuard` logging handler in `tests/conftest.py`), and dedicated pin/guard tests enforce the modern API spellings. See §12.1. When adding send/edit/reply/inline-result code, always use the modern kwargs (`link_preview_options=`, `reply_parameters=`, `thumbnail_*`).
+14. **Log sends: `[403 PEER_ID_INVALID]` on fresh sessions** — the `.session` file caches Telegram peer access hashes. On a fresh session (HF rebuild, deleted `.session`), `send_message` to `LOG_CHANNEL` fails until an update from that chat caches the peer — this is why logs only started working after the admin ran a command. The bot handles it automatically now: `logger.warm_up_peer()` (`get_chat()`) runs at startup in `bot.py`, and `flush()` in `logger.py` re-resolves on `PeerIdInvalid` specifically, so it self-heals within seconds of the peer becoming reachable. **Don't delete `.session` files on every restart** — `run.sh` keeps them by default (`CLEAN_SESSIONS=1` to wipe). See §12.2.
 
 ---
 
@@ -289,6 +290,10 @@ Gate checks inline: is_feature_premium_only(name) && !is_premium_user && !is_adm
 | `BROADCAST_TEST_MODE` | False | use test users |
 | `BROADCAST_TEST_USERS` | "" | comma-separated IDs |
 | `PORT` | 7860 | Flask port (webapp.py) |
+| `KEEP_ALIVE_URL` | None | public URL the bot pings to keep HF Spaces awake; else auto-derived from `SPACE_HOST`/`SPACE_ID` |
+| `KEEP_ALIVE_INTERVAL` | 240 | self-ping seconds (must stay below the host's sleep timer, e.g. HF's 15 min) |
+| `KEEP_ALIVE_ENABLED` | true | `false` disables the self-keep-alive |
+| `CLEAN_SESSIONS` | 0 | `1` wipes `.session` files at startup (`run.sh` only) |
 
 ---
 
@@ -299,7 +304,7 @@ Gate checks inline: is_feature_premium_only(name) && !is_premium_user && !is_adm
 - **CI:** `.github/workflows/static-checks.yml` runs on push/PR and delegates to the Makefile (so CI and `make` can't drift) — `reexport-check` job: `make check` (stdlib-only, fails on re-export chains / broken / unknown-module imports / duplicate definitions); `tests` job: `make test` (installs deps, then runs the full pytest suite; no live MongoDB/Telegram needed — tests use fakes/mocks)
 - **Local gates:** `make check` (static import check), `make test` (installs deps, then runs pytest — mirrors CI's `tests` job), `make verify` (runs `check` + `test`, i.e. everything CI gates on), `make install-hooks` (installs the pre-commit hook via `git config core.hooksPath .githooks`; hook runs the static check when `features/*.py`/`main.py` are staged — see `.githooks/pre-commit`)
 - **Deploy:** GitHub Actions (`.github/workflows/deploy.yml`) syncs `main` → HF Space `iamjoberror/bot-media` (needs `HF_TOKEN` secret)
-- **Docker:** `Dockerfile` (python:3.11-slim, port 7860, `python main.py`); `docker-compose.yml` adds a MongoDB service; `run.sh` is the local dev launcher (pyenv, session cleanup)
+- **Docker:** `Dockerfile` (python:3.12-slim, port 7860, `python main.py`); `docker-compose.yml` adds a MongoDB service (bind-mounts the project dir, so the `.session` file survives container recreation in the default dev setup); `run.sh` is the local dev launcher (prefers `.venv`, keeps sessions unless `CLEAN_SESSIONS=1`)
 - **Known stale bits:** ✅ **FIXED** — parser tests now import `parse_metadata` from `features.metadata_parser` (with `sys.path` setup); `test_orphan_prune.py` now exercises the real `prune_orphaned_index_entries()` in `features/indexing.py` (implemented so the documented orphan-prune mechanism actually exists).
 
 ### 12.1 pyroblack deprecation safety net
@@ -324,3 +329,18 @@ On top of the gates, **pin/guard tests** freeze the modern API spellings so regr
 - Inline results → `thumbnail_url`/`thumbnail_width`/`thumbnail_height`/`thumbnail_mime_type` — never `thumb_*`
 - If a pyroblack API is deliberately changed, update the pin counts in `test_pyroblack_api_cleanup.py` / `test_pyroblack_api_guards.py` — do **not** loosen the matchers to "fix" a failing test
 - Both test files are standalone scripts (`python tests/test_<name>.py`) and pytest-compatible
+
+### 12.2 HF keep-alive & log-peer warm-up
+
+Two runtime resilience mechanisms, both started in `bot.py`'s `main()`:
+
+**1. Self-keep-alive (`features/keepalive.py`)** — Hugging Face Spaces (free tier) put the container to sleep after a period of inactivity; only traffic to the Space's **public** URL counts as activity, and a sleeping container can't wake itself. `start_keep_alive()` spawns an asyncio task that GETs the public `/health` URL every `KEEP_ALIVE_INTERVAL` (default **240s** — deliberately below HF's 15-minute minimum sleep timer, so the Space never reaches the threshold). URL resolution order: `KEEP_ALIVE_URL` (explicit, used as-is) → `SPACE_HOST` (HF env, `/health` appended) → `SPACE_ID` (HF env, `https://<owner>-<space>.hf.space/health` derived). On non-HF hosts (VPS/Docker/local) no URL is derivable and it's a silent no-op; `KEEP_ALIVE_ENABLED=false` forces it off. Failures are logged and swallowed — the next cycle retries. Pings are console-only (added to the logger's `ignore_patterns`) so they don't spam the log channel. UptimeRobot monitors (`scripts/create_uptimerobot_monitors.py`) remain the external watchdog for cold starts, since the self-ping can't fire while the container is asleep.
+
+**2. Log-peer warm-up (`features/logger.py`)** — `[403 PEER_ID_INVALID]` on log sends happens because the `.session` file caches peer access hashes, and a fresh session (HF rebuild, wiped `.session`) has none for `LOG_CHANNEL`. Two-part fix:
+
+- `warm_up_peer()` — called in `bot.py` after `logger.set_client()`: runs `client.get_chat()` to fetch and cache the peer immediately, so the first flush (3s later) succeeds. Fixes channels/groups outright; for a **user** target it succeeds once the server can resolve the user (they've messaged the bot).
+- `flush()` self-heal — on `PeerIdInvalid` **specifically** (`isinstance` check, so other errors keep the old behavior) it re-runs `get_chat()` once per flush, recovering automatically the moment the peer becomes reachable (e.g. the admin sends any command).
+
+Also: `set_client()` casts `LOG_CHANNEL` to `int` (a malformed non-numeric value is kept raw + warned — it must never crash startup), and `run.sh` no longer wipes `*.session` files on every start (`CLEAN_SESSIONS=1` to force a wipe) — deleting the session cache is what caused the recurring PEER_ID_INVALID after every restart.
+
+Pinned by `tests/test_keepalive.py` (URL derivation, mocked-aiohttp ping loop, `start_keep_alive()` gating — 12 tests) and `tests/test_logger_peer_warmup.py` (int cast incl. malformed value, `warm_up_peer`, PEER_ID_INVALID self-heal — 9 tests). Both standalone + pytest-compatible.
