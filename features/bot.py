@@ -26,6 +26,7 @@ from .search import inline_handler
 from .deletion_events import handle_raw_update  # Real-time deletion heuristic handler
 from .webapp import start_webapp, set_stats_provider
 from .statistics import collect_comprehensive_stats, cache_bot_info
+from .keepalive import start_keep_alive
 
 # -------------------------
 # CUSTOM BOT CLASS WITH iter_messages
@@ -132,6 +133,12 @@ async def main():
 
             # Initialize Logger
             logger.set_client(app, LOG_CHANNEL)
+            # Resolve the log peer NOW so the first flush (3s later) doesn't
+            # fail with PEER_ID_INVALID. On a fresh session (HF rebuild or a
+            # wiped .session file) the access hash for the log target is not
+            # cached yet; get_chat() fetches and caches it.
+            if LOG_CHANNEL:
+                await logger.warm_up_peer()
             logger.start_capturing()
             logger.log("🤖 Bot Session Started")
             if LOG_CHANNEL:
@@ -165,6 +172,11 @@ async def main():
 
             # Start orphan prune monitor (primary channel-deletion cleanup)
             asyncio.create_task(start_orphan_prune_monitor())
+
+            # Self-keep-alive: ping the public URL so managed hosts (HF
+            # Spaces) never put the container to sleep. No-op when no public
+            # URL is configured (local dev, VPS, Docker).
+            start_keep_alive()
 
             print("✅ MovieBot is running!")
             print("🛑 Press Ctrl+C to stop")

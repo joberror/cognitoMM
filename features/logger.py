@@ -12,6 +12,7 @@ import io
 import traceback
 from datetime import datetime
 import html
+from pyrogram.errors import PeerIdInvalid
 from pyrogram.types import LinkPreviewOptions
 
 class TelegramLogger:
@@ -31,12 +32,46 @@ class TelegramLogger:
         self.MAX_BUFFER_SIZE = 4000 # Telegram max is 4096, keep room for overhead
         
         # Patterns to ignore for Telegram logging (still printed to console)
-        self.ignore_patterns = ["[DIAGNOSTIC]", "[INDEXED]", "[PRUNE]"]
+        self.ignore_patterns = ["[DIAGNOSTIC]", "[INDEXED]", "[PRUNE]", "[KEEPALIVE]"]
 
     def set_client(self, client, channel_id):
         """Update client and channel ID after initialization"""
         self.client = client
-        self.channel_id = channel_id
+        # LOG_CHANNEL comes from the environment as a string; pyrogram accepts
+        # string peers, but an int is unambiguous and avoids resolve surprises.
+        # A malformed value must NOT crash startup - keep the raw string and
+        # let flush() report send failures instead.
+        if channel_id not in (None, ""):
+            try:
+                self.channel_id = int(channel_id)
+            except (TypeError, ValueError):
+                print(f"⚠️ [LOGGER] LOG_CHANNEL is not a numeric ID: {channel_id!r} - "
+                      "logs will fail to send")
+                self.channel_id = channel_id
+        else:
+            self.channel_id = None
+
+    async def warm_up_peer(self):
+        """Resolve the log peer so the first flush doesn't fail with PEER_ID_INVALID.
+
+        A fresh session (HF rebuild, wiped .session file) has no cached peer
+        info for the log target, so send_message() fails with PEER_ID_INVALID
+        until an update from that chat caches it. get_chat() fetches and caches
+        the peer (access hash) immediately.
+
+        Returns:
+            True if the peer was resolved, False otherwise (never raises).
+        """
+        if not self.client or not self.channel_id:
+            return False
+        try:
+            chat = await self.client.get_chat(self.channel_id)
+            name = getattr(chat, "title", None) or getattr(chat, "first_name", None)
+            print(f"📝 [LOGGER] Log peer resolved: {name or self.channel_id}")
+            return True
+        except Exception as e:
+            print(f"⚠️ [LOGGER] Could not resolve log peer {self.channel_id}: {e}")
+            return False
 
     def start_capturing(self):
         """Start capturing stdout and stderr"""
@@ -135,6 +170,14 @@ class TelegramLogger:
             except Exception as e:
                 # Fallback to stderr if sending fails, don't recurse
                 print(f"Failed to send log to Telegram: {e}", file=self.original_stderr)
+                # Fresh session -> peer not cached yet. Re-resolve once so the
+                # next flush succeeds the moment the peer becomes reachable
+                # (e.g. the admin messages the bot, caching the user peer).
+                if isinstance(e, PeerIdInvalid):
+                    try:
+                        await self.client.get_chat(self.channel_id)
+                    except Exception:
+                        pass
 
     class _StreamWrapper:
         """Wrapper for stdout/stderr to capture output"""
