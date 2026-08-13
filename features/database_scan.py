@@ -281,15 +281,19 @@ async def incremental_rescan(client, channel_doc: dict, settings_col_ref=None, s
     channel_id = channel_doc.get("channel_id")
     channel_title = channel_doc.get("channel_title", channel_id)
 
+    # get_chat_history returns an ASYNC GENERATOR (like iter_messages) - never
+    # `await` it directly. Iterate and take the first (newest) message id.
     try:
-        history = await client.get_chat_history(channel_id, limit=1)
+        latest_id = None
+        async for msg in client.get_chat_history(channel_id, limit=1):
+            latest_id = msg.id
+            break
     except Exception as e:
         print(f"⚠️ [RESCAN] Cannot read history for {channel_title}: {e}")
         return None
-    if not history:
+    if latest_id is None:
         print(f"⚠️ [RESCAN] Empty history for {channel_title}")
         return None
-    latest_id = history[0].id
 
     cursor = await get_channel_scan_cursor(channel_id, settings_col_ref)
     if cursor is None:

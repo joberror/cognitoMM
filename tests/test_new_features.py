@@ -219,8 +219,12 @@ async def test_incremental_rescan_window_and_cursor(monkeypatch):
             store[filt["k"]] = update["$set"]["v"]
 
     class FakeClient:
+        # Matches pyrogram/pyroblack: get_chat_history returns an ASYNC
+        # GENERATOR, not a coroutine - awaiting it directly raises
+        # "object async_generator can't be used in 'await' expression".
         async def get_chat_history(self, chat_id, limit=1):
-            return [SimpleNamespace(id=1000)]
+            for m in [SimpleNamespace(id=1000)]:
+                yield m
 
     scan_calls = []
 
@@ -242,6 +246,25 @@ async def test_incremental_rescan_window_and_cursor(monkeypatch):
     result2 = await dbs.incremental_rescan(FakeClient(), ch, settings_col_ref=fs, scan_ref=fake_scan)
     assert result2 == {"channel_id": -100, "scanned": 0, "status": "up-to-date"}
     assert scan_calls == [(-100, 1, 1000)]
+
+
+async def test_incremental_rescan_empty_history_returns_none():
+    """A channel with no messages (empty generator) must yield None, not crash."""
+
+    class EmptyHistoryClient:
+        async def get_chat_history(self, chat_id, limit=1):
+            if False:
+                yield None  # async generator body; yields nothing
+
+    class EmptySettings:
+        async def find_one(self, filt):
+            return None
+
+    fs = EmptySettings()
+
+    ch = {"channel_id": -100, "channel_title": "Empty"}
+    result = await dbs.incremental_rescan(EmptyHistoryClient(), ch, settings_col_ref=fs)
+    assert result is None
 
 
 # ------------------------------------------------------------------ #
