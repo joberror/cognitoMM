@@ -815,7 +815,7 @@ async def cmd_genres(client, message: Message):
             lines.append(f"{i}. <b>{e.get('title')}</b> ({e.get('year') or 'N/A'}) [{e.get('quality') or 'N/A'}]{rating}")
             if e.get("channel_id") and e.get("message_id"):
                 buttons.append(InlineKeyboardButton(
-                    f"Get {i}", callback_data=f"get_file:{e['channel_id']}:{e['message_id']}"
+                    f"Get [{i}]", callback_data=f"get_file:{e['channel_id']}:{e['message_id']}"
                 ))
         text = f"🎭 <b>{genre_query}</b> ({len(entries)} titles)\n\n" + "\n".join(lines)
         reply_markup = InlineKeyboardMarkup([buttons[i:i+4] for i in range(0, len(buttons), 4)]) if buttons else None

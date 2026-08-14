@@ -17,8 +17,11 @@ This is a Telegram bot hosted on Hugging Face Spaces.
 
 **🎬 Search & discover**
 - `/search <title>` — smart search (exact + fuzzy, type/episode filters).
-  Duplicate copies are deduplicated — the best quality is shown first, with a
-  `Pick [n]` quality chooser to grab another copy.
+  Duplicate copies are deduplicated — the best quality is shown first. `Pick [n]`
+  filters the results in place to that title's copies (series get `Pick[n][Sxx]`
+  season picks; long-running series page through the seasons — `S◀`/`S▶`
+  buttons in both the results list and the pick view), with `[720p] [1080p] [2160p]`
+  resolution filters.
 - `/f <title>` — quick search · inline mode `@yourbot <query>` (poster thumbnails)
 - `/recent` — newly indexed content · `/trending` — TMDb trending
 - `/genres` — browse by TMDb genre (counts; `/genres <name>` lists titles)

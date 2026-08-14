@@ -89,9 +89,13 @@ See `DEPLOYMENT.md` for the full table. Feature-specific extras:
 
 ## 💡 Notes
 
-- Search results deduplicate copies of the same title (best quality shown;
-  `Pick [n]` opens a quality chooser). Results carry TMDb ratings/genres/IMDb
-  links when `TMDB_API` is configured.
+- Search results deduplicate copies of the same title (best quality shown).
+  `Pick [n]` filters the message in place to that title's copies (series get
+  per-season `Pick[n][Sxx]` buttons; long-running series page through the
+  seasons — `S◀`/`S▶` buttons in both the results list and the pick view, 10
+  seasons per page); `[720p]/[1080p]/[2160p]`
+  resolution filters narrow further and `← Back` restores the full results. Results carry
+  TMDb ratings/genres/IMDb links when `TMDB_API` is configured.
 - Watchlist notifications are sent the moment a new copy of a watched title is
   indexed (DM with a Get button).
 - The scheduled rescan, orphan prune monitor, and keep-alive all run as

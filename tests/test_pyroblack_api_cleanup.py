@@ -561,9 +561,12 @@ async def test_search_pagination_callback_uses_link_preview_options():
             ],
         }
     }
+    # NOTE: page: rendering now lives in search.py (render_search_page ->
+    # build_search_keyboard), which imports is_feature_premium_only fresh
+    # from premium_management - so patch the real source, not callbacks.
     with patch.object(callbacks, "bulk_downloads", cached), \
-            patch.object(callbacks, "is_feature_premium_only",
-                         AsyncMock(return_value=False)), \
+            patch("features.premium_management.is_feature_premium_only",
+                  AsyncMock(return_value=False)), \
             patch.object(callbacks, "has_accepted_terms",
                          AsyncMock(return_value=True)):
         await callbacks.callback_handler(None, cbq)
@@ -591,13 +594,14 @@ def test_link_preview_options_migration_fully_applied():
     The exact per-file counts are the pin: adding a site or refactoring the
     kwarg construction (e.g. into a helper) fails until the counts here are
     deliberately updated - do NOT loosen the matcher to "fix" it. (Counts
-    grew from 14 to 18 when the /random, /genres, /logs commands and the
-    choose: quality-chooser callback were added.)
+    grew from 14 to 18 when the /random, /genres, /logs commands were added;
+    the pick-filter refactor then moved the page:/choose: renders from
+    callbacks.py into search.py, shifting 2 sites: search 1->3, callbacks 3->1.)
     """
     expected = {
         "features/logger.py": 1,
-        "features/search.py": 1,
-        "features/callbacks.py": 3,
+        "features/search.py": 3,
+        "features/callbacks.py": 1,
         "features/commands.py": 13,
     }
     total = 0

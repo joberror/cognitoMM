@@ -171,10 +171,19 @@ All callbacks (except `terms#`) require `should_process_command_for_user` + term
 
 ## 8. Data flows (memorize)### Feature cluster (added 2026-08)
 
-- **Quality dedup (`utils.py`)** — `quality_rank` / `pick_best_quality` /
-  `group_duplicate_copies`; `/search` shows the best-quality copy per title
-  (🔁+N marker) and a `Pick [n]` button opens a quality chooser (`choose:`
-  callback in `callbacks.py`).
+- **Quality dedup + pick filter (`utils.py` / `search.py`)** —
+  `quality_rank` / `pick_best_quality` / `group_duplicate_copies`; `/search`
+  shows the best-quality copy per title (🔁+N marker). `Pick [n]` filters the
+  message in place to that title's copies (`choose:` → `render_pick_view` in
+  `search.py`); series get per-season `Pick[n][Sxx]` buttons, and the pick view
+  adds `[720p]/[1080p]/[2160p]` resolution filters + `← Back` (`back:` →
+  `render_search_page`). Long-running series page through the seasons: the
+  results list pages each group's `Pick[n][Sxx]` shortcuts (`S◀`/`S▶`;
+  `page:{sid}:{page}:{gi}:{sp}` re-renders the same results page with that
+  group's season page advanced — the legacy 3-part `page:{sid}:{page}` is
+  still parsed), and the pick view pages its season buttons (10 per page,
+  `S◀`/`S▶`; callback format `choose:{sid}:{gi}:{season}:{res}:{page}` —
+  the legacy 5-part form is still parsed for backward compatibility).
 - **TMDb enrichment (`tmdb_integration.py`)** — `enrich_title` (search +
   details API, cached 6h per title+year; no-op without `TMDB_API`). Newly
   indexed entries get `tmdb_poster`/`tmdb_rating`/`tmdb_genres`/

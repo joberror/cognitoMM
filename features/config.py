@@ -27,7 +27,7 @@ BOT_START_TIME = datetime.now(timezone.utc)
 # `scripts/bump_version.py --set X.Y.Z`. The pre-commit hook fails commits
 # that add a new feature without bumping this constant. The webapp `/`
 # endpoint exposes it (overridable via the BOT_VERSION env var).
-BOT_VERSION = "1.1.1"
+BOT_VERSION = "1.4.0"
 
 # -------------------------
 # CONFIG / ENV

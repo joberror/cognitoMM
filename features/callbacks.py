@@ -99,48 +99,38 @@ async def callback_handler(client, callback_query: CallbackQuery):
             return
 
         if data.startswith("choose:"):
-            # Quality chooser: pick a specific copy of a deduped search result
+            # In-place pick filter: replace the search message with only the
+            # chosen title's copies (series get per-season pick buttons, all
+            # titles get [720p]/[1080p]/[2160p] resolution filters).
+            # 6-part format: choose:{sid}:{gi}:{season}:{res}:{page}. The
+            # legacy 5-part format (no trailing page) is still accepted so
+            # buttons from messages rendered before season paging keep working.
+            parts = data.split(":")
+            if len(parts) not in (5, 6):
+                return await callback_query.answer("⚠️ Invalid chooser data.")
             try:
-                _, search_id, group_idx = data.split(":")
+                _, search_id, group_idx, season_str, res_str = parts[:5]
+                season_page = int(parts[5]) if len(parts) == 6 and parts[5] else 0
                 group_idx = int(group_idx)
             except (ValueError, IndexError):
                 return await callback_query.answer("⚠️ Invalid chooser data.")
 
             group_data = bulk_downloads.get(search_id, {})
-            # Ownership check: a callback can only open a chooser for a search
-            # this user initiated (mirrors the page: flow's user_id guard).
+            # Ownership check: a callback can only open a pick view for a
+            # search this user initiated (mirrors the page: flow's guard).
             if group_data.get("user_id") != user_id:
                 return await callback_query.answer("🚫 This search belongs to another user.")
 
-            groups = group_data.get("groups") or []
-            if group_idx >= len(groups) or not groups:
+            season = int(season_str[1:]) if season_str and season_str.startswith("S") else None
+            resolution = res_str or None
+
+            from .search import render_pick_view
+            if not await render_pick_view(callback_query, group_data, group_idx,
+                                          search_id, season=season,
+                                          resolution=resolution,
+                                          season_page=season_page):
                 return await callback_query.answer("⚠️ This search expired. Run /search again.")
-
-            copies = groups[group_idx]
-            title = copies[0].get("title", "Unknown")
-            lines = []
-            buttons = []
-            for i, copy in enumerate(copies, 1):
-                quality = copy.get("quality") or "N/A"
-                rip = copy.get("rip") or ""
-                size_str = format_file_size(copy.get("file_size"))
-                details = ", ".join(x for x in (quality, rip, size_str) if x and x != "N/A")
-                lines.append(f"{i}. {details or 'N/A'}")
-                if copy.get("channel_id") and copy.get("message_id"):
-                    buttons.append(InlineKeyboardButton(
-                        f"{quality}",
-                        callback_data=f"get_file:{copy['channel_id']}:{copy['message_id']}",
-                    ))
-
-            text = f"🎞️ <b>{title}</b> — choose a copy:\n\n" + "\n".join(lines)
-            reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
-            await callback_query.message.edit_text(
-                text,
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.HTML,
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
-            )
-            await callback_query.answer("📥 Select a copy")
+            await callback_query.answer("✅ Filtered to copies")
             return
 
         if data.startswith("get_file:"):
@@ -233,9 +223,20 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 await callback_query.answer(f"❌ Failed to fetch file: {str(e)}", show_alert=True)
 
         elif data.startswith("page:"):
-            # Handle pagination callback
-            _, search_id, page_str = data.split(":")
-            page = int(page_str)
+            # Pagination callback - 3-part (page:{sid}:{page}) for plain page
+            # navigation, or 5-part (page:{sid}:{page}:{gi}:{sp}) for one
+            # group's season-shortcut paging on the results list (the legacy
+            # 3-part form is still accepted).
+            parts = data.split(":")
+            if len(parts) not in (3, 5):
+                return await callback_query.answer("⚠️ Invalid page data.")
+            try:
+                _, search_id, page_str = parts[:3]
+                page = int(page_str)
+                gi = int(parts[3]) if len(parts) == 5 and parts[3] else None
+                season_page = int(parts[4]) if len(parts) == 5 and parts[4] else 0
+            except (ValueError, IndexError):
+                return await callback_query.answer("⚠️ Invalid page data.")
 
             # Retrieve search data
             if search_id not in bulk_downloads:
@@ -249,164 +250,34 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 await callback_query.answer("❌ You can only navigate your own searches", show_alert=True)
                 return
 
-            results = search_data['results']
-            query = search_data['query']
+            if gi is not None:
+                # Season-shortcut paging for one group: remember its page so the
+                # results list rebuilds with that group's Sxx buttons advanced.
+                search_data.setdefault("season_pages", {})[gi] = season_page
 
-            await callback_query.answer(f"📄 Page {page}")
+            from .search import render_search_page
+            await render_search_page(callback_query, search_data, page, search_id)
+            await callback_query.answer(f"📄 Page {page}" if gi is None else "🎬 More seasons")
+            return
 
-            # Update message with new page
-            # Create header
-            RESULTS_PER_PAGE = 9
-            total_results = len(results)
-            total_pages = (total_results + RESULTS_PER_PAGE - 1) // RESULTS_PER_PAGE
+        elif data.startswith("back:"):
+            # Return from the pick filter view to the full search results
+            _, search_id = data.split(":")
 
-            # Calculate start and end indices for current page
-            start_idx = (page - 1) * RESULTS_PER_PAGE
-            end_idx = min(start_idx + RESULTS_PER_PAGE, total_results)
-            page_results = results[start_idx:end_idx]
+            if search_id not in bulk_downloads:
+                await callback_query.answer("❌ Search expired or not found", show_alert=True)
+                return
 
-            # Create search text
-            search_text = f"```\n"
-            search_text += f"Search: \"{query}\"\n"
-            search_text += f"Total Results: {total_results} | Page {page}/{total_pages}\n\n"
+            search_data = bulk_downloads[search_id]
 
-            # Format each result on current page
-            button_data = []
-            for i, result in enumerate(page_results, start=start_idx + 1):
-                title = result.get('title', 'Unknown Title')
-                year = result.get('year')
-                quality = result.get('quality')
-                rip = result.get('rip')
-                movie_type = result.get('type', 'Movie')
-                season = result.get('season')
-                episode = result.get('episode')
-                file_size = result.get('file_size')
-                channel_id = result.get('channel_id')
-                message_id = result.get('message_id')
+            if search_data['user_id'] != callback_query.from_user.id:
+                await callback_query.answer("❌ You can only navigate your own searches", show_alert=True)
+                return
 
-                # Format file size
-                size_str = format_file_size(file_size)
-                quality_str = quality if quality else ""
-
-                # Format season/episode info for series
-                series_info = ""
-                if movie_type.lower() in ['series', 'tv', 'show'] and (season or episode):
-                    if season and episode:
-                        series_info = f"S{season:02d}E{episode:02d}"
-                    elif season:
-                        series_info = f"S{season:02d}"
-                    elif episode:
-                        series_info = f"E{episode:02d}"
-
-                year_str = str(year) if year else ""
-
-                # Format rip type
-                rip_str = ""
-                if rip and rip.lower() in ['bluray', 'blu-ray', 'bdrip', 'bd']:
-                    rip_str = "Blu"
-                elif rip and 'web' in rip.lower():
-                    rip_str = "Web"
-                elif rip and 'hd' in rip.lower():
-                    rip_str = "HD"
-
-                # Build info string
-                info_parts = []
-                if size_str != "N/A":
-                    info_parts.append(size_str)
-                if quality_str:
-                    info_parts.append(quality_str)
-                if series_info:
-                    info_parts.append(series_info)
-                if year_str:
-                    info_parts.append(year_str)
-                if rip_str:
-                    info_parts.append(rip_str)
-
-                info_string = ".".join(info_parts) if info_parts else "N/A"
-                search_text += f"{i}. {title} [{info_string}]\n"
-
-                if channel_id and message_id:
-                    button_data.append({
-                        'number': i,
-                        'channel_id': channel_id,
-                        'message_id': message_id
-                    })
-
-            search_text += f"```"
-
-            # Create buttons
-            buttons = []
-            if button_data:
-                # Create individual file buttons in rows of 3
-                current_row = []
-                for btn in button_data:
-                    current_row.append(
-                        InlineKeyboardButton(
-                            f"Get [{btn['number']}]",
-                            callback_data=f"get_file:{btn['channel_id']}:{btn['message_id']}"
-                        )
-                    )
-                    if len(current_row) == 3 or btn == button_data[-1]:
-                        buttons.append(current_row)
-                        current_row = []
-
-                # Create navigation row
-                nav_row = []
-
-                # Previous button
-                if page > 1:
-                    nav_row.append(
-                        InlineKeyboardButton(
-                            "← Prev",
-                            callback_data=f"page:{search_id}:{page-1}"
-                        )
-                    )
-
-                # Get All button
-                if total_results > 1:
-                    # Check if Get All is premium-only
-                    show_get_all = True
-                    if await is_feature_premium_only("get_all"):
-                        # Only show if user is premium or admin
-                        uid = callback_query.from_user.id
-                        if not await is_admin(uid) and not await is_premium_user(uid):
-                            show_get_all = False
-
-                    if show_get_all:
-                        bulk_id = str(uuid.uuid4())[:8]
-                        bulk_downloads[bulk_id] = {
-                            'files': [{'channel_id': r.get('channel_id'), 'message_id': r.get('message_id')}
-                                     for r in results if r.get('channel_id') and r.get('message_id')][:10],
-                            'created_at': datetime.now(timezone.utc),
-                            'user_id': callback_query.from_user.id
-                        }
-                        nav_row.append(
-                            InlineKeyboardButton(
-                                f"Get All ({total_results})",
-                                callback_data=f"bulk:{bulk_id}"
-                            )
-                        )
-
-                # Next button
-                if page < total_pages:
-                    nav_row.append(
-                        InlineKeyboardButton(
-                            "Next →",
-                            callback_data=f"page:{search_id}:{page+1}"
-                        )
-                    )
-
-                if nav_row:
-                    buttons.append(nav_row)
-
-            keyboard = InlineKeyboardMarkup(buttons) if buttons else None
-
-            # Edit the message
-            await callback_query.edit_message_text(
-                search_text,
-                reply_markup=keyboard,
-                link_preview_options=LinkPreviewOptions(is_disabled=True)
-            )
+            from .search import render_search_page
+            await render_search_page(callback_query, search_data, search_data.get("page", 1), search_id)
+            await callback_query.answer("← Back to results")
+            return
 
         elif data.startswith("index#"):
             # Handle indexing callback
