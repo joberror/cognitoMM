@@ -15,17 +15,17 @@ router + this file together.
 | `/help` | Show this menu (user + admin sections) |
 | `/f <title>` | Quick search |
 | `/search <title>` | Smart search (exact + fuzzy); `-e` flag for exact only |
-| `/recent` | Newly indexed content (last batch) |
-| `/trending` | TMDb trending movies / shows / new releases (buttons) |
-| `/random` | Random indexed title (poster when available) |
-| `/genres` | List TMDb genres with counts; `/genres <name>` browses a genre |
+| `/recent` | Newly indexed content (last batch) — `/search`-style code-block listing with MOVIES/SERIES sections |
+| `/trending` | TMDb trending movies / shows / new releases (buttons) — `/search`-style lines with ⭐ ratings + clickable IMDb/TMDb links |
+| `/random` | Random indexed title (poster when available; caption uses the `/search` bracket info) |
+| `/genres` | List TMDb genres with counts; `/genres <name>` browses a genre in `/search`-style format (paginated, 12/page with `← Prev`/`Next →`, `🔤 A–Z`/`🆕 Newest`/`⭐ Top Rated` sort toggle). Each title appears ONCE with its details — movies `Title - N files`, series `Title - N seasons [real], N eps [real], N files` where the bracket values are the real TMDb totals (DB counts outside): `Breaking Bad - 2 seasons [5], 3 eps [35], 4 files ⭐8.9` |
 | `/request <title>` | Request a missing title (TMDb search, rate-limited) |
 | `/request_list` | View/manage your requests |
-| `/my_history` | Your search history |
+| `/my_history` | Your search history (`/search`-style bracket lines with the search time, grouped by date) |
 | `/my_stat` | Your usage + premium info |
 | `/watch <title>` | Add a title to your watchlist (notified when indexed) |
 | `/unwatch <title>` | Remove from watchlist |
-| `/watchlist` | Show your watched titles |
+| `/watchlist` | Show your watched titles (`/search`-style bracket lines in a code block) |
 | `/premium` | Premium info / management (admin-gated actions inside) |
 | Inline mode | `@yourbot <query>` — search straight from any chat (poster thumbnails) |
 

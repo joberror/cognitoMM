@@ -175,24 +175,22 @@ def group_recent_content(results):
     return categorized_results
 
 def format_movie_group(group_data):
-    """Format movie group with quality consolidation and year. Returns (title, details)."""
+    """Format movie group with quality consolidation and year. Returns (title, details).
+
+    Details are bracket-ready for the /search-style listing (dot-joined,
+    lowercased qualities): ``2010.1080p`` / ``2010.1080p & 4k``."""
     title = group_data['title']
     year = group_data['year']
     qualities = sorted(group_data['qualities'])
 
-    # Build details string (year + qualities)
+    # Build details string (year + qualities), e.g. "2010.1080p & 4k"
     details_parts = []
     if year:
         details_parts.append(str(year))
-
     if qualities:
-        if len(qualities) == 1:
-            details_parts.append(f"({qualities[0]})")
-        else:
-            quality_str = " & ".join(qualities)
-            details_parts.append(f"({quality_str})")
+        details_parts.append(" & ".join(sorted(q.lower() for q in qualities)))
 
-    details = " ".join(details_parts)
+    details = ".".join(details_parts) if details_parts else ""
     return title, details
 
 def format_series_group(group_data):
@@ -201,7 +199,8 @@ def format_series_group(group_data):
     year = group_data['year']
     seasons_episodes = group_data['seasons_episodes']
 
-    # Build details parts
+    # Build details parts, bracket-ready for the /search-style listing
+    # (dot-joined, compact ranges like ``S01E01-02``): "2008.S01E01-02, S02E01"
     details_parts = []
     if year:
         details_parts.append(str(year))
@@ -227,12 +226,11 @@ def format_series_group(group_data):
                 last_ep = episodes[-1]
                 episode_str = f"E{first_ep:02d}-{last_ep:02d}"
 
-            season_parts.append(f"S{season:02d}({episode_str})")
+            season_parts.append(f"S{season:02d}{episode_str}")
 
-        episode_info = ", ".join(season_parts)
-        details_parts.append(episode_info)
+        details_parts.append(", ".join(season_parts))
 
-    details = " ".join(details_parts)
+    details = ".".join(details_parts) if details_parts else ""
     return title, details
 
 def construct_final_caption(db_item, file_size_bytes=None, user_name="User"):
@@ -297,55 +295,54 @@ def construct_final_caption(db_item, file_size_bytes=None, user_name="User"):
     return "\n".join(lines)
 
 def format_recent_output(categorized_results, total_files=None, total_movies=None, total_series=None, last_updated=None):
-    """Format categorized results for display with context information (plain HTML, click-to-copy titles)"""
-    output_text = "<b>LAST BATCH UPDATE</b>\n\n"
+    """Format categorized results in the /search code-block style.
+
+    Consolidated per-title lines (``N. Title [details]``) grouped into MOVIES
+    and SERIES sections, with the batch context (Updated / Files counts).
+    Note: titles inside the code block are no longer tap-to-copy (that was an
+    HTML-only affordance); the block keeps the listing uniform with /search.
+    """
+    output_text = "```\nLAST BATCH UPDATE\n"
 
     # Add context information
     if last_updated:
-        output_text += f"Updated: {last_updated}\n"
+        output_text += f"\nUpdated: {last_updated}\n"
     if total_files is not None:
         output_text += f"Files: {total_files}"
         if total_movies is not None and total_series is not None:
             output_text += f" (Movies: {total_movies} | Series: {total_series})"
         output_text += "\n"
 
-    output_text += "\n"
-
     # Display Movies section
     movies = categorized_results['movies']
     if movies:
-        output_text += "<b>MOVIES</b>\n"
-        output_text += "─" * 30 + "\n"
+        output_text += "\nMOVIES\n"
         for i, result in enumerate(movies, 1):
             title = result['title']
             details = result.get('details', '')
             if details:
-                output_text += f"{i}. <code>{title}</code> {details}\n"
+                output_text += f"{i}. {title} [{details}]\n"
             else:
-                output_text += f"{i}. <code>{title}</code>\n"
-        output_text += "\n"
+                output_text += f"{i}. {title}\n"
 
     # Display Series section
     series = categorized_results['series']
     if series:
-        output_text += "<b>SERIES</b>\n"
-        output_text += "─" * 30 + "\n"
+        output_text += "\nSERIES\n"
         for i, result in enumerate(series, 1):
             title = result['title']
             details = result.get('details', '')
             if details:
-                output_text += f"{i}. <code>{title}</code> {details}\n"
+                output_text += f"{i}. {title} [{details}]\n"
             else:
-                output_text += f"{i}. <code>{title}</code>\n"
-        output_text += "\n"
+                output_text += f"{i}. {title}\n"
 
     # Calculate total items and check if we hit limit
     total_items = len(movies) + len(series)
     if total_items >= 20:
-        output_text += "<i>..and more</i>"
+        output_text += "\n..and more"
 
-    output_text += "\n<i>Tap any title to copy</i>"
-
+    output_text += "\n```"
     return output_text
 
 # ------------------------------------------------------------------ #
@@ -410,6 +407,77 @@ def group_duplicate_copies(entries):
             order.append(key)
         buckets[key].append(entry)
     return [buckets[key] for key in order]
+
+
+def format_search_info(entry):
+    """Dot-joined info string for a /search-style line.
+
+    ``size.quality.series.year.rip`` (or ``N/A`` when nothing is known).
+    Shared by format_search_line and surfaces that render the bracket info
+    without a line number (inline search results).
+    """
+    year = entry.get("year")
+    quality = entry.get("quality")
+    rip = entry.get("rip")
+    movie_type = (entry.get("type") or "Movie").lower()
+    season = entry.get("season")
+    episode = entry.get("episode")
+    file_size = entry.get("file_size")
+
+    size_str = format_file_size(file_size)
+    quality_str = quality if quality else ""
+
+    # Season/episode info (coerced to int - string seasons exist in the wild).
+    series_info = ""
+    if movie_type in ("series", "tv", "show") and (season or episode):
+        try:
+            if season and episode:
+                series_info = f"S{int(season):02d}E{int(episode):02d}"
+            elif season:
+                series_info = f"S{int(season):02d}"
+            elif episode:
+                series_info = f"E{int(episode):02d}"
+        except (TypeError, ValueError):
+            series_info = ""
+
+    year_str = str(year) if year else ""
+
+    # Short rip label (Blu/Web/HD), matching the search line style.
+    rip_str = ""
+    if rip and rip.lower() in ("bluray", "blu-ray", "bdrip", "bd"):
+        rip_str = "Blu"
+    elif rip and "web" in rip.lower():
+        rip_str = "Web"
+    elif rip and "hd" in rip.lower():
+        rip_str = "HD"
+
+    info_parts = []
+    if size_str != "N/A":
+        info_parts.append(size_str)
+    if quality_str:
+        info_parts.append(quality_str)
+    if series_info:
+        info_parts.append(series_info)
+    if year_str:
+        info_parts.append(year_str)
+    if rip_str:
+        info_parts.append(rip_str)
+    return ".".join(info_parts) if info_parts else "N/A"
+
+
+def format_search_line(number, entry, dup_count=0):
+    """One /search-style result line: ``N. Title [info]``.
+
+    Canonical line formatter shared by /search results and /genres <name>
+    browsing (and any future listing) so every surface renders identically:
+    dot-joined info string in brackets (see format_search_info), optional
+    `` 🔁+N`` duplicate marker. ``entry`` is a DB document.
+    """
+    info = format_search_info(entry)
+    line = f"{number}. {entry.get('title', 'Unknown Title')} [{info}]"
+    if dup_count:
+        line += f" 🔁+{dup_count}"
+    return line
 
 
 async def resolve_chat_ref(ref: str, client):

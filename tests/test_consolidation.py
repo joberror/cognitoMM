@@ -419,7 +419,8 @@ def test_group_recent_content_consolidates_qualities():
     assert len(grouped["movies"]) == 1
     assert grouped["movies"][0]["title"] == "Inception"
     assert grouped["movies"][0]["count"] == 2
-    assert grouped["movies"][0]["details"] == "2010 (1080P & 4K)"
+    # Bracket-ready /search-style details (dot-joined, lowercased qualities).
+    assert grouped["movies"][0]["details"] == "2010.1080p & 4k"
 
 
 def test_format_series_group_episode_ranges():
@@ -429,22 +430,26 @@ def test_format_series_group_episode_ranges():
         "seasons_episodes": [(1, 1), (1, 2), (2, 1)],
     })
     assert title == "Breaking Bad"
-    assert details == "2008 S01(E01-02), S02(E01)"
+    # Compact bracket-ready ranges: S01E01-02, S02E01 (no parens).
+    assert details == "2008.S01E01-02, S02E01"
 
 
 def test_format_recent_output_renders_sections():
     """format_recent_output renders movies/series sections and context lines."""
     grouped = {
-        "movies": [{"title": "Inception", "details": "2010 (1080P)", "count": 1}],
-        "series": [{"title": "Breaking Bad", "details": "2008 S01(E01-02)", "count": 2}],
+        "movies": [{"title": "Inception", "details": "2010.1080p", "count": 1}],
+        "series": [{"title": "Breaking Bad", "details": "2008.S01E01-02", "count": 2}],
     }
     out = utils.format_recent_output(grouped, total_files=3, total_movies=1,
                                      total_series=1, last_updated="2026-01-01 00:00:00 UTC")
-    assert "<b>LAST BATCH UPDATE</b>" in out
+    # /search-style: everything in one code block, bracket lines, sections kept.
+    assert out.startswith("```") and out.rstrip().endswith("```")
+    assert "LAST BATCH UPDATE" in out
     assert "Updated: 2026-01-01 00:00:00 UTC" in out
     assert "Files: 3 (Movies: 1 | Series: 1)" in out
-    assert "<b>MOVIES</b>" in out and "<b>SERIES</b>" in out
-    assert "Inception" in out and "Breaking Bad" in out
+    assert "\nMOVIES\n" in out and "\nSERIES\n" in out
+    assert "1. Inception [2010.1080p]" in out
+    assert "1. Breaking Bad [2008.S01E01-02]" in out
 
 
 # -------------------------

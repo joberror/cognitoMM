@@ -111,7 +111,7 @@ the user IDs listed in `ADMINS`):
 |---------|----------------|
 | `/search <title>` | Results with deduplicated copies + `Pick [n]` quality chooser; TMDb rating/genres/IMDb when `TMDB_API` is set |
 | `/random` | A random indexed title (poster photo once metadata is enriched) |
-| `/genres` | Genre list with counts (needs enriched metadata — run `/enrich` once to backfill) |
+| `/genres` | Genre list with counts (needs enriched metadata — run `/enrich` once to backfill); `/genres <name>` browses paginated with one deduped line per title (series show DB + real TMDb season/episode totals) |
 | `/watch <title>` / `/watchlist` | Adds to your watchlist; you get a DM the moment a new copy is indexed |
 | `/logs` | Recent audit-log entries from `logs_col` |
 | `/enrich [n]` / `/enrich_status` | Backfill TMDb metadata / show enriched–pending–no-match progress |

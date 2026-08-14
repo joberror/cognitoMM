@@ -11,8 +11,25 @@ import os
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from features.tmdb_integration import search_tmdb, format_tmdb_result
+from features.tmdb_integration import search_tmdb, format_tmdb_result, format_trending_list
 from features.config import TMDB_API
+
+
+def test_format_trending_list_search_style():
+    """Trending lines use the /search bracket shape with rating + clickable links."""
+    items = [
+        {"title": "The Matrix", "year": 1999, "rating": 8.7, "imdb_id": "tt0133093"},
+        {"title": "Dune: Part Two", "year": 2024, "rating": 8.0, "tmdb_id": 693134},
+        {"title": "Unrated Pick", "year": 2020, "rating": 0, "imdb_id": "tt0000000"},
+        {"title": "New Release", "release_display": "Mar 2026", "rating": 7.5, "tmdb_id": 42},
+    ]
+    out = format_trending_list(items, "movies")
+    assert "1. The Matrix [1999] ⭐8.7 · [IMDb](https://imdb.com/title/tt0133093)" in out
+    assert "2. Dune: Part Two [2024] ⭐8.0 · [TMDB](https://themoviedb.org/movie/693134)" in out
+    # rating 0 -> no ⭐ suffix
+    assert "3. Unrated Pick [2020] · [IMDb](https://imdb.com/title/tt0000000)" in out
+    # releases fall back to release_display when year is missing
+    assert "4. New Release [Mar 2026] ⭐7.5 · [TMDB](https://themoviedb.org/movie/42)" in out
 
 
 async def test_tmdb_search():

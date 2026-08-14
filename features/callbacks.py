@@ -935,6 +935,47 @@ async def callback_handler(client, callback_query: CallbackQuery):
             # Clean up bulk_downloads
             del bulk_downloads[request_list_id]
 
+        elif data.startswith("genre_page:"):
+            # /genres <name> browse pagination (state stored like the request
+            # list: a typed entry in bulk_downloads, owned by the user who
+            # started the browse). 3-part (page) and 4-part (page + sort)
+            # forms are accepted - the legacy 3-part form falls back to the
+            # stored sort.
+            parts = data.split(":")
+            if len(parts) not in (3, 4):
+                await callback_query.answer("❌ Invalid data.", show_alert=True)
+                return
+            _, genre_id, page_str = parts[:3]
+            page = int(page_str)
+            sort = parts[3] if len(parts) == 4 else None
+
+            if genre_id not in bulk_downloads:
+                await callback_query.answer("❌ Genre list expired. Run /genres again.", show_alert=True)
+                return
+
+            list_data = bulk_downloads[genre_id]
+            if list_data.get("type") != "genre_list":
+                await callback_query.answer("❌ Invalid data.", show_alert=True)
+                return
+
+            if list_data.get("user_id") != user_id:
+                await callback_query.answer("❌ You can only browse your own genre lists", show_alert=True)
+                return
+
+            if sort is None:
+                # Legacy 3-part button (pre-deploy): keep the stored sort.
+                sort = list_data.get("sort") or "az"
+            else:
+                # Keep state in sync so legacy buttons keep this sort too.
+                list_data["sort"] = sort
+
+            from .commands import send_genre_page
+            await send_genre_page(client, callback_query.message, list_data["genre"],
+                                  page, total=list_data.get("total"),
+                                  genre_id=genre_id, edit=True, sort=sort)
+            await callback_query.answer(f"📄 Page {page}")
+            return
+
         # -------------------------
         # Premium Management Callbacks
         # -------------------------

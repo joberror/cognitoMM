@@ -387,21 +387,20 @@ def format_trending_list(items: List[Dict], category: str) -> str:
         imdb_id = item.get("imdb_id")
         tmdb_id = item.get("tmdb_id")
 
-        # Create link
+        # Create link (kept clickable - NOT wrapped in a code block, since
+        # markdown links don't render inside code fences)
         if imdb_id:
-            link = f"[IMDB](https://imdb.com/title/{imdb_id})"
+            link = f"[IMDb](https://imdb.com/title/{imdb_id})"
         elif tmdb_id:
             media_type = "tv" if category == "shows" else "movie"
             link = f"[TMDB](https://themoviedb.org/{media_type}/{tmdb_id})"
         else:
             link = "N/A"
 
-        if category == "releases":
-            release_display = item.get("release_display", "N/A")
-            lines.append(f"{i}. `{title}` - {rating}, {release_display}, {link}")
-        else:
-            year = item.get("year", "N/A")
-            lines.append(f"{i}. `{title}` - {year}, {rating}, {link}")
+        # /search-style line: N. Title [year] ⭐rating · link
+        year = item.get("year") or item.get("release_display") or "N/A"
+        rating_part = f" ⭐{rating}" if rating else ""
+        lines.append(f"{i}. {title} [{year}]{rating_part} · {link}")
 
     return "\n".join(lines)
 
@@ -524,6 +523,11 @@ async def enrich_title(title: str, year=None, content_type: str = "Movie", use_c
         "imdb_id": imdb_id,
         "tmdb_id": tmdb_id,
     }
+    if endpoint == "tv":
+        # Real TMDb totals so listings can show DB counts vs the real ones
+        # (e.g. ``3 seasons [5], 20 eps [35]``).
+        enrichment["seasons"] = source.get("number_of_seasons")
+        enrichment["episodes"] = source.get("number_of_episodes")
     set_cached_enrichment(title, year, content_type, enrichment)
     return enrichment
 

@@ -23,15 +23,15 @@ This is a Telegram bot hosted on Hugging Face Spaces.
   buttons in both the results list and the pick view), with `[720p] [1080p] [2160p]`
   resolution filters.
 - `/f <title>` — quick search · inline mode `@yourbot <query>` (poster thumbnails)
-- `/recent` — newly indexed content · `/trending` — TMDb trending
-- `/genres` — browse by TMDb genre (counts; `/genres <name>` lists titles)
+- `/recent` — newly indexed content · `/trending` — TMDb trending (both listed in the same format as `/search`; trending keeps ⭐ ratings and clickable IMDb/TMDb links)
+- `/genres` — browse by TMDb genre (counts; `/genres <name>` lists titles deduplicated — one line per title with its season/episode totals and file count, real TMDb totals in brackets for series, paginated with `🔤 A–Z` / `🆕 Newest` / `⭐ Top Rated` sort toggle)
 - `/random` — surprise me: a random indexed title (poster when available)
 - `/request <title>` / `/request_list` — request missing titles (rate-limited)
 
 **👤 Your library**
 - `/watch <title>` / `/unwatch <title>` — watchlist; you get a DM the moment a
   watched title (or a new copy) is indexed
-- `/watchlist` — your watched titles · `/my_history` — your searches
+- `/watchlist` — your watched titles (`/search`-style bracket listing) · `/my_history` — your searches (same bracket style, grouped by date)
 - `/my_stat` — usage + premium info · `/premium` — premium info/management
 - `/help` — full command menu
 

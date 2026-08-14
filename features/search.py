@@ -23,7 +23,7 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, 
 
 from .config import FUZZY_THRESHOLD
 from .database import movies_col
-from .utils import format_file_size
+from .utils import format_file_size, format_search_info, format_search_line
 
 
 async def perform_search(query: str, exact_search: bool = False, fuzzy_threshold: int = None):
@@ -186,64 +186,12 @@ def build_search_page(results, query, page):
     for i, group in enumerate(groups, start=start_idx + 1):
         best, others = pick_best_quality(group)
         result = best
-        title = result.get('title', 'Unknown Title')
-        year = result.get('year')
-        quality = result.get('quality')
-        rip = result.get('rip')
-        movie_type = result.get('type', 'Movie')
-        season = result.get('season')
-        episode = result.get('episode')
-        file_size = result.get('file_size')
         channel_id = result.get('channel_id')
         message_id = result.get('message_id')
 
-        # Format file size
-        size_str = format_file_size(file_size)
-
-        # Format quality (resolution)
-        quality_str = quality if quality else ""
-
-        # Format season/episode info for series
-        series_info = ""
-        if movie_type.lower() in ['series', 'tv', 'show'] and (season or episode):
-            if season and episode:
-                series_info = f"S{season:02d}E{episode:02d}"
-            elif season:
-                series_info = f"S{season:02d}"
-            elif episode:
-                series_info = f"E{episode:02d}"
-
-        # Format year
-        year_str = str(year) if year else ""
-
-        # Format rip type (BluRay, WEBRip, etc.)
-        rip_str = ""
-        if rip and rip.lower() in ['bluray', 'blu-ray', 'bdrip', 'bd']:
-            rip_str = "Blu"
-        elif rip and 'web' in rip.lower():
-            rip_str = "Web"
-        elif rip and 'hd' in rip.lower():
-            rip_str = "HD"
-
-        # Build info string: [size.quality.series_info.year.rip]
-        info_parts = []
-        if size_str != "N/A":
-            info_parts.append(size_str)
-        if quality_str:
-            info_parts.append(quality_str)
-        if series_info:
-            info_parts.append(series_info)
-        if year_str:
-            info_parts.append(year_str)
-        if rip_str:
-            info_parts.append(rip_str)
-
-        info_string = ".".join(info_parts) if info_parts else "N/A"
-
-        # Create result line in new refined format, marking duplicate copies
-        line = f"{i}. {title} [{info_string}]"
-        if others:
-            line += f" 🔁+{len(others)}"
+        # Shared line formatter (also used by /genres browsing) - dot-joined
+        # info string, 🔁+N duplicate marker. Coerces season/episode to int.
+        line = format_search_line(i, result, dup_count=len(others))
         search_text += line + "\n"
 
         # Store button data
@@ -734,11 +682,11 @@ async def inline_handler(client, inline_query):
         title = result.get('title', 'Unknown')
         year = result.get('year', '')
         quality = result.get('quality', '')
-        
-        display_text = f"{title} {year}" if year else title
-        if quality:
-            display_text += f" ({quality})"
-            
+
+        # /search-style bracket info (same dot-joined formatter as the
+        # results list): "The Matrix [1080p.1999]"
+        display_text = f"{title} [{format_search_info(result)}]"
+
         results.append(
             InlineQueryResultArticle(
                 title=display_text,
@@ -777,11 +725,10 @@ async def inline_handler(client, inline_query):
             title = movie.get('title', 'Unknown')
             year = movie.get('year', '')
             quality = movie.get('quality', '')
-            
-            display_text = f"{title} {year}" if year else title
-            if quality:
-                display_text += f" ({quality})"
-                
+
+            # /search-style bracket info with the ~ fuzzy-match marker
+            display_text = f"{title} [{format_search_info(movie)}]"
+
             results.append(
                 InlineQueryResultArticle(
                     title=f"~{display_text}",  # Add ~ to indicate fuzzy match

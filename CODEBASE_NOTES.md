@@ -118,10 +118,10 @@ Routing notes: strips `@botname`, `/f` is an alias for `/search`, `-e` flag = ex
 - `/start` — terms gate → welcome photo + Support/Tutorial buttons
 - `/help` — user + admin help (if admin)
 - `/search <t>` / `/f <t>` / `/f -e <t>` — smart search (exact + fuzzy) / exact only
-- `/my_history` — search history grouped by date with copyable command links
+- `/my_history` — search history grouped by date, numbered `/search`-style bracket lines (bracket = search time) in a code block
 - `/my_stat` — per-user stats dashboard (`collect_user_stats` + `format_user_stats_output`)
-- `/recent` — last batch update (10-min window around latest `indexed_at`); premium-gated if enabled
-- `/trending` — TMDb trending movies/shows/new releases with category buttons
+- `/recent` — last batch update (10-min window around latest `indexed_at`); premium-gated if enabled. Rendered in `/search` code-block style: consolidated per-title lines (`N. Title [year.qualities]` / `N. Title [year.S01E01-02]`) via `format_movie_group`/`format_series_group`/`format_recent_output` (utils.py).
+- `/trending` — TMDb trending movies/shows/new releases with category buttons. Lines use the `/search` bracket shape (`N. Title [year] ⭐rating · link`) — deliberately NOT inside a code fence so the IMDb/TMDb links stay clickable.
 - `/request` — submit a title request (rate limited, TMDb verification)
 
 **Admin:**
@@ -188,11 +188,13 @@ All callbacks (except `terms#`) require `should_process_command_for_user` + term
   details API, cached 6h per title+year; no-op without `TMDB_API`). Newly
   indexed entries get `tmdb_poster`/`tmdb_rating`/`tmdb_genres`/
   `tmdb_overview`/`imdb_id` (gate: `TMDB_ENRICH_INDEX`). Search results show a
-  ⭐/🎭/IMDb details block; inline results use poster `thumbnail_url`;
+  ⭐/🎭/IMDb details block; inline results use poster `thumbnail_url` and
+  `/search`-style bracket titles (`Title [1080p.1999]` via `format_search_info`);
   `/enrich` backfills older entries.
 - **Watchlist (`user_management.py`)** — `/watch` `/unwatch` `/watchlist`;
   `notify_watchlist` DMs watchers (normalized-title match) when a new copy is
-  indexed.
+  indexed. `/watchlist` lists entries in the `/search` bracket style
+  (`1. Inception [2010.Movie]`) inside a code block.
 - **Scheduled rescan (`database_scan.py`)** — `start_db_rescan_monitor`
   (started in `bot.py`) runs `incremental_rescan` per channel every
   `DB_RESCAN_INTERVAL_MINUTES`; cursor stored in `settings_col`
@@ -200,6 +202,20 @@ All callbacks (except `terms#`) require `should_process_command_for_user` + term
 - **Admin `/logs [n]`** — recent `logs_col` entries in-chat. **`/random`** —
   random indexed title (poster photo when available). **`/genres`** — browse
   by stored `tmdb_genres` (aggregation with counts; `$regex` array match).
+  `/genres <name>` is paginated (12/page) with a `🔤 A–Z`/`🆕 Newest`/`⭐
+  Top Rated` sort toggle (title asc / indexed_at desc / tmdb_rating desc),
+  rendered in a code-block listing (shared line style, ⭐ rating kept).
+  Titles are DEDUPLICATED — each appears exactly once with its details:
+  movies `Title - N files`, series `Title - N seasons [real], N eps [real],
+  N files` where the bracket values are the REAL TMDb totals (surfaced by
+  `enrich_title` in tmdb_integration.py) and the DB counts outside use
+  distinct seasons + distinct (season, episode) pairs so duplicate-quality
+  copies don't inflate them (aggregation `_genre_title_pipeline` — one
+  distinct-title page per render; real counts via `_genre_real_counts`):
+  `send_genre_page` in commands.py renders every page (shared by the
+  initial send and the `genre_page:` callback — 3-part legacy and 4-part
+  `page+sort` data both accepted), state stored as a typed `genre_list`
+  entry in `bulk_downloads` with per-user ownership like the request list.
 
 ### Indexing
 

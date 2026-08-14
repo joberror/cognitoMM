@@ -298,6 +298,10 @@ async def test_inline_handler_uses_thumbnail_url():
         assert "thumbnail_url" in kwargs, "must use the modern thumbnail_url kwarg"
         overlap = deprecated_thumb_keys.intersection(kwargs)
         assert not overlap, f"deprecated thumbnail kwarg(s) used: {sorted(overlap)}"
+    # /search-style bracket titles (same format_search_info as the results list)
+    titles = {kwargs.get("title") for kwargs in SpyArticle.instances}
+    assert "The Matrix [1080p.1999]" in titles
+    assert "~The Matrix Reloaded [720p.2003]" in titles
 
     assert client.inline_answers, "expected answer_inline_query to be called"
     inline_id, _results, kwargs = client.inline_answers[0]
@@ -602,7 +606,7 @@ def test_link_preview_options_migration_fully_applied():
         "features/logger.py": 1,
         "features/search.py": 3,
         "features/callbacks.py": 1,
-        "features/commands.py": 13,
+        "features/commands.py": 14,
     }
     total = 0
     for rel, count in expected.items():
@@ -614,7 +618,7 @@ def test_link_preview_options_migration_fully_applied():
         assert found == count, \
             f"{rel}: expected {count} link_preview_options sites, found {found}"
         total += found
-    assert total == 18, f"expected 18 total sites, found {total}"
+    assert total == 19, f"expected 19 total sites, found {total}"
 
 
 # ---------------------------
