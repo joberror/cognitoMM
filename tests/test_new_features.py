@@ -1,8 +1,8 @@
 """
 Tests for the new feature set:
 
-- Quality dedup: quality_rank / pick_best_quality / group_duplicate_copies
-  (utils.py) - best-quality copy wins in search; duplicates get a chooser.
+- Quality dedup: quality_rank / pick_best_quality (utils.py) - the
+  best-quality copy wins where copies are deduplicated (e.g. the pick view).
 - TMDb enrichment: cache round-trip + miss, format_enrichment_line
   (tmdb_integration.py).
 - Watchlist: add/remove/get/notify with fake collections (user_management.py).
@@ -11,12 +11,11 @@ Tests for the new feature set:
 - /logs rendering and the new command routing (commands.py).
 """
 
-import asyncio
 import os
 import re
 import sys
 from contextlib import ExitStack
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -33,7 +32,7 @@ import features.commands as commands
 import features.database_scan as dbs
 import features.user_management as um
 from features.tmdb_integration import format_enrichment_line, get_cached_enrichment, set_cached_enrichment
-from features.utils import group_duplicate_copies, pick_best_quality, quality_rank
+from features.utils import pick_best_quality, quality_rank
 
 
 # ------------------------------------------------------------------ #
@@ -61,19 +60,6 @@ def test_pick_best_quality_returns_highest_copy():
     best, others = pick_best_quality([e4k, e720, e1080])
     assert best is e4k
     assert others == [e720, e1080]
-
-
-def test_group_duplicate_copies_groups_by_title_year_type():
-    entries = [
-        {"title": "Avatar", "year": 2009, "type": "Movie"},
-        {"title": "avatar", "year": 2009, "type": "Movie"},
-        {"title": "Avatar", "year": 2009, "type": "Series"},
-        {"title": "Other", "year": 2000, "type": "Movie"},
-    ]
-    groups = group_duplicate_copies(entries)
-
-    assert len(groups) == 3
-    assert len(groups[0]) == 2  # the two Movie copies
 
 
 # ------------------------------------------------------------------ #
@@ -418,7 +404,7 @@ async def test_cmd_random_caption_uses_bracket_style(monkeypatch):
 
 
 async def test_cmd_my_history_bracket_listing(monkeypatch):
-    """/my_history lists queries as numbered bracket lines in a code block."""
+    """/my_history lists queries as numbered plain-HTML lines with tap-to-copy <code>."""
     msg = FakeMessage("/my_history")
 
     class FakeUsers:
@@ -435,12 +421,12 @@ async def test_cmd_my_history_bracket_listing(monkeypatch):
 
     assert msg.replies
     text = msg.replies[0][0][0]
-    assert text.startswith("```")
-    assert "SEARCH HISTORY" in text
+    assert not text.startswith("```")
+    assert "<b>SEARCH HISTORY</b>" in text
     assert "Total: 3 | Unique: 3" in text
-    assert "1. Interstellar [11:50AM]" in text
-    assert "2. Inception [10:10AM]" in text
-    assert "3. The Matrix [02:15PM]" in text
+    assert "1. <code>Interstellar</code> [11:50AM]" in text
+    assert "2. <code>Inception</code> [10:10AM]" in text
+    assert "3. <code>The Matrix</code> [02:15PM]" in text
     assert "Re-search with /f title" in text
 
 
@@ -450,7 +436,7 @@ async def test_cmd_my_history_bracket_listing(monkeypatch):
 
 
 async def test_cmd_watchlist_renders_bracket_lines(monkeypatch):
-    """/watchlist lists entries in the /search bracket style inside a code block."""
+    """/watchlist lists entries as plain-HTML lines with tap-to-copy <code> titles."""
     msg = FakeMessage("/watchlist")
 
     async def _fake_watchlist(uid):
@@ -465,11 +451,11 @@ async def test_cmd_watchlist_renders_bracket_lines(monkeypatch):
 
     assert msg.replies
     text = msg.replies[0][0][0]
-    assert text.startswith("👁️ Your Watchlist")
-    assert "```" in text
-    assert "1. Inception [2010.Movie]" in text
-    assert "2. Breaking Bad [2008.Series]" in text
-    assert "3. No Year [Movie]" in text
+    assert text.startswith("👁️ <b>Your Watchlist</b>")
+    assert "```" not in text
+    assert "1. <code>Inception</code> [2010.Movie]" in text
+    assert "2. <code>Breaking Bad</code> [2008.Series]" in text
+    assert "3. <code>No Year</code> [Movie]" in text
     assert "Remove with /unwatch title" in text
 
 
@@ -635,14 +621,24 @@ async def test_cmd_genres_browse_paginates(monkeypatch):
     assert msg.replies
     text = msg.replies[0][0][0]
     kwargs = msg.replies[0][1]
-    assert "Total Results: 25 | Page 1/3" in text
-    # one deduped line per title, movie style: "N. Title - N files"
-    assert "1. Movie 01 - 1 file" in text
-    assert "Movie 12 - 1 file" in text
+    assert "Titles Found: 25 | Page 1/3" in text
+    # /search-style Files Found split (all 25 _genre_doc copies are Movies)
+    assert "Files Found: 25 (Movie - 25 | Series - 0)" in text
+    # same Pick/Get hint block as /search
+    assert "Hint: Use\nPick button below to select title, see, and get all relative files." in text
+    # one deduped line per title, /search per-title + latest-file layout
+    assert "1. Movie 01 > 1 file > Latest: 1080p" in text
+    assert "12. Movie 12 > 1 file > Latest: 1080p" in text
     assert "Movie 13" not in text
     buttons = _flat(kwargs["reply_markup"])
     assert buttons.get("Get [1]") == "get_file:-1001:1"
     assert buttons.get("Get [12]") == "get_file:-1001:12"
+    # Every title gets a Pick [n] in-place filter button (local index within
+    # the page: line 1 -> index 0, line 12 -> index 11).
+    gid = list(cached)[0]
+    assert buttons.get("Pick [1]") == f"genre_pick:{gid}:0:::"
+    assert buttons.get("Pick [12]") == f"genre_pick:{gid}:11:::"
+    assert not any(k.startswith("Pick[") and "[S" in k for k in buttons)  # movies: no Sxx
     assert buttons["Next →"].startswith("genre_page:") and buttons["Next →"].endswith(":2:az")
     assert "← Prev" not in buttons
     assert buttons.get("🔤 A–Z ✓") is not None and buttons.get("🆕 Newest") is not None
@@ -656,24 +652,31 @@ async def test_cmd_genres_series_deduped_with_real_counts(monkeypatch):
     Series: ``3 seasons [5], 20 eps [35], 20 files`` (bracket = real TMDb
     totals). DB counts use distinct seasons and distinct episode pairs so
     duplicate-quality copies don't inflate them."""
+    now = datetime.now(timezone.utc)
     docs = [
         # Breaking Bad: 4 copies, 2 distinct seasons, 3 distinct episodes
         {"_id": 1, "title": "Breaking Bad", "year": 2008, "quality": "1080p",
          "type": "Series", "season": 1, "episode": 1,
-         "channel_id": -1002, "message_id": 2, "tmdb_genres": ["Action"]},
+         "channel_id": -1002, "message_id": 2, "tmdb_genres": ["Action"],
+         "indexed_at": now - timedelta(days=30)},
+        # newest copy (indexed_at wins) - must drive the Latest: line + Get
         {"_id": 2, "title": "Breaking Bad", "year": 2008, "quality": "720p",
          "type": "Series", "season": 1, "episode": 2,
-         "channel_id": -1002, "message_id": 3, "tmdb_genres": ["Action"]},
+         "channel_id": -1002, "message_id": 3, "tmdb_genres": ["Action"],
+         "indexed_at": now},
         # duplicate quality of S01E01 must NOT inflate the episode count
         {"_id": 3, "title": "Breaking Bad", "year": 2008, "quality": "2160p",
          "type": "Series", "season": 1, "episode": 1,
-         "channel_id": -1002, "message_id": 4, "tmdb_genres": ["Action"]},
+         "channel_id": -1002, "message_id": 4, "tmdb_genres": ["Action"],
+         "indexed_at": now - timedelta(days=60)},
         {"_id": 4, "title": "Breaking Bad", "year": 2008, "quality": "1080p",
          "type": "Series", "season": 2, "episode": 5,
-         "channel_id": -1002, "message_id": 5, "tmdb_genres": ["Action"]},
+         "channel_id": -1002, "message_id": 5, "tmdb_genres": ["Action"],
+         "indexed_at": now - timedelta(days=10)},
         # Die Hard: single movie copy
         {"_id": 5, "title": "Die Hard", "year": 1988, "quality": "1080p",
-         "type": "Movie", "channel_id": -1001, "message_id": 1, "tmdb_genres": ["Action"]},
+         "type": "Movie", "channel_id": -1001, "message_id": 1, "tmdb_genres": ["Action"],
+         "indexed_at": now - timedelta(days=1)},
     ]
     msg = FakeMessage("/genres Action")
 
@@ -682,7 +685,8 @@ async def test_cmd_genres_series_deduped_with_real_counts(monkeypatch):
 
     monkeypatch.setattr(commands, "check_banned", _no)
     monkeypatch.setattr(commands, "movies_col", FakeGenreMovies(docs))
-    monkeypatch.setattr(commands, "bulk_downloads", {})
+    cached = {}
+    monkeypatch.setattr(commands, "bulk_downloads", cached)
 
     async def fake_enrich(title, year=None, content_type="Movie"):
         if title == "Breaking Bad":
@@ -694,14 +698,26 @@ async def test_cmd_genres_series_deduped_with_real_counts(monkeypatch):
     await commands.cmd_genres(None, msg)
 
     text = msg.replies[0][0][0]
-    # Breaking Bad appears exactly ONCE, with DB counts + real [5]/[35]
+    # Files Found split: 4 series copies (Breaking Bad) + 1 movie (Die Hard)
+    assert "Files Found: 5 (Movie - 1 | Series - 4)" in text
+    # Breaking Bad appears exactly ONCE, with DB counts + real [5]/[35] and
+    # the /search latest-file layout (latest = newest indexed_at copy).
     assert text.count("Breaking Bad") == 1
-    assert "1. Breaking Bad - 2 seasons [5], 3 eps [35], 4 files ⭐8.9" in text
-    # movies: minimal "Title - N files" line (no seasons/episodes)
-    assert "2. Die Hard - 1 file ⭐7.6" in text
-    # the Get button for a multi-copy series points at the BEST-quality copy
+    assert "1. Breaking Bad > 4 files > 2 seasons [5] · 3 eps [35] > Latest: S01E02 | 720p ⭐8.9" in text
+    # movies: minimal "N. Title > N files > Latest: ..." line
+    assert "2. Die Hard > 1 file > Latest: 1080p ⭐7.6" in text
+    # the Get button for a multi-copy series points at the LATEST copy
+    # (indexed_at desc -> the S01E02 720p copy, message_id 3)
     buttons = _flat(msg.replies[0][1]["reply_markup"])
-    assert buttons.get("Get [1]") == "get_file:-1002:4"  # 2160p copy
+    assert buttons.get("Get [1]") == "get_file:-1002:3"
+    # multi-season series get Pick[n][Sxx] season shortcuts + a Pick [n]
+    gid = list(cached)[0]
+    assert buttons.get("Pick[1][S01]") == f"genre_pick:{gid}:0:S01::"
+    assert buttons.get("Pick[1][S02]") == f"genre_pick:{gid}:0:S02::"
+    assert buttons.get("Pick [1]") == f"genre_pick:{gid}:0:::"
+    # movies (Die Hard) get a plain Pick button only
+    assert not any(k.startswith("Pick[2][S") for k in buttons)
+    assert buttons.get("Pick [2]") == f"genre_pick:{gid}:1:::"
 
 
 async def test_cmd_genres_browse_empty_genre(monkeypatch):
@@ -724,6 +740,7 @@ async def test_genre_page_callback_paginates(monkeypatch):
     """genre_page: re-renders the stored browse on the requested page."""
     monkeypatch.setattr(commands, "movies_col", FakeGenreMovies([_genre_doc(i) for i in range(1, 26)]))
     cached = {"gid1234": {"type": "genre_list", "genre": "Action", "total": 25,
+                          "files_split": {"total": 25, "movie": 25, "series": 0},
                           "user_id": 42, "created_at": datetime.now(timezone.utc)}}
     cbq = _FakeGenreCbq(data="genre_page:gid1234:2", user_id=42)
 
@@ -736,6 +753,7 @@ async def test_genre_page_callback_paginates(monkeypatch):
 
     assert cbq.message.edits
     text, kwargs = cbq.message.edits[0]
+    assert "Files Found: 25 (Movie - 25 | Series - 0)" in text  # persists on re-render
     assert "Page 2/3" in text
     assert "Movie 13" in text and "Movie 24" in text
     assert "Movie 25" not in text
@@ -861,6 +879,157 @@ async def test_genre_page_callback_unknown_sort_normalizes_to_az(monkeypatch):
     buttons = _flat(kwargs["reply_markup"])
     assert buttons.get("🔤 A–Z ✓") is not None
     assert movies.last_sort_spec == {"_id": 1}
+
+
+async def test_genre_files_split_mixed_types(monkeypatch):
+    """_genre_files_split buckets by type: series/tv/show -> Series, anything
+    else (including a missing type) -> Movie."""
+    docs = [
+        {"_id": 1, "title": "A", "type": "Movie", "tmdb_genres": ["Action"]},
+        {"_id": 2, "title": "B", "type": "Series", "tmdb_genres": ["Action"]},
+        {"_id": 3, "title": "C", "type": "Series", "tmdb_genres": ["Action"]},
+        {"_id": 4, "title": "D", "type": "tv", "tmdb_genres": ["Action"]},
+        {"_id": 5, "title": "E", "type": "show", "tmdb_genres": ["Action"]},
+        {"_id": 6, "title": "F", "tmdb_genres": ["Action"]},  # no type -> Movie
+        {"_id": 7, "title": "G", "type": "Movie", "tmdb_genres": ["Drama"]},
+    ]
+    movies = FakeGenreMovies(docs)
+    monkeypatch.setattr(commands, "movies_col", movies)
+
+    split = await commands._genre_files_split("Action")
+    assert split == {"total": 6, "movie": 2, "series": 4}
+
+
+async def test_genre_results_season_paging(monkeypatch):
+    """Series with >5 seasons page through their Pick[n][Sxx] shortcuts in the
+    genre results: S01-S05 + S▶ on page 0, S06-S09 + S◀ after advancing."""
+    docs = [{"_id": i, "title": "Long Show", "year": 2000, "quality": "1080p",
+             "type": "Series", "season": i, "episode": 1,
+             "channel_id": -1002, "message_id": i, "tmdb_genres": ["Action"]}
+            for i in range(1, 10)]  # S01..S09, one group
+    movies = FakeGenreMovies(docs)
+
+    async def _no(m):
+        return False
+
+    monkeypatch.setattr(commands, "check_banned", _no)
+    monkeypatch.setattr(commands, "movies_col", movies)
+    cached = {}
+    monkeypatch.setattr(commands, "bulk_downloads", cached)
+    monkeypatch.setattr(commands, "enrich_title", AsyncMock(return_value=None))
+
+    msg = FakeMessage("/genres Action")
+    await commands.cmd_genres(None, msg)
+
+    gid = list(cached)[0]
+    buttons = _flat(msg.replies[0][1]["reply_markup"])
+    assert buttons.get("Pick[1][S01]") == f"genre_pick:{gid}:0:S01::"
+    assert buttons.get("Pick[1][S05]") == f"genre_pick:{gid}:0:S05::"
+    assert buttons.get("Pick[1][S06]") is None  # page 1 of the shortcuts
+    assert buttons.get("S▶") == f"genre_page:{gid}:1:az:0:1"
+    assert buttons.get("S◀") is None
+
+    # Advance the group's season-shortcut page -> S06-S09 + S◀ (no next).
+    cbq = _FakeGenreCbq(data=f"genre_page:{gid}:1:az:0:1", user_id=42)
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(callbacks, "bulk_downloads", cached))
+        stack.enter_context(patch.object(callbacks, "has_accepted_terms", AsyncMock(return_value=True)))
+        stack.enter_context(patch.object(callbacks, "should_process_command_for_user", AsyncMock(return_value=True)))
+        stack.enter_context(patch.object(commands, "enrich_title", AsyncMock(return_value=None)))
+        await callbacks.callback_handler(None, cbq)
+
+    assert cbq.message.edits
+    _, kwargs = cbq.message.edits[0]
+    buttons2 = _flat(kwargs["reply_markup"])
+    assert buttons2.get("Pick[1][S06]") == f"genre_pick:{gid}:0:S06::"
+    assert buttons2.get("Pick[1][S09]") == f"genre_pick:{gid}:0:S09::"
+    assert buttons2.get("Pick[1][S01]") is None
+    assert buttons2.get("S◀") == f"genre_page:{gid}:1:az:0:0"
+    assert buttons2.get("S▶") is None
+    assert cached[gid]["season_pages"] == {0: 1}  # state persisted
+    assert any(a[0] == "🎬 More seasons" for a in cbq.answers)
+
+
+async def test_genre_pick_callback_filters_in_place(monkeypatch):
+    """genre_pick: opens the in-place pick view for one genre line (season
+    filtering works, Back restores the genre page)."""
+    series = {
+        "title": "Breaking Bad", "type": "Series", "files": 2,
+        "seasons": [1, 2], "episodes": [{"s": 1, "e": 1}, {"s": 2, "e": 5}],
+        "copies": [
+            {"title": "Breaking Bad", "type": "Series", "season": 1, "episode": 1,
+             "quality": "1080p", "rip": "WebRip", "file_size": 100,
+             "channel_id": -1002, "message_id": 2},
+            {"title": "Breaking Bad", "type": "Series", "season": 2, "episode": 5,
+             "quality": "2160p", "rip": "WebRip", "file_size": 200,
+             "channel_id": -1002, "message_id": 5},
+        ],
+    }
+    cached = {"gid1234": {"type": "genre_list", "genre": "Action", "total": 1,
+                          "page": 1, "sort": "az", "entries": [series],
+                          "user_id": 42, "created_at": datetime.now(timezone.utc)}}
+    cbq = _FakeGenreCbq(data="genre_pick:gid1234:0:S01::", user_id=42)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(callbacks, "bulk_downloads", cached))
+        stack.enter_context(patch.object(callbacks, "has_accepted_terms", AsyncMock(return_value=True)))
+        stack.enter_context(patch.object(callbacks, "should_process_command_for_user", AsyncMock(return_value=True)))
+        await callbacks.callback_handler(None, cbq)
+
+    assert cbq.message.edits
+    text, kwargs = cbq.message.edits[0]
+    assert "🎞️ **Breaking Bad**" in text
+    assert "· S01" in text  # season filter active
+    assert "1. Breaking Bad - S01E01 | 100B | WebRip | 1080p" in text
+    assert "S02E05" not in text  # filtered to season 1
+    assert "```" in text  # pick list renders as a code block
+    buttons = _flat(kwargs["reply_markup"])
+    assert buttons.get("S01 ✓") == "genre_pick:gid1234:0:::"  # active -> toggle off
+    assert buttons.get("S02") == "genre_pick:gid1234:0:S02::"
+    assert buttons.get("← Back") == "genre_back:gid1234"
+    assert any(a[0] == "✅ Filtered to copies" for a in cbq.answers)
+
+
+async def test_genre_pick_callback_ownership_guard(monkeypatch):
+    """Another user's genre pick is rejected without re-rendering."""
+    cached = {"gid1234": {"type": "genre_list", "genre": "Action", "total": 1,
+                          "entries": [], "user_id": 42,
+                          "created_at": datetime.now(timezone.utc)}}
+    cbq = _FakeGenreCbq(data="genre_pick:gid1234:0:::", user_id=99)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(callbacks, "bulk_downloads", cached))
+        stack.enter_context(patch.object(callbacks, "has_accepted_terms", AsyncMock(return_value=True)))
+        stack.enter_context(patch.object(callbacks, "should_process_command_for_user", AsyncMock(return_value=True)))
+        await callbacks.callback_handler(None, cbq)
+
+    assert not cbq.message.edits
+    assert any("another user" in a[0] for a in cbq.answers)
+
+
+async def test_genre_back_callback_restores_page(monkeypatch):
+    """genre_back: restores the /genres page the user was browsing (page+sort)."""
+    movies = FakeGenreMovies([_genre_doc(i) for i in range(1, 26)])
+    monkeypatch.setattr(commands, "movies_col", movies)
+    cached = {"gid1234": {"type": "genre_list", "genre": "Action", "total": 25,
+                          "page": 2, "sort": "az", "entries": [],
+                          "user_id": 42, "created_at": datetime.now(timezone.utc)}}
+    cbq = _FakeGenreCbq(data="genre_back:gid1234", user_id=42)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(callbacks, "bulk_downloads", cached))
+        stack.enter_context(patch.object(callbacks, "has_accepted_terms", AsyncMock(return_value=True)))
+        stack.enter_context(patch.object(callbacks, "should_process_command_for_user", AsyncMock(return_value=True)))
+        stack.enter_context(patch.object(commands, "enrich_title", AsyncMock(return_value=None)))
+        await callbacks.callback_handler(None, cbq)
+
+    assert cbq.message.edits
+    text, kwargs = cbq.message.edits[0]
+    assert "Titles Found: 25 | Page 2/3" in text  # restored to stored page 2
+    assert "Movie 13" in text and "Movie 24" in text
+    buttons = _flat(kwargs["reply_markup"])
+    assert buttons.get("🔤 A–Z ✓") is not None
+    assert any(a[0] == "← Back to genre" for a in cbq.answers)
 
 
 # ------------------------------------------------------------------ #

@@ -5,24 +5,21 @@ This module contains all callback handlers for inline buttons and user interacti
 It handles file requests, pagination, bulk downloads, and other button interactions.
 """
 
-import asyncio
-import uuid
 from datetime import datetime, timezone
 import io
 from bson import ObjectId
-from pyrogram import Client, filters
-from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, LinkPreviewOptions
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, LinkPreviewOptions
 from pyrogram.enums import ParseMode
 
 # Import from our modules
-from .config import LOG_CHANNEL, client
-from .database import users_col, movies_col, requests_col, premium_users_col, premium_features_col
+from .config import client
+from .database import users_col, movies_col, requests_col
 from .config import bulk_downloads, temp_data, user_input_events
-from .utils import cleanup_expired_bulk_downloads, wait_for_user_input, set_user_input, construct_final_caption, format_file_size
+from .utils import construct_final_caption
 from .file_deletion import track_file_for_deletion
 from .search import send_search_results
 from .user_management import should_process_command_for_user, has_accepted_terms, is_admin, log_action
-from .premium_management import is_premium_user, get_premium_user, add_premium_user, edit_premium_user, remove_premium_user, get_days_remaining, is_feature_premium_only, toggle_feature, add_premium_feature, get_all_premium_features, get_all_premium_users
+from .premium_management import toggle_feature, get_all_premium_features
 
 async def callback_handler(client, callback_query: CallbackQuery):
     """Handle inline button callbacks"""
@@ -308,9 +305,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 cmd_remove_channel,
                 cmd_index_channel,
                 cmd_update_db,
-                cmd_reset_channel,
-                cmd_toggle_indexing,
-                cmd_manage_channel
+                cmd_reset_channel
             )
 
             parts = data.split("#")
@@ -606,8 +601,10 @@ async def callback_handler(client, callback_query: CallbackQuery):
             from .search import perform_search
             from .config import FUZZY_THRESHOLD
 
-            # Perform the search
-            results = await perform_search(query, exact_search=is_exact, fuzzy_threshold=FUZZY_THRESHOLD)
+            # Perform the search (dict: results + exact/fuzzy classification)
+            search = await perform_search(query, exact_search=is_exact,
+                                          fuzzy_threshold=FUZZY_THRESHOLD)
+            results = search["results"]
 
             # Check if results exist
             if not results:
@@ -626,7 +623,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 client=client,
                 message=callback_query.message,
                 results=results,
-                query=query
+                query=query,
+                exact_ids=search["exact_ids"]
             )
 
             # Record search history
@@ -938,16 +936,20 @@ async def callback_handler(client, callback_query: CallbackQuery):
         elif data.startswith("genre_page:"):
             # /genres <name> browse pagination (state stored like the request
             # list: a typed entry in bulk_downloads, owned by the user who
-            # started the browse). 3-part (page) and 4-part (page + sort)
-            # forms are accepted - the legacy 3-part form falls back to the
-            # stored sort.
+            # started the browse). 3-part (page), 4-part (page + sort) and
+            # 6-part (page + sort + group index + season page - the S◀/S▶
+            # season-shortcut paging for a series' Pick[n][Sxx] buttons) forms
+            # are accepted; the legacy 3-part form falls back to the stored
+            # sort.
             parts = data.split(":")
-            if len(parts) not in (3, 4):
+            if len(parts) not in (3, 4, 6):
                 await callback_query.answer("❌ Invalid data.", show_alert=True)
                 return
             _, genre_id, page_str = parts[:3]
             page = int(page_str)
-            sort = parts[3] if len(parts) == 4 else None
+            sort = parts[3] if len(parts) >= 4 else None
+            gi = int(parts[4]) if len(parts) == 6 else None
+            season_page = int(parts[5]) if len(parts) == 6 else 0
 
             if genre_id not in bulk_downloads:
                 await callback_query.answer("❌ Genre list expired. Run /genres again.", show_alert=True)
@@ -969,11 +971,84 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 # Keep state in sync so legacy buttons keep this sort too.
                 list_data["sort"] = sort
 
+            if gi is not None:
+                # Season-shortcut paging for one group: remember its page so
+                # the results re-render with that group's Sxx buttons advanced.
+                list_data.setdefault("season_pages", {})[gi] = season_page
+
             from .commands import send_genre_page
             await send_genre_page(client, callback_query.message, list_data["genre"],
                                   page, total=list_data.get("total"),
-                                  genre_id=genre_id, edit=True, sort=sort)
-            await callback_query.answer(f"📄 Page {page}")
+                                  files_split=list_data.get("files_split"),
+                                  genre_id=genre_id, edit=True, sort=sort,
+                                  season_pages=list_data.get("season_pages"))
+            await callback_query.answer(f"📄 Page {page}" if gi is None else "🎬 More seasons")
+            return
+
+        elif data.startswith("genre_pick:"):
+            # In-place pick filter for one /genres <name> line (mirrors the
+            # choose: flow for /search). 6-part format
+            # ``genre_pick:{gid}:{gi}:{season}:{res}:{page}``; the legacy
+            # 5-part form (no trailing page) is still accepted.
+            parts = data.split(":")
+            if len(parts) not in (5, 6):
+                return await callback_query.answer("⚠️ Invalid picker data.")
+            try:
+                _, genre_id, group_idx, season_str, res_str = parts[:5]
+                season_page = int(parts[5]) if len(parts) == 6 and parts[5] else 0
+                group_idx = int(group_idx)
+            except (ValueError, IndexError):
+                return await callback_query.answer("⚠️ Invalid picker data.")
+
+            state = bulk_downloads.get(genre_id, {})
+            if state.get("type") != "genre_list":
+                return await callback_query.answer("❌ Genre list expired. Run /genres again.", show_alert=True)
+            if state.get("user_id") != user_id:
+                return await callback_query.answer("🚫 This browse belongs to another user.")
+
+            entries = state.get("entries") or []
+            if group_idx >= len(entries) or not entries[group_idx].get("copies"):
+                return await callback_query.answer("⚠️ This browse expired. Run /genres again.")
+
+            season = int(season_str[1:]) if season_str and season_str.startswith("S") else None
+            resolution = res_str or None
+
+            from .search import build_pick_view
+            text, keyboard = build_pick_view(
+                genre_id, group_idx, entries[group_idx]["copies"], season=season,
+                resolution=resolution, season_page=season_page,
+                prefix="genre_pick", back_prefix="genre_back")
+            await callback_query.message.edit_text(
+                text,
+                reply_markup=keyboard,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+            await callback_query.answer("✅ Filtered to copies")
+            return
+
+        elif data.startswith("genre_back:"):
+            # Return from a genre pick view to the /genres <name> page the
+            # user was browsing (restores the exact page + sort).
+            _, genre_id = data.split(":")
+            if genre_id not in bulk_downloads:
+                await callback_query.answer("❌ Genre list expired. Run /genres again.", show_alert=True)
+                return
+
+            state = bulk_downloads[genre_id]
+            if state.get("type") != "genre_list":
+                await callback_query.answer("❌ Invalid data.", show_alert=True)
+                return
+            if state.get("user_id") != user_id:
+                await callback_query.answer("❌ You can only browse your own genre lists", show_alert=True)
+                return
+
+            from .commands import send_genre_page
+            await send_genre_page(client, callback_query.message, state["genre"],
+                                  page=state.get("page") or 1, total=state.get("total"),
+                                  files_split=state.get("files_split"),
+                                  genre_id=genre_id, edit=True,
+                                  sort=state.get("sort") or "az")
+            await callback_query.answer("← Back to genre")
             return
 
         # -------------------------

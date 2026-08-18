@@ -28,11 +28,7 @@ from features.request_management import (
     check_rate_limits,
     update_user_limits,
     check_duplicate_request,
-    validate_imdb_link,
-    get_queue_position,
-    MAX_PENDING_REQUESTS_PER_USER,
-    MAX_REQUESTS_PER_DAY_PER_USER,
-    MAX_GLOBAL_REQUESTS_PER_DAY
+    validate_imdb_link
 )
 
 

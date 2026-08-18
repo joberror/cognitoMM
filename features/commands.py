@@ -5,40 +5,41 @@ This module contains all command handlers for the Telegram Movie Bot.
 It handles user commands, admin commands, and all related functionality.
 """
 
-import os
 import re
 import asyncio
 import uuid
-import logging
+import html
 from datetime import datetime, timezone, timedelta
-from fuzzywuzzy import fuzz
-from pyrogram import Client, filters
-from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, LinkPreviewOptions
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, LinkPreviewOptions
 from pyrogram.enums import ParseMode, ChatType
 
 # Import from our modules
-from .config import API_ID, API_HASH, BOT_TOKEN, BOT_ID, MONGO_URI, MONGO_DB, ADMINS, LOG_CHANNEL, FUZZY_THRESHOLD, AUTO_INDEX_DEFAULT, temp_data, user_input_events, bulk_downloads, START_MESSAGE, SUPPORT_LINK
-from .database import mongo, db, movies_col, users_col, channels_col, settings_col, logs_col, requests_col, user_request_limits_col, premium_users_col, premium_features_col, ensure_indexes
-from .utils import get_readable_time, wait_for_user_input, set_user_input, cleanup_expired_bulk_downloads, resolve_chat_ref
+from .config import AUTO_INDEX_DEFAULT, temp_data, bulk_downloads, START_MESSAGE, SUPPORT_LINK
+from .database import movies_col, users_col, channels_col, settings_col, logs_col, requests_col
+from .utils import wait_for_user_input, cleanup_expired_bulk_downloads, resolve_chat_ref
 
-from .user_management import get_user_doc, is_admin, is_banned, has_accepted_terms, load_terms_and_privacy, log_action, check_banned, check_terms_acceptance, should_process_command, require_not_banned
-from .file_deletion import track_file_for_deletion
+from .user_management import is_admin, has_accepted_terms, load_terms_and_privacy, log_action, check_banned, check_terms_acceptance, should_process_command
 from .config import indexing_lock, message_queue
 from .statistics_store import indexing_stats
-from .indexing import start_indexing_process, save_file_to_db, process_message_queue
-from .search import send_search_results
-from .utils import format_file_size, format_search_info, format_search_line, group_recent_content, format_recent_output, pick_best_quality
-from .request_management import check_rate_limits, update_user_limits, check_duplicate_request, validate_imdb_link, get_queue_position, MAX_PENDING_REQUESTS_PER_USER
-from .tmdb_integration import search_tmdb, format_tmdb_result, get_random_background_image, enrich_title
-from .premium_management import is_premium_user, get_premium_user, add_premium_user, edit_premium_user, remove_premium_user, get_days_remaining, is_feature_premium_only, toggle_feature, add_premium_feature, get_all_premium_features, get_all_premium_users
+from .search import (
+    MAX_SEASON_BUTTONS,
+    SEARCH_HINT,
+    group_seasons,
+    is_series,
+    perform_search,
+    pick_callback,
+    send_search_results,
+)
+from .utils import format_search_info, format_latest_info, group_recent_content, format_recent_output, latest_copy
+from .request_management import check_rate_limits, update_user_limits, check_duplicate_request, get_queue_position, MAX_PENDING_REQUESTS_PER_USER
+from .tmdb_integration import search_tmdb, get_random_background_image, enrich_title
+from .premium_management import is_premium_user, is_feature_premium_only
 from .broadcast import cmd_broadcast
 from .statistics import (
     collect_comprehensive_stats,
     collect_quick_stats,
     format_stats_output,
     format_quick_stats_output,
-    export_stats_json,
-    export_stats_csv,
     collect_user_stats,
     format_user_stats_output
 )
@@ -395,49 +396,27 @@ async def cmd_search(client, message: Message):
     # record search history
     await users_col.update_one({"user_id": uid}, {"$push": {"search_history": {"q": query, "ts": datetime.now(timezone.utc)}}}, upsert=True)
 
-    if exact_search:
-        # Exact search mode - only look for exact title matches
-        exact_pattern = f"^{re.escape(query)}$"
-        exact = await movies_col.find({"title": {"$regex": exact_pattern, "$options": "i"}}).to_list(length=None)
+    # The search engine (exact + fuzzy matching, exact/fuzzy classification)
+    # lives in search.py - keep a single canonical implementation.
+    search = await perform_search(query, exact_search=exact_search)
+    all_results = search["results"]
 
-        if not exact:
+    if not all_results:
+        if exact_search:
             # No exact matches found - suggest normal search
             await message.reply_text(
                 f"⚠️ No exact matches found for \"{query}\"\n\n"
                 f"💡 **Try normal search:** /search {query}\n"
                 f"🔍 Normal search finds partial and similar titles"
             )
-            return
-
-        all_results = exact
-    else:
-        # Normal search - exact + fuzzy
-        # Search for exact matches (no limit - show all results)
-        exact = await movies_col.find({"title": {"$regex": query, "$options": "i"}}).to_list(length=None)
-
-        # Search for fuzzy matches if we have less exact matches
-        all_results = list(exact)
-        if len(exact) < 50:  # Only do fuzzy search if we don't have many exact matches
-            candidates = []
-            cursor = movies_col.find({}, {"title": 1, "year": 1, "quality": 1, "channel_title": 1, "message_id": 1, "channel_id": 1, "type": 1, "season": 1, "episode": 1, "rip": 1}).limit(500)
-            async for r in cursor:
-                # Skip if already in exact matches
-                if any(ex.get("_id") == r.get("_id") for ex in exact):
-                    continue
-                title = r.get("title", "")
-                score = fuzz.partial_ratio(query.lower(), title.lower())
-                if score >= FUZZY_THRESHOLD:
-                    candidates.append((score, r))
-
-            candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
-            all_results.extend([c[1] for c in candidates])
-
-        if not all_results:
-            return await message.reply_text("⚠️ No results found for your search.")
+        else:
+            await message.reply_text("⚠️ No results found for your search.")
+        return
 
     # Create flashy, neat search results
     # Pass client explicitly to avoid relative import issues inside search module
-    await send_search_results(client, message, all_results, query)
+    await send_search_results(client, message, all_results, query,
+                              exact_ids=search["exact_ids"])
 
 
 
@@ -462,8 +441,8 @@ async def cmd_my_history(client, message: Message):
     first_search = history[0]['ts']
     last_search = history[-1]['ts']
 
-    # Build compact header with statistics
-    text = "```\nSEARCH HISTORY\n"
+    # Plain HTML with tap-to-copy queries (bracket = search time), grouped by date
+    text = "<b>SEARCH HISTORY</b>\n\n"
     text += f"Total: {total_searches} | Unique: {unique_queries}\n"
     text += f"Period: {first_search.strftime('%b %d, %Y')} - {last_search.strftime('%b %d, %Y')}\n\n"
 
@@ -475,23 +454,23 @@ async def cmd_my_history(client, message: Message):
         date_key = h['ts'].strftime('%d %b, %Y')
         grouped[date_key].append(h)
 
-    # /search-style bracket lines (bracket = search time), grouped by date
     counter = 0
     for date_key, searches in grouped.items():
-        text += f"{date_key}\n"
+        text += f"<b>{date_key}</b>\n"
         for h in searches:
             counter += 1
-            query = h['q']
+            query = html.escape(h['q'])
             time_str = h['ts'].strftime('%I:%M%p')
-            text += f"{counter}. {query} [{time_str}]\n"
+            text += f"{counter}. <code>{query}</code> [{time_str}]\n"
         text += "\n"
 
-    text += "```"
-    text += "\n🔁 Re-search with /f title"
+    text += "<i>Tap any query to copy</i>\n"
+    text += "🔁 Re-search with /f title"
 
-    # Send with default (markdown) parse mode so the code block renders
+    # Send as plain HTML so queries render as tap-to-copy <code> spans
     await message.reply_text(
         text,
+        parse_mode=ParseMode.HTML,
         link_preview_options=LinkPreviewOptions(is_disabled=True)
     )
 
@@ -614,10 +593,11 @@ async def cmd_recent(client, message: Message):
         grouped_results = group_recent_content(raw_results)
         formatted_output = format_recent_output(grouped_results, total_files, total_movies, total_series, last_updated)
 
-        # Send response (default/markdown parse mode so the ``` code block
-        # renders, matching the /search listing style)
+        # Send response as plain HTML so titles render as tap-to-copy <code>
+        # spans (reverted from the /search-style code block).
         await message.reply_text(
             formatted_output,
+            parse_mode=ParseMode.HTML,
             link_preview_options=LinkPreviewOptions(is_disabled=True)
         )
 
@@ -795,7 +775,11 @@ async def cmd_genres(client, message: Message):
         if total == 0:
             return await message.reply_text(f"🎭 No indexed titles found in genre <b>{genre_query}</b>.", parse_mode=ParseMode.HTML)
 
-        await send_genre_page(client, message, genre_query, page=1, total=total)
+        # File totals (movie/series split) for the header, computed once and
+        # stored with the browse state like the title count.
+        files_split = await _genre_files_split(genre_query)
+        await send_genre_page(client, message, genre_query, page=1, total=total,
+                              files_split=files_split)
         return
     except Exception as e:
         print(f"Error in genres command: {e}")
@@ -825,11 +809,11 @@ def _genre_title_pipeline(genre, sort, skip, limit):
         "episodes": {"$addToSet": {"s": "$season", "e": "$episode"}},
         "max_indexed_at": {"$max": "$indexed_at"},
         "max_rating": {"$max": "$tmdb_rating"},
-        "copies": {"$push": {"channel_id": "$channel_id", "message_id": "$message_id",
+        "copies": {"$push": {"title": "$title", "channel_id": "$channel_id", "message_id": "$message_id",
                                "quality": "$quality", "rip": "$rip", "year": "$year",
                                "file_size": "$file_size", "season": "$season",
                                "episode": "$episode", "tmdb_rating": "$tmdb_rating",
-                               "type": "$type"}},
+                               "type": "$type", "indexed_at": "$indexed_at"}},
     }
     pipeline = [{"$match": filt}, {"$group": group}]
     if sort == "new":
@@ -858,6 +842,32 @@ async def _genre_title_count(genre):
     return docs[0]["n"] if docs else 0
 
 
+async def _genre_files_split(genre):
+    """Total files in a genre split by Movie/Series (the browse header).
+
+    Returns ``{"total": N, "movie": X, "series": Y}`` or ``None`` on failure.
+    Series types are series/tv/show; anything else (including missing type)
+    counts as Movie - same rule as /search's Files Found split.
+    """
+    pipeline = [
+        {"$match": {"tmdb_genres": {"$regex": f"^{re.escape(genre)}$", "$options": "i"}}},
+        {"$group": {"_id": "$type", "files": {"$sum": 1}}},
+    ]
+    try:
+        docs = await movies_col.aggregate(pipeline).to_list(length=None)
+    except Exception as e:
+        print(f"⚠️ genre files-split aggregation failed: {e}")
+        return None
+    movie = series = 0
+    for d in docs:
+        t = str(d.get("_id") or "Movie")
+        if t.lower() in ("series", "tv", "show"):
+            series += int(d.get("files") or 0)
+        else:
+            movie += int(d.get("files") or 0)
+    return {"total": movie + series, "movie": movie, "series": series}
+
+
 async def _genre_real_counts(genre, entries):
     """Real TMDb season/episode totals per distinct series title (cached 6h).
 
@@ -873,18 +883,18 @@ async def _genre_real_counts(genre, entries):
 
 
 def _format_genre_details(title_doc, meta):
-    """Per-title details for the deduped genre listing.
+    """Series aggregate segment for the deduped genre listing line.
 
-    Series: ``3 seasons [5], 20 eps [35], 20 files`` where the bracket values
-    are the real TMDb totals (DB counts outside the brackets). Movies:
-    ``2 files``. DB counts use distinct seasons and distinct (season, episode)
-    pairs so duplicate-quality copies don't inflate them.
+    ``2 seasons [5] · 3 eps [35]`` where the bracket values are the real TMDb
+    totals (DB counts outside the brackets); ``""`` for movies. DB counts use
+    distinct seasons and distinct (season, episode) pairs so duplicate-quality
+    copies don't inflate them. The file count lives in the ``> N files >``
+    part of the line (matching /search), not here.
     """
     is_series = (title_doc.get("type") or "Movie").lower() in ("series", "tv", "show")
     seasons = {s for s in (title_doc.get("seasons") or []) if s is not None}
     eps = {(p.get("s"), p.get("e")) for p in (title_doc.get("episodes") or [])
            if p.get("s") is not None and p.get("e") is not None}
-    files = int(title_doc.get("files") or 0)
 
     parts = []
     if is_series and seasons:
@@ -896,24 +906,29 @@ def _format_genre_details(title_doc, meta):
         if meta and meta.get("episodes"):
             e_part += f" [{meta['episodes']}]"
         parts.append(e_part)
-    parts.append(f"{files} file{'s' if files != 1 else ''}")
-    return ", ".join(parts)
+    return " · ".join(parts)
 
 
-async def send_genre_page(client, message, genre, page, total=None, genre_id=None, edit=False, sort="az"):
+async def send_genre_page(client, message, genre, page, total=None, files_split=None, genre_id=None, edit=False, sort="az", season_pages=None):
     """Render one page of /genres <name> results.
 
     Shared by the initial /genres <name> send and the genre_page: pagination
     callback so the browse view stays consistent. Pagination state (genre,
-    total, owner, sort) lives in bulk_downloads under a short id and expires
-    via cleanup_expired_bulk_downloads like search/request-list state.
+    total, owner, sort, page, entries, season_pages) lives in bulk_downloads
+    under a short id and expires via cleanup_expired_bulk_downloads like
+    search/request-list state.
 
     Args:
         genre_id: when None, a new pagination state entry is created (first
             render); callbacks pass the stored id so Prev/Next keep working.
+        files_split: ``{"total", "movie", "series"}`` for the header's
+            ``Files Found: N (Movie - X | Series - Y)`` line (None omits it).
         edit: True re-renders in place (callback path), False replies fresh.
         sort: ``az`` (title asc), ``new`` (indexed_at desc, newest first) or
             ``rate`` (tmdb_rating desc, top rated first).
+        season_pages: maps a page-local group index -> the group's season
+            shortcut page (0-based) so long-running series page their
+            Pick[n][Sxx] buttons via S◀/S▶ (mirrors /search).
     """
     if sort not in ("new", "rate"):
         sort = "az"
@@ -928,35 +943,12 @@ async def send_genre_page(client, message, genre, page, total=None, genre_id=Non
     ).to_list(length=GENRE_PAGE_SIZE)
 
     # Real TMDb totals per distinct title (cached 6h via enrich_title) - the
-    # bracket values in the series lines.
+    # bracket values in the series aggregate segment.
     meta_by_title = await _genre_real_counts(genre, entries)
 
-    # Deduped listing: one line per title with its details and the best
-    # copy's Get button. Series: ``3 seasons [5], 20 eps [35], 20 files``,
-    # movies: ``2 files``; the ⭐ TMDb rating stays at the end.
-    lines = []
-    buttons = []
-    for idx, t in enumerate(entries, 1):
-        n = (page - 1) * GENRE_PAGE_SIZE + idx
-        line = f"{n}. {t.get('title', 'Unknown')} - {_format_genre_details(t, meta_by_title.get(t.get('title')))}"
-        meta = meta_by_title.get(t.get("title"))
-        if meta and meta.get("rating"):
-            line += f" ⭐{meta['rating']}"
-        lines.append(line)
-        best, _ = pick_best_quality(t.get("copies") or [])
-        if best and best.get("channel_id") and best.get("message_id"):
-            buttons.append(InlineKeyboardButton(
-                f"Get [{n}]", callback_data=f"get_file:{best['channel_id']}:{best['message_id']}"
-            ))
-
-    text = "```\n"
-    text += f"Genre: \"{genre}\"\n"
-    text += f"Total Results: {total} | Page {page}/{total_pages}\n\n"
-    text += "\n".join(lines)
-    text += "\n```"
-    reply_markup = InlineKeyboardMarkup([buttons[i:i+4] for i in range(0, len(buttons), 4)]) if buttons else None
-
-    # Persist pagination state on first render so Prev/Next can re-render.
+    # Persist pagination state BEFORE building buttons (the Pick buttons embed
+    # the genre id). Created on the first render; refreshed on every render so
+    # the Back-from-pick button restores the exact page the user was on.
     if genre_id is None:
         await cleanup_expired_bulk_downloads(bulk_downloads)
         genre_id = str(uuid.uuid4())[:8]
@@ -964,10 +956,95 @@ async def send_genre_page(client, message, genre, page, total=None, genre_id=Non
             "type": "genre_list",
             "genre": genre,
             "total": total,
+            "files_split": files_split,
             "sort": sort,
             "created_at": datetime.now(timezone.utc),
             "user_id": message.from_user.id,
         }
+    state = bulk_downloads.get(genre_id)
+    if state:
+        state["page"] = page
+        state["entries"] = entries
+        state["season_pages"] = season_pages or state.get("season_pages") or {}
+        if files_split is not None:
+            state["files_split"] = files_split
+
+    # Deduped listing in the /search per-title + latest-file layout: one line
+    # per title ``N. Title > N files > [aggregates] > Latest: <latest-info>``
+    # with the ⭐ TMDb rating at the end. Series keep their DB-vs-real
+    # season/episode aggregates inline. Every title gets a ``Pick [n]`` button
+    # (in-place filter view, like /search - series with several seasons also
+    # get Pick[n][Sxx] shortcuts) and a ``Get [n]`` button targeting the LATEST
+    # copy (same rule as /search's Get [n]).
+    lines = []
+    pick_buttons = []
+    get_buttons = []
+    for idx, t in enumerate(entries, 1):
+        n = (page - 1) * GENRE_PAGE_SIZE + idx
+        local_idx = idx - 1
+        copies = t.get("copies") or []
+        files = int(t.get("files") or 0)
+        file_word = "file" if files == 1 else "files"
+        line = f"{n}. {t.get('title', 'Unknown')} > {files} {file_word}"
+        details = _format_genre_details(t, meta_by_title.get(t.get("title")))
+        if details:
+            line += f" > {details}"
+        latest = latest_copy(copies)
+        line += f" > Latest: {format_latest_info(latest)}"
+        meta = meta_by_title.get(t.get("title"))
+        if meta and meta.get("rating"):
+            line += f" ⭐{meta['rating']}"
+        lines.append(line)
+
+        # Pick button (opens the in-place filter view for this title) plus
+        # Pick[n][Sxx] season shortcuts for multi-season series. Long-running
+        # series page through their shortcuts (S◀/S▶, one group at a time) via
+        # 6-part genre_page data - the callback advances the group's season
+        # page and this render rebuilds with the next slice of Sxx buttons
+        # (mirrors /search's results-level season paging).
+        if is_series(copies):
+            seasons = group_seasons(copies)
+            if len(seasons) > 1:
+                sp = (season_pages or {}).get(local_idx, 0)
+                max_sp = max(0, (len(seasons) + MAX_SEASON_BUTTONS - 1)
+                             // MAX_SEASON_BUTTONS - 1)
+                sp = max(0, min(sp, max_sp))
+                start = sp * MAX_SEASON_BUTTONS
+                for s in seasons[start:start + MAX_SEASON_BUTTONS]:
+                    pick_buttons.append(InlineKeyboardButton(
+                        f"Pick[{n}][S{s:02d}]",
+                        callback_data=pick_callback(genre_id, local_idx, season=s,
+                                                    prefix="genre_pick")))
+                if len(seasons) > MAX_SEASON_BUTTONS:
+                    if sp > 0:
+                        pick_buttons.append(InlineKeyboardButton(
+                            "S◀",
+                            callback_data=f"genre_page:{genre_id}:{page}:{sort}:{local_idx}:{sp - 1}"))
+                    if start + MAX_SEASON_BUTTONS < len(seasons):
+                        pick_buttons.append(InlineKeyboardButton(
+                            "S▶",
+                            callback_data=f"genre_page:{genre_id}:{page}:{sort}:{local_idx}:{sp + 1}"))
+        pick_buttons.append(InlineKeyboardButton(
+            f"Pick [{n}]",
+            callback_data=pick_callback(genre_id, local_idx, prefix="genre_pick")))
+
+        # Get button: the latest copy (same rule as /search's Get [n]).
+        if latest and latest.get("channel_id") and latest.get("message_id"):
+            get_buttons.append(InlineKeyboardButton(
+                f"Get [{n}]", callback_data=f"get_file:{latest['channel_id']}:{latest['message_id']}"))
+
+    text = "```\n"
+    text += f"Genre: \"{genre}\"\n"
+    text += f"Titles Found: {total} | Page {page}/{total_pages}\n"
+    if files_split:
+        text += (f"Files Found: {files_split.get('total')} "
+                 f"(Movie - {files_split.get('movie')} | Series - {files_split.get('series')})\n")
+    # Same Pick/Get hint as /search (shared SEARCH_HINT constant).
+    text += f"\n{SEARCH_HINT}\n\n" + "\n".join(lines)
+    text += "\n```"
+    rows = ([pick_buttons[i:i + 4] for i in range(0, len(pick_buttons), 4)]
+            + [get_buttons[i:i + 4] for i in range(0, len(get_buttons), 4)])
+    reply_markup = InlineKeyboardMarkup(rows) if rows else None
     # Sort toggle row (active option marked with a checkmark).
     sort_row = [
         InlineKeyboardButton(
@@ -1052,14 +1129,15 @@ async def cmd_watchlist(client, message: Message):
             "Use <code>/watch &lt;title&gt;</code> to get notified when a title is indexed.",
             parse_mode=ParseMode.HTML,
         )
-    # /search-style listing: bracket lines (year.type) inside a code block.
+    # Plain HTML with tap-to-copy titles (year.type bracket details kept).
     lines = []
     for i, e in enumerate(entries, 1):
         parts = [p for p in (e.get("year"), e.get("type") or "Movie") if p]
-        lines.append(f"{i}. {e.get('title')} [{".".join(map(str, parts))}]")
-    text = "👁️ Your Watchlist\n\n```\n" + "\n".join(lines) + "\n```"
-    text += "\n\nRemove with /unwatch title"
-    await message.reply_text(text)
+        title = html.escape(str(e.get("title")))
+        lines.append(f"{i}. <code>{title}</code> [{".".join(map(str, parts))}]")
+    text = "👁️ <b>Your Watchlist</b>\n\n" + "\n".join(lines)
+    text += "\n\n<i>Tap any title to copy</i> · Remove with /unwatch title"
+    await message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def cmd_logs(client, message: Message):

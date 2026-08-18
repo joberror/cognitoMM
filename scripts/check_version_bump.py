@@ -27,7 +27,6 @@ import os
 import re
 import subprocess
 import sys
-from pathlib import Path
 
 # New handler definition added: e.g. "  async def cmd_random(...):"
 HANDLER_RE = re.compile(r"^\+\s*(?:async\s+)?def\s+(?:cmd|handle)_")

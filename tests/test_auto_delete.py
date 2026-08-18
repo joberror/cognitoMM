@@ -20,7 +20,6 @@ import sys
 import os
 import asyncio
 import time
-import uuid
 from datetime import datetime, timezone, timedelta
 from unittest.mock import Mock, AsyncMock, patch
 import logging
@@ -415,8 +414,6 @@ def test_integration_points():
     logger.info("Running Test 6: Integration Points")
     
     try:
-        from pyrogram.types import CallbackQuery, Message
-        
         with _fresh_lock_patch(), \
              patch.object(callbacks_module, 'users_col', AsyncMock()), \
              patch.object(callbacks_module, 'movies_col', AsyncMock()) as movies_mock, \

@@ -435,21 +435,44 @@ def test_format_series_group_episode_ranges():
 
 
 def test_format_recent_output_renders_sections():
-    """format_recent_output renders movies/series sections and context lines."""
+    """format_recent_output renders plain HTML with click-to-copy search strings."""
     grouped = {
-        "movies": [{"title": "Inception", "details": "2010.1080p", "count": 1}],
-        "series": [{"title": "Breaking Bad", "details": "2008.S01E01-02", "count": 2}],
+        "movies": [{"title": "Inception", "details": "2010.1080p", "year": 2010, "count": 1}],
+        "series": [{"title": "Breaking Bad", "details": "2008.S01E01-02", "year": 2008, "count": 2}],
     }
     out = utils.format_recent_output(grouped, total_files=3, total_movies=1,
                                      total_series=1, last_updated="2026-01-01 00:00:00 UTC")
-    # /search-style: everything in one code block, bracket lines, sections kept.
-    assert out.startswith("```") and out.rstrip().endswith("```")
-    assert "LAST BATCH UPDATE" in out
+    # Plain HTML (no code block), click-to-copy 'Title (year)' targets, sections kept.
+    assert "```" not in out
+    assert out.startswith("<b>LAST BATCH UPDATE</b>")
     assert "Updated: 2026-01-01 00:00:00 UTC" in out
     assert "Files: 3 (Movies: 1 | Series: 1)" in out
-    assert "\nMOVIES\n" in out and "\nSERIES\n" in out
-    assert "1. Inception [2010.1080p]" in out
-    assert "1. Breaking Bad [2008.S01E01-02]" in out
+    assert "<b>MOVIES</b>" in out and "<b>SERIES</b>" in out
+    # Copy target is the full 'Title (year)'; year is dropped from the bracket.
+    assert "1. <code>Inception (2010)</code> [1080p]" in out
+    assert "1. <code>Breaking Bad (2008)</code> [S01E01-02]" in out
+    assert out.rstrip().endswith("<i>Tap any title to copy</i>")
+
+
+def test_format_recent_output_escapes_titles():
+    """Copy targets with HTML special chars are escaped so parse_mode=HTML never breaks."""
+    grouped = {
+        "movies": [{"title": "Rock & Roll <Live> \"2026\"", "details": "", "year": 2026, "count": 1}],
+        "series": [],
+    }
+    out = utils.format_recent_output(grouped, total_files=1, total_movies=1, total_series=0)
+    assert "<code>Rock &amp; Roll &lt;Live&gt; &quot;2026&quot; (2026)</code>" in out
+    assert "<code>Rock & Roll" not in out  # raw & must not leak into HTML
+
+
+def test_format_recent_output_missing_year_falls_back_to_title():
+    """Without a year the copy target is just the title and details stay intact."""
+    grouped = {
+        "movies": [{"title": "No Year", "details": "1080p", "year": None, "count": 1}],
+        "series": [],
+    }
+    out = utils.format_recent_output(grouped, total_files=1, total_movies=1, total_series=0)
+    assert "1. <code>No Year</code> [1080p]" in out
 
 
 # -------------------------

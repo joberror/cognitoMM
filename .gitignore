@@ -130,3 +130,4 @@ logs/
 *.session
 *.session-shm
 *.session-wal
+auto_delete_test_report.txt

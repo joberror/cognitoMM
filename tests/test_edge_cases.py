@@ -3,7 +3,6 @@
 Test edge cases and problematic scenarios for movie title extraction
 """
 
-import re
 import sys
 import os
 

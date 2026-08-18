@@ -4,7 +4,6 @@ Test script for series name extraction from parse_metadata()
 Tests the regex pattern changes at line 601 in main.py
 """
 
-import re
 import sys
 import os
 

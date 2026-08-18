@@ -6,7 +6,6 @@ Tests the context-aware multi-year detection algorithm in parse_metadata().
 
 import sys
 import os
-from typing import Dict, Any, Tuple
 
 # Ensure project root is on the path so the features package is importable
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -44,7 +44,6 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from pyrogram.enums import ParseMode
 from pyrogram.types import LinkPreviewOptions
 
 import features.callbacks as callbacks
@@ -53,6 +52,7 @@ from features.search import (
     build_pick_view,
     build_search_keyboard,
     build_search_page,
+    build_title_info_block,
     filter_copies,
     group_seasons,
     is_series,
@@ -100,7 +100,7 @@ def movie(quality="1080p", mid=1, title="Inception", year=2010, rip="BluRay"):
 def episode(season, episode, quality="1080p", mid=1, title="Show", year=2000):
     return {"title": title, "year": year, "type": "Series", "quality": quality,
             "rip": "Web", "season": season, "episode": episode,
-            "channel_id": -1002, "message_id": mid}
+            "file_size": 100, "channel_id": -1002, "message_id": mid}
 
 
 def _series_copies(num_seasons, eps_per=2):
@@ -163,6 +163,19 @@ def test_pick_callback_format():
                          season_page=1) == "choose:ab12cd34:2:S11:1080p:1"
 
 
+def test_pick_callback_and_back_prefix_for_genre():
+    """Non-search surfaces reuse the pick view via a custom callback prefix."""
+    assert pick_callback("gid1", 2, prefix="genre_pick") == "genre_pick:gid1:2:::"
+    assert pick_callback("gid1", 2, season=3, prefix="genre_pick") == "genre_pick:gid1:2:S03::"
+
+    text, kb = build_pick_view("gid1", 0, [movie("1080p", mid=1), movie("720p", mid=2)],
+                               prefix="genre_pick", back_prefix="genre_back")
+    buttons = _flat_buttons(kb)
+    assert buttons.get("[1080p]") == "genre_pick:gid1:0::1080p:"
+    assert buttons.get("[720p]") == "genre_pick:gid1:0::720p:"
+    assert buttons.get("← Back") == "genre_back:gid1"
+
+
 def test_group_seasons_and_filter_copies():
     copies = [episode(3, 1), episode(1, 1), episode(3, 2), movie(quality="1080p")]
     assert is_series(copies) is True
@@ -189,12 +202,37 @@ def test_build_search_page_dedup_and_format():
     text, button_data, groups, total_pages = build_search_page(results, "incep", 1)
 
     assert total_pages == 1
-    assert 'Search: "incep"' in text
-    assert "Total Results: 3 | Page 1/1" in text
-    assert "🔁+1" in text  # the two Inception copies dedupe into one group
+    assert 'Search : incep' in text
+    # Titles Found: 2 per-title groups, 0 exact (no exact_ids passed) | 2 fuzzy
+    assert "Titles Found: 2 (0 Exact | 2 Fuzzy)" in text
+    assert "Files Found: 3 (Movie - 2 | Series - 1)" in text
+    assert "Hint: Use\nPick button below to select title, see, and get all relative files." in text
+    # One line per title with file count + latest-file info (latest = highest
+    # message_id here since no indexed_at is set).
+    assert "1. Inception > 2 files > Latest: 1080p | 100B | Blu-ray" in text
+    assert "2. Show > 1 file > Latest: S01E01 | 1080p | 100B | WebRip" in text
     assert len(groups) == 2
     assert button_data[0]["group_size"] == 2 and button_data[0]["group_index"] == 0
     assert button_data[1]["group_size"] == 1 and button_data[1]["group_index"] == 1
+
+
+def test_build_search_page_exact_fuzzy_header_counts():
+    """Exact counts come from exact_ids (title starts with the query)."""
+    results = [movie("1080p", mid=1, title="Lucky"),
+               movie("720p", mid=2, title="Who is Lucky"),
+               movie("1080p", mid=3, title="Money Luck")]
+    exact_ids = {"l1"}
+    results[0]["_id"] = "l1"
+    results[1]["_id"] = "l2"
+    results[2]["_id"] = "l3"
+
+    text, _, _, _ = build_search_page(results, "Lucky", 1, exact_ids=exact_ids)
+    assert "Titles Found: 3 (1 Exact | 2 Fuzzy)" in text
+    assert "Files Found: 3 (Movie - 3 | Series - 0)" in text
+
+    # No exact_ids -> everything counts as fuzzy
+    text2, _, _, _ = build_search_page(results, "Lucky", 1)
+    assert "Titles Found: 3 (0 Exact | 3 Fuzzy)" in text2
 
 
 def test_build_search_keyboard_movie_pick_and_get():
@@ -209,13 +247,16 @@ def test_build_search_keyboard_movie_pick_and_get():
     kb = asyncio.run(build("sid1234", results))
     buttons = _flat_buttons(kb)
     assert buttons.get("Pick [1]") == "choose:sid1234:0:::"
-    assert "Get [1]" not in buttons  # multi-copy group never gets a Get button
+    # Every title gets BOTH Pick and Get; Get points at the LATEST copy
+    # (highest message_id here, since neither copy has indexed_at).
+    assert buttons.get("Get [1]") == "get_file:-1001:2"
     assert buttons.get("Get All (2)") is not None
 
-    # Single-copy group -> plain Get button
+    # Single-copy group -> plain Get button AND a Pick button
     kb2 = asyncio.run(build("sid9999", [movie("1080p", mid=9)]))
     buttons2 = _flat_buttons(kb2)
     assert buttons2.get("Get [1]") == "get_file:-1001:9"
+    assert buttons2.get("Pick [1]") == "choose:sid9999:0:::"
 
 
 def test_build_search_keyboard_series_season_picks():
@@ -317,7 +358,7 @@ def test_page_callback_season_paging():
 
     assert cbq.edits, "season paging must re-render the results page"
     text, kwargs = cbq.edits[0]
-    assert 'Search: "show"' in text
+    assert 'Search : show' in text
     buttons = _flat_buttons(kwargs["reply_markup"])
     assert buttons.get("Pick[1][S06]") == "choose:sid1234:0:S06::"
     assert buttons.get("Pick[1][S09]") == "choose:sid1234:0:S09::"
@@ -338,7 +379,7 @@ def test_page_callback_legacy_3_part_data():
 
     assert cbq.edits
     text, _ = cbq.edits[0]
-    assert "Total Results: 2 | Page 1/1" in text
+    assert "Titles Found: 1 (0 Exact | 1 Fuzzy)" in text
     assert "season_pages" not in cached["sid1234"]
 
 
@@ -346,10 +387,12 @@ def test_build_pick_view_movie_lists_every_copy():
     copies = [movie("720p", mid=1), movie("1080p", mid=2)]
     text, kb = build_pick_view("sid1234", 0, copies)
 
-    assert "🎞️ <b>Inception</b> (2010)" in text
+    assert "🎞️ **Inception** (2010)" in text
     assert "2 copies" in text
-    assert "720p, BluRay, 100B" in text
-    assert "1080p, BluRay, 100B" in text
+    # Pick-view lines carry Title (Year) - Size | Rip | Resolution in a code block
+    assert "1. Inception (2010) - 100B | Blu-ray | 720p" in text
+    assert "2. Inception (2010) - 100B | Blu-ray | 1080p" in text
+    assert "```" in text
 
     buttons = _flat_buttons(kb)
     assert buttons.get("Get [1]") == "get_file:-1001:1"
@@ -366,8 +409,8 @@ def test_build_pick_view_movie_resolution_filter():
 
     assert "· 720p" in text
     assert "1 copy" in text
-    assert "720p, BluRay, 100B" in text
-    assert "1080p, BluRay, 100B" not in text
+    assert "1. Inception (2010) - 100B | Blu-ray | 720p" in text
+    assert "| 1080p" not in text
 
     buttons = _flat_buttons(kb)
     assert buttons.get("[720p] ✓") == "choose:sid1234:0:::"  # active -> toggle off
@@ -384,12 +427,13 @@ def test_build_pick_view_series_seasons_and_episode_dedup():
     ]
     text, kb = build_pick_view("sid1234", 0, copies)
 
-    assert "🎞️ <b>Show</b> (2000)" in text
+    assert "🎞️ **Show** (2000)" in text
     assert "5 copies across 2 seasons" in text
-    assert "S01E01 [1080p.Web] 🔁+1" in text  # deduped, best quality, dup marker
-    assert "S01E02 [1080p.Web]" in text
-    assert "S02E01 [1080p.Web]" in text
-    assert "S02E02 [720p.Web]" in text
+    # Episode lines dedupe (best copy wins) with the pick-view format
+    assert "1. Show (2000) - S01E01 | 100B | WebRip | 1080p 🔁+1" in text
+    assert "2. Show (2000) - S01E02 | 100B | WebRip | 1080p" in text
+    assert "3. Show (2000) - S02E01 | 100B | WebRip | 1080p" in text
+    assert "4. Show (2000) - S02E02 | 100B | WebRip | 720p" in text
 
     buttons = _flat_buttons(kb)
     assert buttons.get("S01") == "choose:sid1234:0:S01::"
@@ -426,8 +470,8 @@ def test_build_pick_view_series_without_season_lists_copies():
     ]
     text, kb = build_pick_view("sid1234", 0, copies)
     assert "2 copies" in text
-    assert "1. 1080p, Web, 100B" in text
-    assert "2. 720p, Web, 100B" in text
+    assert "1. Pack (2001) - 100B | WebRip | 1080p" in text
+    assert "2. Pack (2001) - 100B | WebRip | 720p" in text
     buttons = _flat_buttons(kb)
     assert buttons.get("Get [1]") == "get_file:-1002:1"
     assert buttons.get("Get [2]") == "get_file:-1002:2"
@@ -504,7 +548,7 @@ def test_choose_callback_legacy_5_part_data():
 
     assert cbq.message.edits
     text, _ = cbq.message.edits[0]
-    assert "🎞️ <b>Show</b> (2000)" in text
+    assert "🎞️ **Show** (2000)" in text
 
 
 def test_filter_copies_coerces_string_seasons():
@@ -513,6 +557,85 @@ def test_filter_copies_coerces_string_seasons():
     copies[0]["season"] = "2"  # string season in the DB
     assert len(filter_copies(copies, season=2)) == 1
     assert group_seasons(copies) == [2, 3]
+
+
+def test_build_search_page_latest_copy_wins_by_indexed_at():
+    """The Latest: line and the Get [n] button target the most recently
+    indexed copy of the title (not the best quality)."""
+    from datetime import datetime, timedelta, timezone
+
+    newer = movie("720p", mid=1)
+    older = movie("1080p", mid=2)
+    naive = movie("2160p", mid=3)  # naive timestamp must not crash the sort
+    now = datetime.now(timezone.utc)
+    newer["indexed_at"] = now
+    older["indexed_at"] = now - timedelta(days=2)
+    naive["indexed_at"] = datetime(2020, 1, 1)  # naive, clearly oldest
+    results = [newer, older, naive]  # same title "Inception" -> one group
+
+    text, button_data, groups, _ = build_search_page(results, "incep", 1)
+    assert "1. Inception > 3 files > Latest: 720p | 100B | Blu-ray" in text
+    assert button_data[0]["channel_id"] == -1001
+    assert button_data[0]["message_id"] == 1  # the NEWER (720p) copy
+
+
+def test_build_title_info_block_renders_meta():
+    """Title(s) Information lines carry year + rating/genres/IMDb when the
+    TMDb meta is available, and degrade to year-only without one."""
+    groups = [[movie("1080p", mid=1, title="Lucky", year=2025)],
+              [movie("1080p", mid=2, title="No Meta", year=2010)]]
+    metas = {0: {"rating": 6.8, "genres": ["Animation", "Action"],
+                 "imdb_id": "tt1234567"},
+             1: None}
+
+    block = build_title_info_block(groups, 1, metas)
+    assert "Title(s) Information" in block
+    assert "1. Lucky (Movie) - 2025 . ⭐️ 6.8 · 🎭 Animation, Action" in block
+    assert "[IMDb](https://imdb.com/title/tt1234567)" in block
+    assert "2. No Meta (Movie) - 2010" in block
+    assert ". ⭐️" not in block.split("2. No Meta")[1]  # no stray separator
+
+
+def test_page_callback_preserves_title_info():
+    """Pagination must NOT clear the Title(s) Information block: metas for
+    previously-seen pages are reused and only the new page's titles fetch."""
+    results = [movie("1080p", mid=i, title=f"T{i}", year=2000 + i)
+               for i in range(1, 11)]  # 10 distinct titles -> 2 pages (9 + 1)
+    cached = {
+        "sid1234": {
+            "user_id": 42,
+            "results": results,
+            "groups": [[r] for r in results],
+            "query": "t",
+            "page": 1,
+            "exact_ids": set(),
+            "metas": {i: None for i in range(9)},  # page 1 already fetched
+            "created_at": datetime.now(timezone.utc),
+        }
+    }
+    cbq = FakeCallbackQuery(data="page:sid1234:2", user_id=42)
+
+    async def run():
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(callbacks, "bulk_downloads", cached))
+            stack.enter_context(patch.object(callbacks, "has_accepted_terms",
+                                             AsyncMock(return_value=True)))
+            stack.enter_context(patch.object(callbacks, "should_process_command_for_user",
+                                             AsyncMock(return_value=True)))
+            stack.enter_context(patch("features.premium_management.is_feature_premium_only",
+                                      AsyncMock(return_value=False)))
+            # Only the missing page-2 index (9) should be fetched.
+            stack.enter_context(patch("features.search._fetch_metas",
+                                      AsyncMock(return_value={9: None})))
+            await callbacks.callback_handler(None, cbq)
+    asyncio.run(run())
+
+    assert cbq.edits
+    text, _ = cbq.edits[0]
+    assert "Title(s) Information" in text, "title info must survive pagination"
+    assert "10. T10 (Movie) - 2010" in text
+    assert "Page 2/2" in text
+    assert cached["sid1234"]["metas"][9] is None  # merged into the stored metas
 
 
 # ------------------------------------------------------------------ #
@@ -535,8 +658,9 @@ def test_choose_callback_filters_in_place():
 
     assert cbq.message.edits, "pick must edit the search message in place"
     text, kwargs = cbq.message.edits[0]
-    assert "🎞️ <b>Inception</b> (2010)" in text
-    assert kwargs["parse_mode"] == ParseMode.HTML
+    assert "🎞️ **Inception** (2010)" in text
+    assert "```" in text  # pick list renders as a code block (default parse mode)
+    assert "parse_mode" not in kwargs
     assert isinstance(kwargs["link_preview_options"], LinkPreviewOptions)
     assert kwargs["link_preview_options"].is_disabled is True
     assert any(a[0] == "✅ Filtered to copies" for a in cbq.answers)
@@ -582,8 +706,8 @@ def test_back_callback_restores_search_page():
 
     assert cbq.edits, "back must re-render the search results page"
     text, kwargs = cbq.edits[0]
-    assert 'Search: "incep"' in text
-    assert "Total Results: 2 | Page 1/1" in text
+    assert 'Search : incep' in text
+    assert "Titles Found: 1 (0 Exact | 1 Fuzzy)" in text
     assert kwargs["link_preview_options"].is_disabled is True
     assert any(a[0] == "← Back to results" for a in cbq.answers)
 
@@ -606,8 +730,13 @@ def main():
     tests = [
         test_normalize_resolution,
         test_pick_callback_format,
+        test_pick_callback_and_back_prefix_for_genre,
         test_group_seasons_and_filter_copies,
         test_build_search_page_dedup_and_format,
+        test_build_search_page_exact_fuzzy_header_counts,
+        test_build_search_page_latest_copy_wins_by_indexed_at,
+        test_build_title_info_block_renders_meta,
+        test_page_callback_preserves_title_info,
         test_build_search_keyboard_movie_pick_and_get,
         test_build_search_keyboard_series_season_picks,
         test_build_search_keyboard_season_paging,

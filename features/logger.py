@@ -8,8 +8,6 @@ Telegram's rate limits.
 
 import sys
 import asyncio
-import io
-import traceback
 from datetime import datetime
 import html
 from pyrogram.errors import PeerIdInvalid

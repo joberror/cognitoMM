@@ -12,18 +12,30 @@ callbacks, the in-place pick filter view, and the inline query handler
 """
 
 import asyncio
-import html
 import re
 import uuid
 from datetime import datetime, timezone
 
 from fuzzywuzzy import fuzz
-from pyrogram.enums import ParseMode
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, LinkPreviewOptions
 
 from .config import FUZZY_THRESHOLD
 from .database import movies_col
-from .utils import format_file_size, format_search_info, format_search_line
+from .utils import format_search_info, latest_copy
+
+
+def is_exact_title(title, query):
+    """True when a title is an EXACT match for the query (starts with it).
+
+    The rule: the title starts with the query and the next character is not a
+    letter (``Lucky`` is exact for ``Lucky``, ``Lucky 2`` too, but ``Luckily``
+    is not). This powers the ``Titles Found: N (X Exact | Y Fuzzy)`` header.
+    """
+    q = (query or "").strip().lower()
+    t = str(title or "").strip().lower()
+    if not q or not t.startswith(q):
+        return False
+    return len(t) == len(q) or not t[len(q)].isalpha()
 
 
 async def perform_search(query: str, exact_search: bool = False, fuzzy_threshold: int = None):
@@ -36,7 +48,9 @@ async def perform_search(query: str, exact_search: bool = False, fuzzy_threshold
         fuzzy_threshold: Threshold for fuzzy matching (default: FUZZY_THRESHOLD from config)
 
     Returns:
-        List of matching results
+        Dict with ``results`` (list of matching copy documents), ``exact_ids``
+        (set of ``_id`` values whose title counts as an exact match - empty for
+        ``exact_search`` mode where every result is exact).
     """
     if fuzzy_threshold is None:
         fuzzy_threshold = FUZZY_THRESHOLD
@@ -45,7 +59,7 @@ async def perform_search(query: str, exact_search: bool = False, fuzzy_threshold
         # Exact search mode - only look for exact title matches
         exact_pattern = f"^{re.escape(query)}$"
         exact = await movies_col.find({"title": {"$regex": exact_pattern, "$options": "i"}}).to_list(length=None)
-        return exact
+        return {"results": exact, "exact_ids": {r.get("_id") for r in exact}}
     else:
         # Normal search - exact + fuzzy
         # Search for exact matches (no limit - show all results)
@@ -68,7 +82,8 @@ async def perform_search(query: str, exact_search: bool = False, fuzzy_threshold
             candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
             all_results.extend([c[1] for c in candidates])
 
-        return all_results
+        exact_ids = {r.get("_id") for r in all_results if is_exact_title(r.get("title"), query)}
+        return {"results": all_results, "exact_ids": exact_ids}
 
 
 # ----------------------------------------------------------------------
@@ -99,13 +114,15 @@ def normalize_resolution(quality):
     return None
 
 
-def pick_callback(search_id, group_index, season=None, resolution=None, season_page=0):
+def pick_callback(search_id, group_index, season=None, resolution=None, season_page=0,
+                  prefix="choose"):
     """Callback data for the pick filter view (6 colon-separated parts).
 
-    Format: ``choose:{search_id}:{group_index}:{season}:{resolution}:{page}``
+    Format: ``{prefix}:{search_id}:{group_index}:{season}:{resolution}:{page}``
     where season is ``S02`` (or empty), resolution is ``1080p`` (or empty) and
     page is the 0-based season page (empty = page 0). The legacy 5-part format
-    (no trailing page) is still accepted by the callback parser.
+    (no trailing page) is still accepted by the callback parser. ``prefix`` is
+    ``choose`` for /search and ``genre_pick`` for /genres browsing.
     """
     season_part = ""
     if season is not None:
@@ -114,7 +131,7 @@ def pick_callback(search_id, group_index, season=None, resolution=None, season_p
         except (TypeError, ValueError):
             season_part = f"S{season}"
     page_part = str(season_page) if season_page else ""
-    return f"choose:{search_id}:{group_index}:{season_part}:{resolution or ''}:{page_part}"
+    return f"{prefix}:{search_id}:{group_index}:{season_part}:{resolution or ''}:{page_part}"
 
 
 def is_series(copies):
@@ -149,63 +166,180 @@ def filter_copies(copies, season=None, resolution=None):
     return filtered
 
 
-def build_search_page(results, query, page):
+RESULTS_PER_PAGE = 9  # per-TITLE groups per page (not per copy)
+
+# Shared Pick/Get hint shown on every /search and /genres <name> result page
+# (single source so both surfaces can't drift apart).
+SEARCH_HINT = (
+    "Hint: Use\n"
+    "Pick button below to select title, see, and get all relative files.\n"
+    "Get button below to get latest file of each title."
+)
+
+
+def group_by_title(results):
+    """Group copy documents into per-title buckets (case-insensitive title).
+
+    Returns a list of groups (each a list of copy docs) so every title appears
+    exactly once in the results list, with its file count derived from the
+    group size.
+    """
+    buckets = {}
+    order = []
+    for entry in results:
+        key = str(entry.get("title") or "Untitled").strip().lower()
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append(entry)
+    return [buckets[key] for key in order]
+
+
+def _copy_type_label(copy):
+    """'Series' when the copy is a series/tv/show, else 'Movie'."""
+    return "Series" if (copy.get("type") or "Movie").lower() in SERIES_TYPES else "Movie"
+
+
+def build_search_page(results, query, page, exact_ids=None):
     """Build the paginated search-result text + per-line button metadata.
 
-    Returns ``(search_text, button_data, groups, total_pages)``. The initial
-    /search send, the page:/back: callbacks and history searches all render
-    through here so every view stays identical.
+    The result list is a code block of per-title lines:
+
+        Search : Lucky
+        Titles Found: 3 (1 Exact | 2 Fuzzy)
+        Files Found: 15 (Movie - 5 | Series - 10)
+        ...
+        1. Lucky > 2 files > Latest: 1080p | 2.5GB | WebRip
+
+    Returns ``(search_text, button_data, groups, total_pages)`` where
+    ``groups`` are ALL per-title groups (so the Pick view can index into the
+    global list from any page) and button_data carries the global group index
+    plus the LATEST copy's channel/message ids (the ``Get [n]`` target). The
+    caller appends the TMDb Title(s) Information block via
+    ``build_title_info_block`` so it survives pagination. The initial /search
+    send, the page:/back: callbacks and history searches all render through
+    here so every view stays identical.
     """
-    from .utils import group_duplicate_copies, pick_best_quality
+    from .utils import pick_best_quality
 
-    # Pagination settings
-    RESULTS_PER_PAGE = 9
-    total_results = len(results)
-    total_pages = max(1, (total_results + RESULTS_PER_PAGE - 1) // RESULTS_PER_PAGE)  # Ceiling division
-
-    # Ensure page is within valid range
+    groups = group_by_title(results)
+    total_titles = len(groups)
+    total_pages = max(1, (total_titles + RESULTS_PER_PAGE - 1) // RESULTS_PER_PAGE)
     page = max(1, min(page, total_pages))
 
-    # Calculate start and end indices for current page
     start_idx = (page - 1) * RESULTS_PER_PAGE
-    end_idx = min(start_idx + RESULTS_PER_PAGE, total_results)
-    page_results = results[start_idx:end_idx]
+    page_groups = groups[start_idx:start_idx + RESULTS_PER_PAGE]
 
-    # Group duplicate copies (same title/year/type) so each line shows the
-    # best-quality copy; groups with more than one copy get a "Pick" filter.
-    groups = group_duplicate_copies(page_results)
+    # Exact/fuzzy title counts (exact = title starts with the query).
+    exact_ids = exact_ids or set()
+    exact_titles = sum(1 for g in groups
+                       if any(c.get("_id") in exact_ids for c in g))
+    fuzzy_titles = total_titles - exact_titles
 
-    # Create header
-    search_text = f"```\n"
-    search_text += f"Search: \"{query}\"\n"
-    search_text += f"Total Results: {total_results} | Page {page}/{total_pages}\n\n"
+    # File counts split by movie/series.
+    movie_files = sum(1 for g in groups for c in g if _copy_type_label(c) == "Movie")
+    series_files = len(results) - movie_files
 
-    # Format each group (best copy) on current page
+    search_text = (
+        f"```\n"
+        f"Search : {query}\n"
+        f"Titles Found: {total_titles} ({exact_titles} Exact | {fuzzy_titles} Fuzzy)\n"
+        f"Files Found: {len(results)} (Movie - {movie_files} | Series - {series_files})\n\n"
+        f"{SEARCH_HINT}\n\n"
+    )
+
     button_data = []
+    for i, group in enumerate(page_groups, start=start_idx + 1):
+        best, _ = pick_best_quality(group)
+        latest = latest_copy(group)
+        files = len(group)
+        file_word = "file" if files == 1 else "files"
 
-    for i, group in enumerate(groups, start=start_idx + 1):
-        best, others = pick_best_quality(group)
-        result = best
-        channel_id = result.get('channel_id')
-        message_id = result.get('message_id')
+        # Latest-file info (episode first for series, then quality/size/rip).
+        from .utils import format_latest_info
+        latest_info = format_latest_info(latest)
+        search_text += f"{i}. {best.get('title', 'Unknown Title')} > {files} {file_word} > Latest: {latest_info}\n"
 
-        # Shared line formatter (also used by /genres browsing) - dot-joined
-        # info string, 🔁+N duplicate marker. Coerces season/episode to int.
-        line = format_search_line(i, result, dup_count=len(others))
-        search_text += line + "\n"
-
-        # Store button data
-        if channel_id and message_id:
+        if latest.get("channel_id") and latest.get("message_id"):
             button_data.append({
                 'number': i,
-                'channel_id': channel_id,
-                'message_id': message_id,
-                'group_index': i - (start_idx + 1),
+                'channel_id': latest['channel_id'],
+                'message_id': latest['message_id'],
+                'group_index': i - 1,       # global index into groups
                 'group_size': len(group),
             })
 
-    search_text += f"```"
+    if total_pages > 1:
+        search_text += f"\nPage {page}/{total_pages}\n"
+    search_text += "```"
+
     return search_text, button_data, groups, total_pages
+
+
+def build_title_info_block(groups, page, metas):
+    """TMDb Title(s) Information block (outside the code block, links live).
+
+    One line per title on the page, matching the result-list numbering:
+    ``1. Lucky (Movie) - 2025 . ⭐️ 6.8 · 🎭 Animation, Action · [IMDb](url)``.
+    ``metas`` maps global group index -> TMDb meta dict (or None).
+    """
+    from .utils import pick_best_quality
+
+    start_idx = (page - 1) * RESULTS_PER_PAGE
+    page_groups = groups[start_idx:start_idx + RESULTS_PER_PAGE]
+
+    lines = []
+    for i, group in enumerate(page_groups, start=start_idx + 1):
+        best, _ = pick_best_quality(group)
+        meta = metas.get(i - 1) if metas else None
+
+        title = best.get("title") or "Unknown Title"
+        type_label = _copy_type_label(best)
+        line = f"{i}. {title} ({type_label})"
+        year = best.get("year")
+        if year:
+            line += f" - {year}"
+
+        extra = []
+        if meta:
+            if meta.get("rating"):
+                extra.append(f"⭐️ {meta['rating']}")
+            if meta.get("genres"):
+                extra.append(f"🎭 {', '.join(meta['genres'][:3])}")
+            if meta.get("imdb_id"):
+                extra.append(f"[IMDb](https://imdb.com/title/{meta['imdb_id']})")
+        if extra:
+            line += " . " + " · ".join(extra)
+        lines.append(line)
+
+    if not lines:
+        return ""
+    separator = "=" * 70
+    block = (
+        f"\n{separator}\n"
+        f"Title(s) Information\n\n"
+        + "\n".join(lines) +
+        f"\n{separator}\n"
+    )
+    return block
+
+
+async def _fetch_metas(groups, indices):
+    """Fetch TMDb metas for the groups at ``indices`` (concurrently, cached).
+
+    Returns ``{global_group_index: meta_or_None}``. Uses the best-quality copy
+    of each group; no-op (None metas) without a TMDb API key.
+    """
+    from .tmdb_integration import enrich_title
+    from .utils import pick_best_quality
+
+    best = [pick_best_quality(groups[i])[0] for i in indices]
+    metas = await asyncio.gather(*[
+        enrich_title(b.get("title"), b.get("year"), b.get("type", "Movie"))
+        for b in best
+    ], return_exceptions=True)
+    return {i: (m if isinstance(m, dict) else None)
+            for i, m in zip(indices, metas)}
 
 
 async def build_search_keyboard(search_id, total_results, page, total_pages,
@@ -213,12 +347,11 @@ async def build_search_keyboard(search_id, total_results, page, total_pages,
                                 season_pages=None):
     """Build the inline keyboard for a search results page.
 
-    Single-copy groups get a ``Get [n]`` button; multi-copy groups get a
-    ``Pick [n]`` button that filters the message in place (series with several
-    seasons also get ``Pick[n][Sxx]`` shortcut buttons per season). Long-running
-    series page through their shortcuts (``S◀`` / ``S▶``, ``season_pages`` maps
-    group index -> season page) so every season has a one-click shortcut
-    without opening the pick view first.
+    Every title group gets BOTH a ``Pick [n]`` button (opens the in-place pick
+    view) and a ``Get [n]`` button (fetches that title's LATEST file directly).
+    Series with several seasons additionally get ``Pick[n][Sxx]`` shortcut
+    buttons per season; long-running series page through their shortcuts
+    (``S◀`` / ``S▶``, ``season_pages`` maps group index -> season page).
     """
     from .config import bulk_downloads
     from .premium_management import is_feature_premium_only, is_premium_user
@@ -227,65 +360,68 @@ async def build_search_keyboard(search_id, total_results, page, total_pages,
     if not button_data:
         return None
 
-    # Create individual file buttons in rows of 3
+    # Section 1: Pick buttons (season shortcuts + the all-copies pick), rows of 3.
     buttons = []
     current_row = []
     for btn in button_data:
         group = groups[btn['group_index']]
         group_buttons = []
 
-        if btn['group_size'] == 1:
-            group_buttons.append(
-                InlineKeyboardButton(
-                    f"Get [{btn['number']}]",
-                    callback_data=f"get_file:{btn['channel_id']}:{btn['message_id']}"
-                )
-            )
-        else:
-            # Multi-copy group: season picks for series + the all-copies pick.
-            # Series with more than MAX_SEASON_BUTTONS seasons page through
-            # their shortcut buttons (S◀ / S▶, one group at a time) - the
-            # page: callback carries the group's season page so the results
-            # list can rebuild in place with the next slice of Sxx buttons.
-            if is_series(group):
-                seasons = group_seasons(group)
-                if len(seasons) > 1:
-                    # Clamp against stale/hand-crafted season pages so an
-                    # out-of-range page never renders an empty shortcut row.
-                    sp = (season_pages or {}).get(btn['group_index'], 0)
-                    max_sp = max(0, (len(seasons) + MAX_SEASON_BUTTONS - 1)
-                                 // MAX_SEASON_BUTTONS - 1)
-                    sp = max(0, min(sp, max_sp))
-                    start = sp * MAX_SEASON_BUTTONS
-                    for s in seasons[start:start + MAX_SEASON_BUTTONS]:
-                        group_buttons.append(
-                            InlineKeyboardButton(
-                                f"Pick[{btn['number']}][S{s:02d}]",
-                                callback_data=pick_callback(search_id, btn['group_index'], season=s)
-                            )
+        # Series with several seasons page through their shortcut buttons
+        # (S◀ / S▶, one group at a time) - the page: callback carries the
+        # group's season page so the results list can rebuild in place with
+        # the next slice of Sxx buttons.
+        if is_series(group):
+            seasons = group_seasons(group)
+            if len(seasons) > 1:
+                # Clamp against stale/hand-crafted season pages so an
+                # out-of-range page never renders an empty shortcut row.
+                sp = (season_pages or {}).get(btn['group_index'], 0)
+                max_sp = max(0, (len(seasons) + MAX_SEASON_BUTTONS - 1)
+                             // MAX_SEASON_BUTTONS - 1)
+                sp = max(0, min(sp, max_sp))
+                start = sp * MAX_SEASON_BUTTONS
+                for s in seasons[start:start + MAX_SEASON_BUTTONS]:
+                    group_buttons.append(
+                        InlineKeyboardButton(
+                            f"Pick[{btn['number']}][S{s:02d}]",
+                            callback_data=pick_callback(search_id, btn['group_index'], season=s)
                         )
-                    if len(seasons) > MAX_SEASON_BUTTONS:
-                        if sp > 0:
-                            group_buttons.append(InlineKeyboardButton(
-                                "S◀",
-                                callback_data=f"page:{search_id}:{page}:{btn['group_index']}:{sp - 1}"))
-                        if start + MAX_SEASON_BUTTONS < len(seasons):
-                            group_buttons.append(InlineKeyboardButton(
-                                "S▶",
-                                callback_data=f"page:{search_id}:{page}:{btn['group_index']}:{sp + 1}"))
-            group_buttons.append(
-                InlineKeyboardButton(
-                    f"Pick [{btn['number']}]",
-                    callback_data=pick_callback(search_id, btn['group_index'])
-                )
-            )
+                    )
+                if len(seasons) > MAX_SEASON_BUTTONS:
+                    if sp > 0:
+                        group_buttons.append(InlineKeyboardButton(
+                            "S◀",
+                            callback_data=f"page:{search_id}:{page}:{btn['group_index']}:{sp - 1}"))
+                    if start + MAX_SEASON_BUTTONS < len(seasons):
+                        group_buttons.append(InlineKeyboardButton(
+                            "S▶",
+                            callback_data=f"page:{search_id}:{page}:{btn['group_index']}:{sp + 1}"))
 
+        group_buttons.append(
+            InlineKeyboardButton(
+                f"Pick [{btn['number']}]",
+                callback_data=pick_callback(search_id, btn['group_index'])
+            )
+        )
         for gb in group_buttons:
             current_row.append(gb)
             if len(current_row) == 3:
                 buttons.append(current_row)
                 current_row = []
+    if current_row:
+        buttons.append(current_row)
 
+    # Section 2: Get buttons - one per title, pointing at its LATEST copy.
+    current_row = []
+    for btn in button_data:
+        current_row.append(InlineKeyboardButton(
+            f"Get [{btn['number']}]",
+            callback_data=f"get_file:{btn['channel_id']}:{btn['message_id']}"
+        ))
+        if len(current_row) == 3:
+            buttons.append(current_row)
+            current_row = []
     if current_row:
         buttons.append(current_row)
 
@@ -343,37 +479,30 @@ async def build_search_keyboard(search_id, total_results, page, total_pages,
     return InlineKeyboardMarkup(buttons) if buttons else None
 
 
-async def send_search_results(client, message: Message, results, query, page=1):
+async def send_search_results(client, message: Message, results, query, page=1,
+                              exact_ids=None):
     """Send beautifully formatted search results with pagination.
 
-    The search (and its dedup groups) is stored so the ``Pick`` buttons can
-    filter the message in place later; the same renderers power the page:/
-    back: callbacks.
+    The search (its per-title groups, exact/fuzzy split and TMDb metas) is
+    stored so the ``Pick``/``Get`` buttons keep working and the Title(s)
+    Information block survives page navigation; the same renderers power the
+    page:/back: callbacks.
 
     client is passed explicitly to avoid fragile relative import (previously caused
     ImportError: attempted relative import beyond top-level package)."""
     from .config import bulk_downloads
 
-    total_results = len(results)
-    search_text, button_data, groups, total_pages = build_search_page(results, query, page)
+    search_text, button_data, groups, total_pages = build_search_page(
+        results, query, page, exact_ids=exact_ids)
 
-    # TMDb enrichment (cached per title; no-op without an API key) - a compact
-    # details block below the results with rating/genres/IMDb links. Fetched
-    # concurrently so a page of 9 results doesn't serialize 9 HTTP round-trips.
-    from .tmdb_integration import enrich_title, format_enrichment_line
-    from .utils import pick_best_quality
-    best_copies = [pick_best_quality(group)[0] for group in groups]
-    metas = await asyncio.gather(*[
-        enrich_title(b.get("title"), b.get("year"), b.get("type", "Movie"))
-        for b in best_copies
-    ], return_exceptions=True)
-    details_lines = []
-    for i, (_, meta) in enumerate(zip(best_copies, metas), start=(page - 1) * 9 + 1):
-        suffix = format_enrichment_line(meta if isinstance(meta, dict) else None)
-        if suffix:
-            details_lines.append(f"{i}. {suffix}")
-    if details_lines:
-        search_text += "\n" + "\n".join(details_lines)
+    # TMDb enrichment (cached per title; no-op without an API key) - the
+    # Title(s) Information block below the results with rating/genres/IMDb
+    # links. Fetched concurrently so a page of titles doesn't serialize HTTP
+    # round-trips, then stored so pagination doesn't lose it.
+    page_indices = list(range((page - 1) * RESULTS_PER_PAGE,
+                              min(page * RESULTS_PER_PAGE, len(groups))))
+    metas = await _fetch_metas(groups, page_indices)
+    search_text += build_title_info_block(groups, page, metas)
 
     # Create keyboard
     keyboard = None
@@ -385,15 +514,17 @@ async def send_search_results(client, message: Message, results, query, page=1):
 
         bulk_downloads[search_id] = {
             'results': results,   # Store all results for pagination
-            'groups': groups,     # Dedup groups for the pick filter view
+            'groups': groups,     # Per-title groups for the pick filter view
             'query': query,
+            'exact_ids': set(exact_ids or ()),
+            'metas': metas,       # global group index -> TMDb meta (or None)
             'created_at': datetime.now(timezone.utc),
             'user_id': message.from_user.id,
             'page': page,
         }
 
         keyboard = await build_search_keyboard(
-            search_id, total_results, page, total_pages, groups, button_data,
+            search_id, len(results), page, total_pages, groups, button_data,
             message.from_user.id, results)
 
     # Send message
@@ -408,9 +539,22 @@ async def render_search_page(callback_query, search_data, page, search_id):
     """Re-render a stored search into the current message (page:/back:)."""
     results = search_data['results']
     query = search_data['query']
-    search_text, button_data, groups, total_pages = build_search_page(results, query, page)
+    exact_ids = search_data.get("exact_ids")
+    search_text, button_data, groups, total_pages = build_search_page(
+        results, query, page, exact_ids=exact_ids)
     total_results = len(results)
     search_data['page'] = page
+
+    # Title(s) Information must survive pagination: reuse the metas already
+    # fetched for stored pages and fetch only the ones this page still needs.
+    metas = dict(search_data.get("metas") or {})
+    page_indices = list(range((page - 1) * RESULTS_PER_PAGE,
+                              min(page * RESULTS_PER_PAGE, len(groups))))
+    missing = [i for i in page_indices if i not in metas]
+    if missing:
+        metas.update(await _fetch_metas(groups, missing))
+        search_data["metas"] = metas
+    search_text += build_title_info_block(groups, page, metas)
 
     keyboard = None
     if button_data:
@@ -427,13 +571,18 @@ async def render_search_page(callback_query, search_data, page, search_id):
 
 
 def build_pick_view(search_id, group_index, copies, season=None, resolution=None,
-                    season_page=0):
+                    season_page=0, prefix="choose", back_prefix=None):
     """Build the in-place filtered view (text + keyboard) for one title.
 
-    The search result message is replaced by ONLY this title's copies: movies
-    list every copy; series dedupe per episode (best copy) and offer season
-    filter buttons (paged for long-running series). A resolution filter row
-    narrows by [720p]/[1080p]/[2160p].
+    The result message is replaced by ONLY this title's copies: movies list
+    every copy; series dedupe per episode (best copy) and offer season filter
+    buttons (paged for long-running series). A resolution filter row narrows
+    by [720p]/[1080p]/[2160p].
+
+    ``prefix``/``back_prefix`` let non-search surfaces reuse the view: /search
+    uses ``choose``/``back``, /genres browsing uses ``genre_pick``/
+    ``genre_back`` (the Back button then restores the genre page, not a
+    search page).
     """
     from .utils import pick_best_quality
 
@@ -454,8 +603,8 @@ def build_pick_view(search_id, group_index, copies, season=None, resolution=None
 
     filtered = filter_copies(copies, season=season, resolution=resolution)
 
-    # Header (HTML - title escaped)
-    header = f"🎞️ <b>{html.escape(str(title))}</b>"
+    # Header (markdown - the copy list below is a code block)
+    header = f"🎞️ **{title}**"
     if year:
         header += f" ({year})"
     if season is not None:
@@ -467,9 +616,13 @@ def build_pick_view(search_id, group_index, copies, season=None, resolution=None
         header += f" across {len(seasons)} seasons"
     header += "\n"
 
-    # Copy lines (series: dedupe per episode, best copy wins)
+    # Copy lines (series: dedupe per episode, best copy wins) in the pick-view
+    # format: ``1. Lucky (2025) - 2.5GB | WebRip | 1080p`` inside a code block.
+    from .utils import format_pick_line
+
     lines = []
     get_buttons = []
+    n = 1
     if series:
         episodes = {}
         for c in filtered:
@@ -483,13 +636,9 @@ def build_pick_view(search_id, group_index, copies, season=None, resolution=None
             s, e = key
             ep_copies = episodes[key]
             best, others = pick_best_quality(ep_copies)
-            parts = [p for p in (best.get("quality"), best.get("rip")) if p]
-            info = ".".join(parts) if parts else "N/A"
             label = f"S{s:02d}" + (f"E{e:02d}" if e is not None else "")
-            line = f"{label} [{info}]"
-            if others:
-                line += f" 🔁+{len(others)}"
-            lines.append(line)
+            lines.append(format_pick_line(n, best, dup_count=len(others)))
+            n += 1
             if best.get("channel_id") and best.get("message_id"):
                 get_buttons.append((label, best))
 
@@ -499,23 +648,19 @@ def build_pick_view(search_id, group_index, copies, season=None, resolution=None
         # every copy movie-style instead of rendering an empty view.
         unkeyed = [c for c in filtered if c.get("season") is None]
         extra_budget = MAX_PICK_LINES - len(lines)
-        for i, c in enumerate(unkeyed[:max(0, extra_budget)], 1):
-            details = ", ".join(x for x in (c.get("quality"), c.get("rip"),
-                                            format_file_size(c.get("file_size")))
-                                if x and x != "N/A")
-            lines.append(f"{i}. {details or 'N/A'}")
+        for c in unkeyed[:max(0, extra_budget)]:
+            lines.append(format_pick_line(n, c))
             if c.get("channel_id") and c.get("message_id"):
-                get_buttons.append((str(i), c))
+                get_buttons.append((str(n), c))
+            n += 1
     else:
-        for i, c in enumerate(filtered[:MAX_PICK_LINES], 1):
-            details = ", ".join(x for x in (c.get("quality"), c.get("rip"),
-                                            format_file_size(c.get("file_size")))
-                                if x and x != "N/A")
-            lines.append(f"{i}. {details or 'N/A'}")
+        for c in filtered[:MAX_PICK_LINES]:
+            lines.append(format_pick_line(n, c))
             if c.get("channel_id") and c.get("message_id"):
-                get_buttons.append((str(i), c))
+                get_buttons.append((str(n), c))
+            n += 1
 
-    text = header + "\n".join(lines)
+    text = header + "```\n" + "\n".join(lines) + "\n```"
     if len(filtered) > MAX_PICK_LINES:
         text += f"\n… showing first {MAX_PICK_LINES} — filter by season/resolution above"
 
@@ -547,7 +692,8 @@ def build_pick_view(search_id, group_index, copies, season=None, resolution=None
                 callback_data=pick_callback(search_id, group_index,
                                             season=None if active else s,
                                             resolution=resolution,
-                                            season_page=season_page),
+                                            season_page=season_page,
+                                            prefix=prefix),
             ))
             if len(row) == 5:
                 buttons.append(row)
@@ -562,13 +708,15 @@ def build_pick_view(search_id, group_index, copies, season=None, resolution=None
                     "S◀",
                     callback_data=pick_callback(search_id, group_index,
                                                 resolution=resolution,
-                                                season_page=season_page - 1)))
+                                                season_page=season_page - 1,
+                                                prefix=prefix)))
             if season_page < season_pages - 1:
                 paging_row.append(InlineKeyboardButton(
                     "S▶",
                     callback_data=pick_callback(search_id, group_index,
                                                 resolution=resolution,
-                                                season_page=season_page + 1)))
+                                                season_page=season_page + 1,
+                                                prefix=prefix)))
             if paging_row:
                 buttons.append(paging_row)
 
@@ -588,7 +736,8 @@ def build_pick_view(search_id, group_index, copies, season=None, resolution=None
                     callback_data=pick_callback(search_id, group_index,
                                                 season=season,
                                                 resolution=None if active else res,
-                                                season_page=season_page),
+                                                season_page=season_page,
+                                                prefix=prefix),
                 ))
         if row:
             buttons.append(row)
@@ -606,7 +755,8 @@ def build_pick_view(search_id, group_index, copies, season=None, resolution=None
     if row:
         buttons.append(row)
 
-    buttons.append([InlineKeyboardButton("← Back", callback_data=f"back:{search_id}")])
+    back_data = f"{back_prefix or 'back'}:{search_id}"
+    buttons.append([InlineKeyboardButton("← Back", callback_data=back_data)])
 
     return text, InlineKeyboardMarkup(buttons) if buttons else None
 
@@ -626,10 +776,10 @@ async def render_pick_view(callback_query, search_data, group_index, search_id,
     text, keyboard = build_pick_view(search_id, group_index, copies, season=season,
                                      resolution=resolution, season_page=season_page)
 
+    # Default (markdown) parse mode: the copy list renders as a code block.
     await callback_query.message.edit_text(
         text,
         reply_markup=keyboard,
-        parse_mode=ParseMode.HTML,
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
     return True

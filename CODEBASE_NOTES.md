@@ -71,7 +71,7 @@ Subclasses Pyroblack `Client` and adds `iter_messages(chat_id, limit, offset)` (
 | `features/callbacks.py` | 1380 | `callback_handler()` — all inline-button flows (see §7) |
 | `features/indexing.py` | 486 | `start_indexing_process`, `save_file_to_db`, `index_message`, `process_message_queue`, `on_message` (queue-based auto-indexing) |
 | `features/metadata_parser.py` | 1018 | Single canonical parser module: `ParsedMedia` + `MovieFilenameParser` (deep filename engine — regex dictionaries for resolutions/sources/codecs/audio/bit-depth/HDR/languages/subtitles/editions; the engine owns ALL parsing incl. quality, CH-suffixed channels, bit depth, rip/source, audio/video codecs, HDR, publisher, context-aware multi-year release-year/title selection, IMDB IDs and x-dimension resolutions; `parse_metadata` is a pure mapper with zero fallback logic) |
-| `features/search.py` | 380 | `perform_search`, `send_search_results` (pagination), `inline_handler` — live `/search`/`/recent` handlers live in `commands.py`; grouping helpers imported from `utils.py` |
+| `features/search.py` | ~930 | `perform_search` (returns `{results, exact_ids}`), `send_search_results` (per-title pages + Title(s) Information), `render_search_page` (pagination keeps the info block), `inline_handler` — live `/search`/`/recent` handlers live in `commands.py`; line formatters live in `utils.py` (`format_latest_info`, `format_pick_line`, `series_label`, `format_rip_label`) |
 | `features/utils.py` | 363 | `wait_for_user_input`/`set_user_input` (client.listen replacement), `cleanup_expired_bulk_downloads`, `get_readable_time`, `format_file_size`, `construct_final_caption`, `resolve_chat_ref`, recent-content grouping helpers (`group_recent_content`/`format_movie_group`/`format_series_group`/`format_recent_output`), access-control re-exports |
 | `features/user_management.py` | 169 | Admin/banned/terms checks, `log_action`, `should_process_command`, `require_not_banned` |
 | `features/request_management.py` | 169 | Rate limits (3 pending / 1 per day / 20 global per day), duplicate check (fuzzy ≥85%), IMDB link validation, queue position |
@@ -118,9 +118,9 @@ Routing notes: strips `@botname`, `/f` is an alias for `/search`, `-e` flag = ex
 - `/start` — terms gate → welcome photo + Support/Tutorial buttons
 - `/help` — user + admin help (if admin)
 - `/search <t>` / `/f <t>` / `/f -e <t>` — smart search (exact + fuzzy) / exact only
-- `/my_history` — search history grouped by date, numbered `/search`-style bracket lines (bracket = search time) in a code block
+- `/my_history` — search history grouped by date, numbered plain-HTML lines with tap-to-copy `<code>` queries (bracket = search time); `/watchlist` — plain HTML with tap-to-copy `<code>` titles (`year.type` brackets), both sent with `ParseMode.HTML` and `html.escape`d
 - `/my_stat` — per-user stats dashboard (`collect_user_stats` + `format_user_stats_output`)
-- `/recent` — last batch update (10-min window around latest `indexed_at`); premium-gated if enabled. Rendered in `/search` code-block style: consolidated per-title lines (`N. Title [year.qualities]` / `N. Title [year.S01E01-02]`) via `format_movie_group`/`format_series_group`/`format_recent_output` (utils.py).
+- `/recent` — last batch update (10-min window around latest `indexed_at`); premium-gated if enabled. Rendered as **plain HTML with click-to-copy search strings**: consolidated per-title lines (`N. <code>Title (year)</code> [qualities]` / `N. <code>Title (year)</code> [S01E01-02]`) via `format_movie_group`/`format_series_group`/`format_recent_output` (utils.py, sent with `ParseMode.HTML`). Tapping a line copies the full `Title (year)` string for pasting into `/search`; the year is stripped from the display bracket (`group_recent_content` now carries a `year` field per entry); copy targets `html.escape`d, footer `Tap any title to copy`.
 - `/trending` — TMDb trending movies/shows/new releases with category buttons. Lines use the `/search` bracket shape (`N. Title [year] ⭐rating · link`) — deliberately NOT inside a code fence so the IMDb/TMDb links stay clickable.
 - `/request` — submit a title request (rate limited, TMDb verification)
 
@@ -172,8 +172,8 @@ All callbacks (except `terms#`) require `should_process_command_for_user` + term
 ## 8. Data flows (memorize)### Feature cluster (added 2026-08)
 
 - **Quality dedup + pick filter (`utils.py` / `search.py`)** —
-  `quality_rank` / `pick_best_quality` / `group_duplicate_copies`; `/search`
-  shows the best-quality copy per title (🔁+N marker). `Pick [n]` filters the
+  `quality_rank` / `pick_best_quality`; the pick view dedupes per episode
+  (best copy wins, 🔁+N marker). `Pick [n]` filters the
   message in place to that title's copies (`choose:` → `render_pick_view` in
   `search.py`); series get per-season `Pick[n][Sxx]` buttons, and the pick view
   adds `[720p]/[1080p]/[2160p]` resolution filters + `← Back` (`back:` →
@@ -204,14 +204,31 @@ All callbacks (except `terms#`) require `should_process_command_for_user` + term
   by stored `tmdb_genres` (aggregation with counts; `$regex` array match).
   `/genres <name>` is paginated (12/page) with a `🔤 A–Z`/`🆕 Newest`/`⭐
   Top Rated` sort toggle (title asc / indexed_at desc / tmdb_rating desc),
-  rendered in a code-block listing (shared line style, ⭐ rating kept).
-  Titles are DEDUPLICATED — each appears exactly once with its details:
-  movies `Title - N files`, series `Title - N seasons [real], N eps [real],
-  N files` where the bracket values are the REAL TMDb totals (surfaced by
-  `enrich_title` in tmdb_integration.py) and the DB counts outside use
-  distinct seasons + distinct (season, episode) pairs so duplicate-quality
-  copies don't inflate them (aggregation `_genre_title_pipeline` — one
-  distinct-title page per render; real counts via `_genre_real_counts`):
+  rendered in a code-block listing using the `/search` per-title +
+  latest-file layout (⭐ rating kept at the end): `N. Title > N files >
+  [series aggregates] > Latest: <latest-info>` where the latest info is the
+  most recently indexed copy (`latest_copy` in utils.py, same rule as
+  /search's `Get [n]`). The header carries a `Files Found: N (Movie - X |
+  Series - Y)` split (`_genre_files_split`, computed once with the title
+  count and stored in the browse state - same Movie/Series rule as /search)
+  plus the shared Pick/Get `SEARCH_HINT` block (search.py constant, used by
+  both /search and /genres so the copy can't drift).
+  Titles are DEDUPLICATED — each appears exactly once:
+  movies `1. Die Hard > 1 file > Latest: 1080p`, series
+  `1. Breaking Bad > 4 files > 2 seasons [5] · 3 eps [35] > Latest:
+  S01E02 | 720p` where the bracket values are the REAL TMDb totals
+  (surfaced by `enrich_title` in tmdb_integration.py) and the DB counts
+  outside use distinct seasons + distinct (season, episode) pairs so
+  duplicate-quality copies don't inflate them (aggregation
+  `_genre_title_pipeline` — one distinct-title page per render; real counts
+  via `_genre_real_counts`):
+  Every genre line gets a `Pick [n]` button (reusing `build_pick_view` from
+  search.py via the `genre_pick:`/`genre_back:` callbacks - series also get
+  `Pick[n][Sxx]` season shortcuts in the results, paged via `S◀`/`S▶` for
+  >5 seasons through 6-part `genre_page:` data + a `season_pages` map in the
+  state, mirroring /search) plus `Get [n]` (latest copy); the browse state
+  stores `page` + the page's `entries` so Back from a pick view restores the
+  exact page:
   `send_genre_page` in commands.py renders every page (shared by the
   initial send and the `genre_page:` callback — 3-part legacy and 4-part
   `page+sort` data both accepted), state stored as a typed `genre_list`
@@ -236,10 +253,24 @@ Diagnostic counters in `indexing_stats` track attempts/successes/duplicates/erro
 
 ### Search
 ```
-/search → cmd_search → perform_search(query, exact, threshold)
+/search → cmd_search → perform_search(query, exact, threshold)  (search.py)
   ├─ exact: regex ^escaped$ (i)
   └─ normal: regex contains + fuzzy partial_ratio ≥ FUZZY_THRESHOLD (68) over up to 500 docs
-→ send_search_results: 9/page, "Get [n]" buttons, prev/next, "Get All" (premium-gated)
+  returns {results, exact_ids} — exact = title STARTS WITH the query
+  (is_exact_title; word-boundary guard so "Luckily" is not exact for "Lucky")
+→ send_search_results: per-title groups (group_by_title), 9 titles/page
+  code-block list: Search : X / Titles Found: N (X Exact | Y Fuzzy) /
+  Files Found: N (Movie - X | Series - Y) + per-title lines
+  `N. Title > M files > Latest: <latest-info>` (latest = most recently indexed
+  copy; format_latest_info in utils.py)
+→ TMDb Title(s) Information block (build_title_info_block, ⭐·🎭·IMDb link)
+  appended OUTSIDE the code block; metas stored in bulk_downloads[search_id]
+  and merged per page so the block survives pagination (render_search_page)
+→ keyboard: every title gets Pick [n] (choose:; series add Pick[n][Sxx]
+  season shortcuts) AND Get [n] (get_file: of the latest copy); prev/next +
+  "Get All" (premium-gated)
+→ pick view (build_pick_view): code-block copy list, one line per copy
+  `1. Lucky (2025) - 2.5GB | WebRip | 1080p` via format_pick_line (utils.py)
 → state in bulk_downloads keyed by 8-char UUID (callback data ≤ 64 bytes)
 ```
 

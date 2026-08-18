@@ -9,15 +9,11 @@ and storing file information in the database.
 import os
 import re
 import asyncio
-import sys
 import threading
 import time
-import uuid
 from datetime import datetime, timezone
-from collections import deque
 
 from pyrogram import enums
-from pyrogram.types import Message
 from pyrogram.errors import (
     ChannelBanned,
     ChannelInvalid,
@@ -28,7 +24,7 @@ from pyrogram.errors import (
     UserBannedInChannel,
 )
 
-from .config import AUTO_INDEX_DEFAULT, INDEX_EXTENSIONS, indexing_lock, active_indexing_threads, message_queue, queue_processor_task, temp_data
+from .config import AUTO_INDEX_DEFAULT, INDEX_EXTENSIONS, indexing_lock, message_queue, queue_processor_task, temp_data
 from .database import movies_col, channels_col, settings_col
 from .metadata_parser import parse_metadata
 from .utils import get_readable_time

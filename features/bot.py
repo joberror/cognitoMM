@@ -7,15 +7,11 @@ It sets up the Pyroblack client, registers handlers, and manages the bot lifecyc
 
 import sys
 import asyncio
-import threading
-from datetime import datetime, timezone
-from pyrogram import Client, filters
-from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram import Client
 from pyrogram.handlers import MessageHandler, InlineQueryHandler, CallbackQueryHandler
-from pyrogram.enums import ChatType
 
 # Import from our modules
-from .config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL, BOT_VERSION, client
+from .config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL, BOT_VERSION
 from .logger import logger
 from .database import ensure_indexes
 from .commands import handle_command

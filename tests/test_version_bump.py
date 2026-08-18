@@ -13,7 +13,6 @@ no repo files are touched, no git commands are run.
 
 import os
 import sys
-from types import SimpleNamespace
 
 # Ensure project root is on the path so the scripts package is importable
 # when this file is run standalone (python tests/test_version_bump.py).

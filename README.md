@@ -16,22 +16,25 @@ This is a Telegram bot hosted on Hugging Face Spaces.
 ## Features
 
 **🎬 Search & discover**
-- `/search <title>` — smart search (exact + fuzzy, type/episode filters).
-  Duplicate copies are deduplicated — the best quality is shown first. `Pick [n]`
-  filters the results in place to that title's copies (series get `Pick[n][Sxx]`
-  season picks; long-running series page through the seasons — `S◀`/`S▶`
-  buttons in both the results list and the pick view), with `[720p] [1080p] [2160p]`
-  resolution filters.
+- `/search <title>` — smart search (exact + fuzzy). Results are grouped **one
+  line per title** in a code block: `Search : X` / `Titles Found: N (X Exact | Y
+  Fuzzy)` / `Files Found: N (Movie - X | Series - Y)`, then per-title lines with
+  the file count and the **latest** file (`1. Lucky > 2 files > Latest: 1080p |
+  2.5GB | WebRip`). A TMDb **Title(s) Information** block (⭐ rating · 🎭 genres ·
+  clickable IMDb link) sits below the code block and survives pagination. Every
+  title gets both a `Pick [n]` button (filters in place; series get `Pick[n][Sxx]`
+  season picks + `[720p] [1080p] [2160p]` resolution filters) and a `Get [n]`
+  button that fetches the latest file directly.
 - `/f <title>` — quick search · inline mode `@yourbot <query>` (poster thumbnails)
-- `/recent` — newly indexed content · `/trending` — TMDb trending (both listed in the same format as `/search`; trending keeps ⭐ ratings and clickable IMDb/TMDb links)
-- `/genres` — browse by TMDb genre (counts; `/genres <name>` lists titles deduplicated — one line per title with its season/episode totals and file count, real TMDb totals in brackets for series, paginated with `🔤 A–Z` / `🆕 Newest` / `⭐ Top Rated` sort toggle)
+- `/recent` — newly indexed content (plain HTML listing, **tap any title to copy the `Title (year)` string straight into `/search`**) · `/trending` — TMDb trending (listed in the same format as `/search`; trending keeps ⭐ ratings and clickable IMDb/TMDb links)
+- `/genres` — browse by TMDb genre (counts; `/genres <name>` lists titles deduplicated in the `/search` per-title + latest-file layout — `1. Breaking Bad > 4 files > 2 seasons [5] · 3 eps [35] > Latest: S01E02 | 720p ⭐8.9` (brackets = real TMDb totals), paginated with `🔤 A–Z` / `🆕 Newest` / `⭐ Top Rated` sort toggle; every title has `Pick [n]` (in-place filter, series get `Pick[n][Sxx]`) + `Get [n]`)
 - `/random` — surprise me: a random indexed title (poster when available)
 - `/request <title>` / `/request_list` — request missing titles (rate-limited)
 
 **👤 Your library**
 - `/watch <title>` / `/unwatch <title>` — watchlist; you get a DM the moment a
   watched title (or a new copy) is indexed
-- `/watchlist` — your watched titles (`/search`-style bracket listing) · `/my_history` — your searches (same bracket style, grouped by date)
+- `/watchlist` — your watched titles (plain HTML, **tap any title to copy**) · `/my_history` — your searches (plain HTML, **tap any query to copy**, grouped by date)
 - `/my_stat` — usage + premium info · `/premium` — premium info/management
 - `/help` — full command menu
 

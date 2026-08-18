@@ -6,7 +6,6 @@ for the MovieBot. It includes functions for checking user roles,
 banning/unbanning users, and verifying terms acceptance.
 """
 
-import asyncio
 from datetime import datetime, timezone
 from pyrogram.types import Message
 from pyrogram.enums import ChatType

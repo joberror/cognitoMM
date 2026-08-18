@@ -10,13 +10,11 @@ back to Flask's built-in server (threaded=True).
 """
 
 import os
-import json
-import signal
 import threading
 from datetime import datetime, timezone
 from typing import Optional
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 
 try:
     from .config import BOT_START_TIME, BOT_VERSION

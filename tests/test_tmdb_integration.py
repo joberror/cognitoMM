@@ -11,7 +11,7 @@ import os
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from features.tmdb_integration import search_tmdb, format_tmdb_result, format_trending_list
+from features.tmdb_integration import search_tmdb, format_trending_list
 from features.config import TMDB_API
 
 

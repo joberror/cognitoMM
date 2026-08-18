@@ -6,7 +6,8 @@ including file management, time formatting, and helper functions.
 """
 
 import asyncio
-from datetime import datetime, timezone, timedelta
+import html
+from datetime import datetime, timezone
 
 async def wait_for_user_input(chat_id: int, user_id: int, timeout: int = 60):
     """Wait for user input - replacement for client.listen"""
@@ -160,7 +161,8 @@ def group_recent_content(results):
         categorized_results['movies'].append({
             'title': title,
             'details': details,
-            'count': movie_data['count']
+            'count': movie_data['count'],
+            'year': movie_data['year']
         })
 
     # Process series
@@ -169,7 +171,8 @@ def group_recent_content(results):
         categorized_results['series'].append({
             'title': title,
             'details': details,
-            'count': series_data['count']
+            'count': series_data['count'],
+            'year': series_data['year']
         })
 
     return categorized_results
@@ -295,54 +298,78 @@ def construct_final_caption(db_item, file_size_bytes=None, user_name="User"):
     return "\n".join(lines)
 
 def format_recent_output(categorized_results, total_files=None, total_movies=None, total_series=None, last_updated=None):
-    """Format categorized results in the /search code-block style.
+    """Format categorized results as plain HTML with click-to-copy search strings.
 
-    Consolidated per-title lines (``N. Title [details]``) grouped into MOVIES
-    and SERIES sections, with the batch context (Updated / Files counts).
-    Note: titles inside the code block are no longer tap-to-copy (that was an
-    HTML-only affordance); the block keeps the listing uniform with /search.
+    Consolidated per-title lines (``N. <code>Title (year)</code> [details]``)
+    grouped into MOVIES and SERIES sections, with the batch context (Updated /
+    Files counts). Each line's copy target is the full ``Title (year)`` string
+    (just the title when the year is missing) so tapping it yields a string
+    ready to paste into /search; the year is dropped from the display bracket
+    to avoid duplication. Copy targets are HTML-escaped so special characters
+    (&, <, >) never break the message. Caller must send with ParseMode.HTML.
     """
-    output_text = "```\nLAST BATCH UPDATE\n"
+    output_text = "<b>LAST BATCH UPDATE</b>\n\n"
 
     # Add context information
     if last_updated:
-        output_text += f"\nUpdated: {last_updated}\n"
+        output_text += f"Updated: {last_updated}\n"
     if total_files is not None:
         output_text += f"Files: {total_files}"
         if total_movies is not None and total_series is not None:
             output_text += f" (Movies: {total_movies} | Series: {total_series})"
         output_text += "\n"
 
+    output_text += "\n"
+
+    def _copy_target(title, year):
+        """Full search-ready string: 'Title (year)' or 'Title' when no year."""
+        return f"{title} ({year})" if year else title
+
+    def _display_details(details, year):
+        """Strip the leading '<year>.' segment from details since the year is
+        already shown in the copy target (e.g. '2010.1080p' -> '1080p')."""
+        if year and details:
+            prefix = f"{year}."
+            if details.startswith(prefix):
+                return details[len(prefix):]
+        return details
+
     # Display Movies section
     movies = categorized_results['movies']
     if movies:
-        output_text += "\nMOVIES\n"
+        output_text += "<b>MOVIES</b>\n"
+        output_text += "─" * 30 + "\n"
         for i, result in enumerate(movies, 1):
-            title = result['title']
-            details = result.get('details', '')
+            year = result.get('year')
+            copy_text = html.escape(_copy_target(result['title'], year))
+            details = _display_details(result.get('details', ''), year)
             if details:
-                output_text += f"{i}. {title} [{details}]\n"
+                output_text += f"{i}. <code>{copy_text}</code> [{details}]\n"
             else:
-                output_text += f"{i}. {title}\n"
+                output_text += f"{i}. <code>{copy_text}</code>\n"
+        output_text += "\n"
 
     # Display Series section
     series = categorized_results['series']
     if series:
-        output_text += "\nSERIES\n"
+        output_text += "<b>SERIES</b>\n"
+        output_text += "─" * 30 + "\n"
         for i, result in enumerate(series, 1):
-            title = result['title']
-            details = result.get('details', '')
+            year = result.get('year')
+            copy_text = html.escape(_copy_target(result['title'], year))
+            details = _display_details(result.get('details', ''), year)
             if details:
-                output_text += f"{i}. {title} [{details}]\n"
+                output_text += f"{i}. <code>{copy_text}</code> [{details}]\n"
             else:
-                output_text += f"{i}. {title}\n"
+                output_text += f"{i}. <code>{copy_text}</code>\n"
+        output_text += "\n"
 
     # Calculate total items and check if we hit limit
     total_items = len(movies) + len(series)
     if total_items >= 20:
-        output_text += "\n..and more"
+        output_text += "<i>..and more</i>\n"
 
-    output_text += "\n```"
+    output_text += "<i>Tap any title to copy</i>"
     return output_text
 
 # ------------------------------------------------------------------ #
@@ -388,57 +415,139 @@ def pick_best_quality(entries) -> tuple:
     return best, others
 
 
-def group_duplicate_copies(entries):
-    """Group a list of DB entries into (title, year, type) buckets.
+def series_label(entry):
+    """Season/episode label for a series entry: ``S02E08`` / ``S02`` / ``E08``.
 
-    Returns a list of groups (each a list of entry dicts). Copies of the same
-    title are grouped so search can dedupe and offer a quality chooser.
+    Returns ``""`` for movies, series without season/episode metadata, and
+    malformed (non-numeric) values - the same coercion logic every formatter
+    shares (string seasons exist in the wild).
     """
-    buckets = {}
-    order = []
-    for entry in entries:
-        key = (
-            str(entry.get("title") or "").strip().lower(),
-            entry.get("year"),
-            (entry.get("type") or "Movie").lower(),
-        )
-        if key not in buckets:
-            buckets[key] = []
-            order.append(key)
-        buckets[key].append(entry)
-    return [buckets[key] for key in order]
+    movie_type = (entry.get("type") or "Movie").lower()
+    season = entry.get("season")
+    episode = entry.get("episode")
+    if movie_type not in ("series", "tv", "show") or not (season or episode):
+        return ""
+    try:
+        if season and episode:
+            return f"S{int(season):02d}E{int(episode):02d}"
+        if season:
+            return f"S{int(season):02d}"
+        if episode:
+            return f"E{int(episode):02d}"
+    except (TypeError, ValueError):
+        return ""
+    return ""
+
+
+def format_rip_label(rip):
+    """Human display label for a rip/source value (WebRip, Blu-ray, HDTV...).
+
+    Falls back to the raw value when the rip is unknown.
+    """
+    if not rip:
+        return ""
+    r = str(rip).strip().lower()
+    if "remux" in r:
+        return "Remux"
+    if r in ("bluray", "blu-ray", "bdrip", "bd", "brrip"):
+        return "Blu-ray"
+    if "web" in r:
+        return "WebRip"
+    if "hdtv" in r or r == "hd":
+        return "HDTV"
+    if "dvd" in r:
+        return "DVD"
+    return str(rip).strip()
+
+
+def format_latest_info(entry):
+    """Latest-file info for a search-list line: ``S02E08 | 1080p | 890MB | WebRip``.
+
+    The series episode prefix comes first when present, then quality, size and
+    rip label (``|``-joined). ``N/A`` when nothing is known.
+    """
+    parts = []
+    label = series_label(entry)
+    if label:
+        parts.append(label)
+    for v in (entry.get("quality"), format_file_size(entry.get("file_size")),
+              format_rip_label(entry.get("rip"))):
+        if v and v != "N/A":
+            parts.append(v)
+    return " | ".join(parts) if parts else "N/A"
+
+
+def format_pick_info(entry):
+    """Pick-view file info: ``2.5GB | WebRip | 1080p`` (size | rip | quality)."""
+    parts = []
+    size = format_file_size(entry.get("file_size"))
+    if size != "N/A":
+        parts.append(size)
+    rip = format_rip_label(entry.get("rip"))
+    if rip:
+        parts.append(rip)
+    quality = entry.get("quality")
+    if quality:
+        parts.append(str(quality))
+    return " | ".join(parts) if parts else "N/A"
+
+
+def format_pick_line(number, entry, dup_count=0):
+    """One pick-view copy line: ``1. Lucky (2025) - 2.5GB | WebRip | 1080p``.
+
+    Series copies carry the season/episode prefix after the year
+    (``2. Show (2015) - S02E08 | 890MB | WebRip | 1080p``). ``entry`` is a DB
+    document; ``dup_count`` appends the `` 🔁+N`` duplicate marker.
+    """
+    title = entry.get("title") or "Unknown Title"
+    year = entry.get("year")
+    line = f"{number}. {title}"
+    if year:
+        line += f" ({year})"
+    label = series_label(entry)
+    info = format_pick_info(entry)
+    body = f"{label} | {info}" if label else info
+    line += f" - {body}"
+    if dup_count:
+        line += f" 🔁+{dup_count}"
+    return line
+
+
+def latest_copy(copies):
+    """The most recently indexed copy of a group (indexed_at desc, then
+    message_id desc as a stable tiebreak).
+
+    Shared by /search (the ``Latest:`` info + Get [n] target) and /genres
+    browsing so both surfaces pick the same file.
+    """
+    def key(c):
+        ts = c.get("indexed_at")
+        if not isinstance(ts, datetime):
+            ts = datetime.min
+        # Mixed naive/aware timestamps crash comparisons - normalize to UTC.
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (ts, c.get("message_id") or 0)
+    return max(copies, key=key)
 
 
 def format_search_info(entry):
     """Dot-joined info string for a /search-style line.
 
     ``size.quality.series.year.rip`` (or ``N/A`` when nothing is known).
-    Shared by format_search_line and surfaces that render the bracket info
-    without a line number (inline search results).
+    Shared by surfaces that render the bracket info without a line number
+    (inline search results).
     """
     year = entry.get("year")
     quality = entry.get("quality")
     rip = entry.get("rip")
-    movie_type = (entry.get("type") or "Movie").lower()
-    season = entry.get("season")
-    episode = entry.get("episode")
     file_size = entry.get("file_size")
 
     size_str = format_file_size(file_size)
     quality_str = quality if quality else ""
 
     # Season/episode info (coerced to int - string seasons exist in the wild).
-    series_info = ""
-    if movie_type in ("series", "tv", "show") and (season or episode):
-        try:
-            if season and episode:
-                series_info = f"S{int(season):02d}E{int(episode):02d}"
-            elif season:
-                series_info = f"S{int(season):02d}"
-            elif episode:
-                series_info = f"E{int(episode):02d}"
-        except (TypeError, ValueError):
-            series_info = ""
+    series_info = series_label(entry)
 
     year_str = str(year) if year else ""
 
@@ -463,21 +572,6 @@ def format_search_info(entry):
     if rip_str:
         info_parts.append(rip_str)
     return ".".join(info_parts) if info_parts else "N/A"
-
-
-def format_search_line(number, entry, dup_count=0):
-    """One /search-style result line: ``N. Title [info]``.
-
-    Canonical line formatter shared by /search results and /genres <name>
-    browsing (and any future listing) so every surface renders identically:
-    dot-joined info string in brackets (see format_search_info), optional
-    `` 🔁+N`` duplicate marker. ``entry`` is a DB document.
-    """
-    info = format_search_info(entry)
-    line = f"{number}. {entry.get('title', 'Unknown Title')} [{info}]"
-    if dup_count:
-        line += f" 🔁+{dup_count}"
-    return line
 
 
 async def resolve_chat_ref(ref: str, client):

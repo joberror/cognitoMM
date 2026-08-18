@@ -247,7 +247,6 @@ def main():
     # Sync tests need monkeypatch - emulate with a tiny shim so the standalone
     # runner works without pytest fixtures.
     import contextlib
-    import unittest.mock as mock
 
     class _Monkeypatch:
         def __init__(self):

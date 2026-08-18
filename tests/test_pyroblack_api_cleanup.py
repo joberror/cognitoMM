@@ -48,7 +48,7 @@ if ROOT_DIR not in sys.path:
 
 from features import callbacks, commands, search
 from features.logger import TelegramLogger
-from pyrogram.enums import ChatType
+from pyrogram.enums import ChatType, ParseMode
 from pyrogram.types import LinkPreviewOptions
 
 
@@ -430,6 +430,50 @@ async def test_cmd_my_history_uses_link_preview_options():
     _assert_link_preview_only(msg.replies)
 
 
+async def test_cmd_my_history_plain_html_tap_to_copy():
+    """cmd_my_history renders plain HTML with tap-to-copy <code> queries."""
+    msg = FakeUserMsg()
+    ts = datetime(2026, 1, 2, 15, 4, tzinfo=timezone.utc)
+    history = [
+        {"q": "matrix", "ts": ts},
+        {"q": "Rock & <Roll>", "ts": ts},
+    ]
+    with patch.object(commands.users_col, "find_one",
+                      AsyncMock(return_value={"search_history": history})):
+        await commands.cmd_my_history(None, msg)
+
+    text, kwargs = msg.replies[0]
+    assert "```" not in text, "no code block wrapper"
+    assert kwargs.get("parse_mode") is ParseMode.HTML
+    assert text.startswith("<b>SEARCH HISTORY</b>")
+    # Most-recent-first: Rock & <Roll> (later entry) renders first
+    # HTML-escaped query, still tap-to-copy
+    assert "1. <code>Rock &amp; &lt;Roll&gt;</code> [03:04PM]" in text
+    assert "2. <code>matrix</code> [03:04PM]" in text
+    assert text.rstrip().endswith("🔁 Re-search with /f title")
+
+
+async def test_cmd_watchlist_plain_html_tap_to_copy():
+    """cmd_watchlist renders plain HTML with tap-to-copy <code> titles."""
+    msg = FakeUserMsg()
+    entries = [
+        {"title": "Inception", "year": 2010, "type": "Movie"},
+        {"title": "Rock & <Roll> Show", "year": None, "type": "Series"},
+    ]
+    with patch("features.user_management.get_watchlist",
+               AsyncMock(return_value=entries)):
+        await commands.cmd_watchlist(None, msg)
+
+    text, kwargs = msg.replies[0]
+    assert "```" not in text, "no code block wrapper"
+    assert kwargs.get("parse_mode") is ParseMode.HTML
+    assert text.startswith("👁️ <b>Your Watchlist</b>")
+    assert "1. <code>Inception</code> [2010.Movie]" in text
+    # HTML-escaped title, still tap-to-copy; no year falls back to type only
+    assert "2. <code>Rock &amp; &lt;Roll&gt; Show</code> [Series]" in text
+    assert "Remove with /unwatch title" in text
+
+
 async def test_cmd_recent_uses_link_preview_options():
     """cmd_recent (commands.py:607)."""
     msg = FakeUserMsg()
@@ -593,19 +637,20 @@ async def test_trending_callback_uses_link_preview_options():
 
 
 def test_link_preview_options_migration_fully_applied():
-    """Source-level scan: pins ALL link_preview_options call sites (18).
+    """Source-level scan: pins ALL link_preview_options call sites (20).
 
     The exact per-file counts are the pin: adding a site or refactoring the
     kwarg construction (e.g. into a helper) fails until the counts here are
     deliberately updated - do NOT loosen the matcher to "fix" it. (Counts
     grew from 14 to 18 when the /random, /genres, /logs commands were added;
     the pick-filter refactor then moved the page:/choose: renders from
-    callbacks.py into search.py, shifting 2 sites: search 1->3, callbacks 3->1.)
+    callbacks.py into search.py, shifting 2 sites: search 1->3, callbacks 3->1;
+    the genre pick view added a site in callbacks.py: 1->2.)
     """
     expected = {
         "features/logger.py": 1,
         "features/search.py": 3,
-        "features/callbacks.py": 1,
+        "features/callbacks.py": 2,
         "features/commands.py": 14,
     }
     total = 0
@@ -618,7 +663,7 @@ def test_link_preview_options_migration_fully_applied():
         assert found == count, \
             f"{rel}: expected {count} link_preview_options sites, found {found}"
         total += found
-    assert total == 19, f"expected 19 total sites, found {total}"
+    assert total == 20, f"expected 20 total sites, found {total}"
 
 
 # ---------------------------
@@ -637,6 +682,8 @@ def main():
         await test_cmd_start_short_terms_uses_link_preview_options()
         await test_cmd_start_long_terms_chunks_use_link_preview_options()
         await test_cmd_my_history_uses_link_preview_options()
+        await test_cmd_my_history_plain_html_tap_to_copy()
+        await test_cmd_watchlist_plain_html_tap_to_copy()
         await test_cmd_recent_uses_link_preview_options()
         await test_cmd_trending_uses_link_preview_options()
         await test_cmd_indexing_stats_uses_link_preview_options()

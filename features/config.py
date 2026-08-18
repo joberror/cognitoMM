@@ -27,7 +27,7 @@ BOT_START_TIME = datetime.now(timezone.utc)
 # `scripts/bump_version.py --set X.Y.Z`. The pre-commit hook fails commits
 # that add a new feature without bumping this constant. The webapp `/`
 # endpoint exposes it (overridable via the BOT_VERSION env var).
-BOT_VERSION = "1.6.0"
+BOT_VERSION = "1.7.1"
 
 # -------------------------
 # CONFIG / ENV
@@ -77,14 +77,12 @@ INDEX_EXTENSIONS = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m
 
 # SOLUTION: Message queue for sequential processing
 from collections import deque
-import time
 
 # Global message queue for sequential processing
 message_queue = deque(maxlen=100)
 queue_processor_task = None
 
 # DIAGNOSTIC: Track concurrent indexing operations
-import threading
 active_indexing_threads = set()
 
 # User input waiting system (replacement for client.listen)

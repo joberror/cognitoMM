@@ -41,7 +41,7 @@ Diagnostic Tags:
 - [REALTIME-DELETE-DEBUG] for detailed update inspection (enable for troubleshooting).
 """
 
-from typing import Any, Iterable
+from typing import Any
 
 from .database import movies_col, channels_col
 from .user_management import log_action
