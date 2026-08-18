@@ -7,7 +7,7 @@ It sets up the Pyroblack client, registers handlers, and manages the bot lifecyc
 
 import sys
 import asyncio
-from pyrogram import Client
+from pyrogram import Client, filters
 from pyrogram.handlers import MessageHandler, InlineQueryHandler, CallbackQueryHandler
 
 # Import from our modules
