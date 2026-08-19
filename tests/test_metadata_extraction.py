@@ -278,6 +278,65 @@ def print_test_result(result: TestResult):
         print(f"    {match} {key}: {actual_value}")
 
 
+def test_case_6_fauda_series_with_year_and_metadata_brackets():
+    """
+    Test Case 6: Fauda — series with year + metadata brackets
+    Filename: Fauda (2015) S02E11 (1080p HEBREW NF WEB-DL x265 HEVC 10bit DDP 5.1 theincognito) [UTR].mkv
+    The BRACKET_SUFFIX regex used to match (2015) S02E11 (1080p ...) as one
+    giant paren group and strip it all, leaving just 'Fauda' classified as Movie.
+    """
+    result = TestResult("Test Case 6: Fauda series with year + metadata brackets")
+    filename = "Fauda (2015) S02E11 (1080p HEBREW NF WEB-DL x265 HEVC 10bit DDP 5.1 theincognito) [UTR].mkv"
+    expected = {
+        'title': 'Fauda',
+        'type': 'Series',
+        'year': 2015,
+        'season': 2,
+        'episode': 11,
+        'quality': '1080p',
+        'video_codec': 'x265/HEVC'
+    }
+    actual = parse_metadata(filename)
+    result.set_metadata(expected, actual)
+    compare_field(result, 'title', expected['title'], actual.get('title'))
+    compare_field(result, 'type', expected['type'], actual.get('type'))
+    compare_field(result, 'year', expected['year'], actual.get('year'))
+    compare_field(result, 'season', expected['season'], actual.get('season'))
+    compare_field(result, 'episode', expected['episode'], actual.get('episode'))
+    compare_field(result, 'quality', expected['quality'], actual.get('quality'))
+    compare_field(result, 'video_codec', expected['video_codec'], actual.get('video_codec'))
+    return result
+
+
+def test_case_7_dynasty_series_with_episode_title():
+    """
+    Test Case 7: Dynasty — series with episode title + metadata brackets
+    Filename: Dynasty (2017) S03E20 My Hangover's Arrived (1080p AMZN Webrip x265 10bit EAC3 5.1 - HxD) [TAoE].mkv
+    Same bracket-stripping bug as Case 6.
+    """
+    result = TestResult("Test Case 7: Dynasty series with episode title + metadata brackets")
+    filename = "Dynasty (2017) S03E20 My Hangover's Arrived (1080p AMZN Webrip x265 10bit EAC3 5.1 - HxD) [TAoE].mkv"
+    expected = {
+        'title': 'Dynasty',
+        'type': 'Series',
+        'year': 2017,
+        'season': 3,
+        'episode': 20,
+        'quality': '1080p',
+        'video_codec': 'x265/HEVC'
+    }
+    actual = parse_metadata(filename)
+    result.set_metadata(expected, actual)
+    compare_field(result, 'title', expected['title'], actual.get('title'))
+    compare_field(result, 'type', expected['type'], actual.get('type'))
+    compare_field(result, 'year', expected['year'], actual.get('year'))
+    compare_field(result, 'season', expected['season'], actual.get('season'))
+    compare_field(result, 'episode', expected['episode'], actual.get('episode'))
+    compare_field(result, 'quality', expected['quality'], actual.get('quality'))
+    compare_field(result, 'video_codec', expected['video_codec'], actual.get('video_codec'))
+    return result
+
+
 def main():
     """Run all test cases and report results"""
     print("🧪 Testing Enhanced Metadata Extraction")
@@ -290,7 +349,9 @@ def main():
         test_case_2_the_witcher(),
         test_case_3_hazbin_hotel(),
         test_case_4_dune_dolby_vision(),
-        test_case_5_avatar_dts_hd()
+        test_case_5_avatar_dts_hd(),
+        test_case_6_fauda_series_with_year_and_metadata_brackets(),
+        test_case_7_dynasty_series_with_episode_title()
     ]
     
     # Print individual results

@@ -438,13 +438,56 @@ class MovieFilenameParser:
         if wm:
             name = name[wm.end():]
 
-        # Strip trailing bracket noise  [YTS.MX]  (1080p)  etc.
+        # Strip trailing bracket noise — but only if the content looks like
+        # metadata (resolution, codec, source, bitrate, etc.).  Brackets
+        # containing a release-year, season/episode marker, or other
+        # identifying data must survive so _extract_series_info can see them.
+        #
+        # Example that broke before this guard:
+        #   "Fauda (2015) S02E11 (1080p ...) [UTR].mkv"
+        #   The \(.*?\) regex matched (2015) S02E11 (1080p ...) as one giant
+        #   group (expanding until \) hit the final ')') and stripped the
+        #   series info along with the metadata.
+        _META_KEYWORDS = re.compile(
+            r'(?:\d{3,4}p|\d{3,4}x\d{3,4}'   # resolution
+            r'|x26[45]|h26[45]|hevc|avc|av1|vp9|xvid|divx'  # codecs
+            r'|bluray|bdrip|brrip|webrip|web-dl|webdl|hdtv|dvdrip|hdrip'  # source
+            r'|aac|ac3|dts|dd[p+]?(?:\s|\d|$)|eac3|opus|flac'  # audio
+            r'|10bit|8bit|hdr|hdr10|hdr10\+|dv|dolby'  # bit-depth/HDR
+            r'|h\.?264|h\.?265|avc|hev'  # alternate codec spellings
+            r')',
+            re.IGNORECASE
+        )
+        _SERIES_RE = re.compile(
+            r'\bS\d{1,3}[Ee]\d|\bS\d{1,3}\b|\bE\d{1,4}\b'
+            r'|\b\d{1,2}[xX]\d{2,3}\b|\b[12][09]\d{2}\b',
+            re.IGNORECASE
+        )
         while True:
             sm = self.BRACKET_SUFFIX.search(name)
-            if sm:
-                name = name[:sm.start()]
-            else:
+            if not sm:
                 break
+            # Extract just the bracketed content
+            inner_m = re.search(r'[\[\(\{](.*?)[\]\)\}]', sm.group(0))
+            inner = inner_m.group(1) if inner_m else sm.group(0)
+            # Keep if it contains a series marker or year — it's not metadata
+            if _SERIES_RE.search(inner):
+                break
+            # Keep if it doesn't look like metadata at all (e.g. just a
+            # release group tag like "[YTS.MX]" is fine, but "(2015)" alone
+            # should not be stripped here — years are extracted elsewhere)
+            if not _META_KEYWORDS.search(inner):
+                # Allow very short tags (release groups like [UTR], [TAoE])
+                # but stop stripping if it's a bare year
+                if re.match(r'^\s*\(?\d{4}\)?\s*$', inner):
+                    break
+                # Short alphanumeric tags (≤8 chars) are likely group tags
+                if len(inner.strip()) <= 8:
+                    name = name[:sm.start()]
+                    continue
+                # Longer non-metadata content — stop stripping
+                break
+            name = name[:sm.start()]
 
         # Remove fake embedded extensions: "webrip_avi" -> "webrip"
         # Only remove if the fake ext is NOT preceded by a title-like word pattern
