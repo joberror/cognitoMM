@@ -486,6 +486,7 @@ async def test_cmd_recent_uses_link_preview_options():
     ]
     with patch.object(commands, "is_feature_premium_only",
                       AsyncMock(return_value=False)), \
+            patch.object(commands, "check_banned", AsyncMock(return_value=False)), \
             patch.object(commands.movies_col, "find_one",
                          AsyncMock(return_value={"_id": "latest", "indexed_at": now})), \
             patch.object(commands.movies_col, "find",
@@ -613,6 +614,8 @@ async def test_search_pagination_callback_uses_link_preview_options():
     # build_search_keyboard), which imports is_feature_premium_only fresh
     # from premium_management - so patch the real source, not callbacks.
     with patch.object(callbacks, "bulk_downloads", cached), \
+            patch.object(callbacks, "should_process_command_for_user",
+                         AsyncMock(return_value=True)), \
             patch("features.premium_management.is_feature_premium_only",
                   AsyncMock(return_value=False)), \
             patch.object(callbacks, "has_accepted_terms",
@@ -629,6 +632,8 @@ async def test_trending_callback_uses_link_preview_options():
                AsyncMock(return_value=[{"id": 1}])), \
             patch("features.tmdb_integration.format_trending_list",
                   Mock(return_value="content")), \
+            patch.object(callbacks, "should_process_command_for_user",
+                         AsyncMock(return_value=True)), \
             patch.object(callbacks, "has_accepted_terms",
                          AsyncMock(return_value=True)):
         await callbacks.callback_handler(None, cbq)
