@@ -53,8 +53,10 @@ async def scan_message_range(
         dict: {scanned, orphans_removed, new_indexed, already_indexed,
                skipped_no_media, errors, paused}
     """
-    movies_col_ref = movies_col_ref or movies_col
-    index_message_ref = index_message_ref or index_message
+    if movies_col_ref is None:
+        movies_col_ref = movies_col
+    if index_message_ref is None:
+        index_message_ref = index_message
 
     scanned = 0
     orphans_removed = 0
@@ -239,7 +241,8 @@ async def get_channel_scan_cursor(channel_id: int, settings_col_ref=None):
     Returns an int or None when no baseline exists yet.
     """
     from .database import settings_col
-    settings_col_ref = settings_col_ref or settings_col
+    if settings_col_ref is None:
+        settings_col_ref = settings_col
     try:
         doc = await settings_col_ref.find_one({"k": f"scan_cursor:{channel_id}"})
     except Exception:
@@ -250,7 +253,8 @@ async def get_channel_scan_cursor(channel_id: int, settings_col_ref=None):
 async def set_channel_scan_cursor(channel_id: int, value: int, settings_col_ref=None):
     """Persist the scan cursor for a channel (idempotent upsert)."""
     from .database import settings_col
-    settings_col_ref = settings_col_ref or settings_col
+    if settings_col_ref is None:
+        settings_col_ref = settings_col
     try:
         await settings_col_ref.update_one(
             {"k": f"scan_cursor:{channel_id}"},
@@ -275,7 +279,8 @@ async def incremental_rescan(client, channel_doc: dict, settings_col_ref=None, s
     Returns a summary dict, or None when the channel can't be read.
     """
     from .database import settings_col
-    settings_col_ref = settings_col_ref or settings_col
+    if settings_col_ref is None:
+        settings_col_ref = settings_col
     scan_ref = scan_ref or scan_message_range
 
     channel_id = channel_doc.get("channel_id")
