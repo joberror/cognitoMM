@@ -808,16 +808,21 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc), "completed_by": user_id}}
             )
 
-            # Notify the user
-            try:
-                notification_text = (
-                    f"✅ **Request Fulfilled!**\n\n"
-                    f"Your request for **{request.get('title')}** ({request.get('year')}) has been fulfilled.\n\n"
-                    f"Thank you for using our service!"
-                )
-                await client.send_message(request.get("user_id"), notification_text)
-            except Exception as e:
-                print(f"Failed to notify user {request.get('user_id')}: {e}")
+            # Notify the requester and everyone who upvoted
+            recipients = []
+            for uid in [request.get("user_id")] + list(request.get("voters") or []):
+                if uid is not None and uid not in recipients:
+                    recipients.append(uid)
+            for uid in recipients:
+                try:
+                    notification_text = (
+                        f"✅ **Request Fulfilled!**\n\n"
+                        f"Your request for **{request.get('title')}** ({request.get('year')}) has been fulfilled.\n\n"
+                        f"Thank you for using our service!"
+                    )
+                    await client.send_message(uid, notification_text)
+                except Exception as e:
+                    print(f"Failed to notify user {uid}: {e}")
 
             await callback_query.answer(f"✅ Request marked as done!")
 
@@ -904,17 +909,22 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 )
                 completed_count += 1
 
-                # Notify user
+                # Notify requester + voters
                 try:
-                    notification_text = (
-                        f"✅ **Request Fulfilled!**\n\n"
-                        f"Your request for **{request.get('title')}** ({request.get('year')}) has been fulfilled.\n\n"
-                        f"Thank you for using our service!"
-                    )
-                    await client.send_message(request.get("user_id"), notification_text)
-                    notified_count += 1
+                    recipients = []
+                    for uid in [request.get("user_id")] + list(request.get("voters") or []):
+                        if uid is not None and uid not in recipients:
+                            recipients.append(uid)
+                    for uid in recipients:
+                        notification_text = (
+                            f"✅ **Request Fulfilled!**\n\n"
+                            f"Your request for **{request.get('title')}** ({request.get('year')}) has been fulfilled.\n\n"
+                            f"Thank you for using our service!"
+                        )
+                        await client.send_message(uid, notification_text)
+                        notified_count += 1
                 except Exception as e:
-                    print(f"Failed to notify user {request.get('user_id')}: {e}")
+                    print(f"Failed to notify users for request {request.get('_id')}: {e}")
 
             # Log the action
             await log_action("request_all_completed", by=user_id, extra={

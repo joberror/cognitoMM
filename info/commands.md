@@ -19,7 +19,7 @@ router + this file together.
 | `/trending` | TMDb trending movies / shows / new releases (buttons) — `/search`-style lines with ⭐ ratings + clickable IMDb/TMDb links |
 | `/random` | Random indexed title (poster when available; caption uses the `/search` bracket info) |
 | `/genres` | List TMDb genres with counts; `/genres <name>` browses a genre in the `/search` per-title + latest-file layout with a `Files Found: N (Movie - X | Series - Y)` header split (paginated, 12/page with `← Prev`/`Next →`, `🔤 A–Z`/`🆕 Newest`/`⭐ Top Rated` sort toggle). Each title appears ONCE: movies `1. Die Hard > 1 file > Latest: 1080p`, series `1. Breaking Bad > 4 files > 2 seasons [5] · 3 eps [35] > Latest: S01E02 | 720p ⭐8.9` — brackets are the real TMDb totals (DB counts outside). Every title gets `Pick [n]` (in-place filter view, series also `Pick[n][Sxx]` season shortcuts that page via `S◀`/`S▶` for >5 seasons) + `Get [n]` (latest copy) |
-| `/request <title>` | Request a missing title (TMDb search, rate-limited) |
+| `/request <title>` | Request a missing title (TMDb search, rate-limited). Picks carry the TMDb ID: duplicates match exactly across spellings, an existing pending request from another user offers a free **upvote** (votes push it up the admin queue), and the request auto-completes with a DM + Get button the moment a matching copy is indexed |
 | `/request_list` | View/manage your requests |
 | `/my_history` | Your search history (plain HTML, tap-to-copy queries, bracket = search time, grouped by date) |
 | `/my_stat` | Your usage + premium info |
@@ -36,7 +36,7 @@ router + this file together.
 | `/stat` | Full statistics dashboard (incl. prune stats) |
 | `/quickstat` | Quick key numbers |
 | `/broadcast <message>` | Message all users |
-| `/request_list` | Manage user requests |
+| `/request_list` | Manage user requests (most-voted first, ▲ counts shown) |
 | `/premium` | Manage premium users + premium-gated features |
 | `/mc` / `manage_channel` | Unified channel manager |
 | `/add_channel <link\|id\|@username>` | Register a channel |

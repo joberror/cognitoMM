@@ -342,8 +342,11 @@ async def index_message(msg):
 
             # Post-index side effects (both fire-and-forget tolerant):
             # 1. Enrich the entry with TMDb metadata (poster/genres/rating) -
-            #    cached per title so per-episode series indexing is cheap.
+            #    cached per title so per-episode series indexing is cheap. The
+            #    TMDb ID is persisted as the canonical identity for watchlist
+            #    + request matching (remake/transliteration-proof).
             # 2. Notify users watching this title (watchlist).
+            # 3. Auto-fulfill pending requests for this title (requests).
             try:
                 from .tmdb_integration import TMDB_ENRICH_INDEX, enrich_title
                 if TMDB_ENRICH_INDEX:
@@ -355,14 +358,22 @@ async def index_message(msg):
                             "tmdb_genres": meta.get("genres"),
                             "tmdb_overview": meta.get("overview"),
                             "imdb_id": meta.get("imdb_id") or entry.get("imdb"),
+                            "tmdb_id": meta.get("tmdb_id"),
                         }
                         await movies_col.update_one({"_id": entry["_id"]}, {"$set": set_fields})
+                        if meta.get("tmdb_id") is not None:
+                            entry["tmdb_id"] = meta.get("tmdb_id")
             except Exception as enrich_err:
                 print(f"⚠️ TMDb enrichment failed for {entry.get('title')}: {enrich_err}")
             try:
                 await notify_watchlist(entry)
             except Exception as notify_err:
                 print(f"⚠️ Watchlist notify failed for {entry.get('title')}: {notify_err}")
+            try:
+                from .request_management import fulfill_matching_requests
+                await fulfill_matching_requests(entry)
+            except Exception as fulfill_err:
+                print(f"⚠️ Request auto-fulfill failed for {entry.get('title')}: {fulfill_err}")
         except Exception as db_error:
             print(f"[DIAGNOSTIC] {timestamp} - Database insertion failed for message {msg.id}: {str(db_error)}")
             # Check if it's a duplicate key error

@@ -94,15 +94,19 @@ async def update_user_limits(user_id: int):
     )
 
 
-async def check_duplicate_request(title: str, year: str, user_id: int = None):
+async def check_duplicate_request(title: str, year: str, user_id: int = None,
+                                  tmdb_id=None):
     """
     Check for duplicate or similar requests using fuzzy matching.
-    
+
     Args:
         title: Movie/series title
         year: Release year
         user_id: Optional user ID to check user's own requests
-        
+        tmdb_id: Optional TMDb ID - an exact TMDb match is always a
+            duplicate, even when the spellings differ (remakes,
+            transliterations).
+
     Returns:
         tuple: (is_duplicate: bool, similar_request: dict or None)
     """
@@ -110,17 +114,23 @@ async def check_duplicate_request(title: str, year: str, user_id: int = None):
     query = {"status": "pending"}
     if user_id:
         query["user_id"] = user_id
-    
+
     pending_requests = await requests_col.find(query).to_list(length=100)
-    
+
+    # TMDb identity match first (exact, spelling-independent).
+    if tmdb_id is not None:
+        for req in pending_requests:
+            if req.get("tmdb_id") is not None and req.get("tmdb_id") == tmdb_id:
+                return True, req
+
     for req in pending_requests:
         # Check year match
-        if req.get("year") == year:
+        if str(req.get("year")) == str(year):
             # Check title similarity
             similarity = fuzz.ratio(title.lower(), req.get("title", "").lower())
             if similarity >= 85:  # 85% similarity threshold
                 return True, req
-    
+
     return False, None
 
 
@@ -156,14 +166,164 @@ async def get_queue_position(user_id: int):
         {"user_id": user_id, "status": "pending"},
         sort=[("request_date", -1)]
     )
-    
+
     if not user_latest:
         return None
-    
+
     position = await requests_col.count_documents({
         "status": "pending",
         "request_date": {"$lt": user_latest["request_date"]}
     }) + 1
-    
+
     return position
+
+
+# ------------------------------------------------------------------ #
+# Request voting + auto-fulfillment (TMDb-identity based)              #
+# ------------------------------------------------------------------ #
+# Requests carry an optional ``tmdb_id`` (captured from the TMDb picker
+# in /request). It is the canonical identity: remakes and transliterated
+# titles share spellings but never a TMDb ID. Every matcher below tries
+# the TMDb ID first and falls back to normalized title + year so requests
+# filed without a TMDb match (API down, SKIP) still work.
+
+def _request_matches(req: dict, title: str, year, tmdb_id) -> bool:
+    """True when a pending request doc refers to the same title."""
+    if tmdb_id is not None and req.get("tmdb_id") is not None:
+        return req.get("tmdb_id") == tmdb_id
+    return (str(req.get("title") or "").strip().lower()
+            == str(title or "").strip().lower()
+            and str(req.get("year")) == str(year))
+
+
+def request_priority_key(req: dict):
+    """Sort key for the admin queue: most-voted first, then oldest first.
+
+    Missing ``request_date`` sorts last so legacy docs never crash the sort.
+    """
+    votes = req.get("votes") or 0
+    ts = req.get("request_date")
+    try:
+        stamp = ts.timestamp() if hasattr(ts, "timestamp") else 0
+    except Exception:
+        stamp = 0
+    return (-votes, stamp)
+
+
+async def find_global_match(title: str, year, tmdb_id, exclude_user_id: int = None):
+    """Best pending request from ANOTHER user for the same title (or None).
+
+    Used by /request to offer an upvote instead of filing a duplicate.
+    """
+    pending = await requests_col.find({"status": "pending"}).to_list(length=1000)
+    best = None
+    for req in pending:
+        if exclude_user_id is not None and req.get("user_id") == exclude_user_id:
+            continue
+        if _request_matches(req, title, year, tmdb_id):
+            if best is None or request_priority_key(req) < request_priority_key(best):
+                best = req
+    return best
+
+
+async def upvote_request(request_id, user_id: int):
+    """Add an upvote to a pending request (idempotent per user).
+
+    Returns ``(ok: bool, votes: int)`` - ok is False when the request is
+    missing or no longer pending.
+    """
+    try:
+        req = await requests_col.find_one({"_id": request_id, "status": "pending"})
+    except Exception:
+        return False, 0
+    if not req:
+        return False, 0
+    voters = list(req.get("voters") or [])
+    if user_id in voters:
+        return True, int(req.get("votes") or 0)
+    voters.append(user_id)
+    try:
+        await requests_col.update_one(
+            {"_id": request_id},
+            {"$set": {"voters": voters, "votes": int(req.get("votes") or 0) + 1}},
+        )
+    except Exception:
+        return False, 0
+    return True, int(req.get("votes") or 0) + 1
+
+
+async def fulfill_matching_requests(entry: dict, completed_by="auto_index"):
+    """Auto-complete pending requests fulfilled by a newly indexed copy.
+
+    Matches on TMDb ID first, title + year fallback. Marks each match
+    completed and DMs the requester plus all voters with a Get button for
+    the fresh copy. Returns the number of requests fulfilled.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+
+    title = (entry.get("title") or "").strip()
+    if not title:
+        return 0
+    tmdb_id = entry.get("tmdb_id")
+    year = entry.get("year")
+
+    try:
+        pending = await requests_col.find({"status": "pending"}).to_list(length=1000)
+    except Exception as e:
+        print(f"⚠️ fulfill_matching_requests query failed: {e}")
+        return 0
+
+    matches = [r for r in pending if _request_matches(r, title, year, tmdb_id)]
+    if not matches:
+        return 0
+
+    # Resolve the client lazily (None at import time, set in bot.main()).
+    try:
+        from .config import client as _client
+    except Exception:
+        _client = None
+
+    fulfilled = 0
+    for req in matches:
+        try:
+            await requests_col.update_one(
+                {"_id": req.get("_id"), "status": "pending"},
+                {"$set": {
+                    "status": "completed",
+                    "completed_at": _dt.now(_tz.utc),
+                    "completed_by": completed_by,
+                }},
+            )
+        except Exception as e:
+            print(f"⚠️ fulfill_matching_requests update failed: {e}")
+            continue
+        fulfilled += 1
+
+        recipients = []
+        for uid in [req.get("user_id")] + list(req.get("voters") or []):
+            if uid is not None and uid not in recipients:
+                recipients.append(uid)
+        if _client is not None:
+            for uid in recipients:
+                try:
+                    text = (
+                        f"✅ **Request Fulfilled!**\n\n"
+                        f"**{req.get('title')}** ({req.get('year')}) "
+                        f"is now available - grab it below."
+                    )
+                    reply_markup = None
+                    channel_id = entry.get("channel_id")
+                    message_id = entry.get("message_id")
+                    if channel_id and message_id:
+                        from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                        reply_markup = InlineKeyboardMarkup([[
+                            InlineKeyboardButton(
+                                "📥 Get File",
+                                callback_data=f"get_file:{channel_id}:{message_id}",
+                            )
+                        ]])
+                    await _client.send_message(uid, text, reply_markup=reply_markup)
+                except Exception as e:
+                    print(f"⚠️ fulfill notify failed for {uid}: {e}")
+    return fulfilled
 

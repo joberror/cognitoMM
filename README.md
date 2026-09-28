@@ -30,7 +30,7 @@ This is a Telegram bot hosted on Hugging Face Spaces.
 - `/recent` — newly indexed content (plain HTML listing, **tap any title to copy the `Title (year)` string straight into `/search`**) · `/trending` — TMDb trending (listed in the same format as `/search`; trending keeps ⭐ ratings and clickable IMDb/TMDb links)
 - `/genres` — browse by TMDb genre (counts; `/genres <name>` lists titles deduplicated in the `/search` per-title + latest-file layout — `1. Breaking Bad > 4 files > 2 seasons [5] · 3 eps [35] > Latest: S01E02 | 720p ⭐8.9` (brackets = real TMDb totals), paginated with `🔤 A–Z` / `🆕 Newest` / `⭐ Top Rated` sort toggle; every title has `Pick [n]` (in-place filter, series get `Pick[n][Sxx]`) + `Get [n]`)
 - `/random` — surprise me: a random indexed title (poster when available)
-- `/request <title>` / `/request_list` — request missing titles (rate-limited)
+- `/request <title>` / `/request_list` — request missing titles (rate-limited, TMDb-verified with upvotes + auto-fulfill on index)
 
 **👤 Your library**
 - `/watch <title>` / `/unwatch <title>` — watchlist; you get a DM the moment a

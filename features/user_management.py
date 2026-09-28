@@ -84,16 +84,35 @@ def _watch_key(title: str) -> str:
     return (title or "").strip().lower()
 
 
-async def add_to_watchlist(user_id: int, title: str, year=None, type_=None) -> bool:
-    """Add a title to a user's watchlist (idempotent). Returns True if added."""
+async def _resolve_tmdb_id(title: str, year=None, type_=None):
+    """Best-effort TMDb ID lookup (cached; None without API key/failure)."""
+    try:
+        from .tmdb_integration import enrich_title
+        meta = await enrich_title(title, year, type_ or "Movie")
+    except Exception:
+        return None
+    return (meta or {}).get("tmdb_id")
+
+
+async def add_to_watchlist(user_id: int, title: str, year=None, type_=None,
+                           tmdb_id=None) -> bool:
+    """Add a title to a user's watchlist (idempotent). Returns True if added.
+
+    The entry carries the TMDb ID (resolved via the cached enrichment when
+    not passed) so notifications match remakes/transliterations exactly;
+    the normalized title stays as fallback for titles TMDb doesn't know.
+    """
     if not title or not str(title).strip():
         return False
     key = _watch_key(title)
+    if tmdb_id is None:
+        tmdb_id = await _resolve_tmdb_id(str(title).strip(), year, type_)
     entry = {
         "title": str(title).strip(),
         "title_key": key,
         "year": year,
         "type": type_ or "Movie",
+        "tmdb_id": tmdb_id,
         "added_at": datetime.now(timezone.utc),
     }
     try:
@@ -105,10 +124,13 @@ async def add_to_watchlist(user_id: int, title: str, year=None, type_=None) -> b
             {"$setOnInsert": {"user_id": user_id, "watchlist": []}},
             upsert=True,
         )
-        result = await users_col.update_one(
-            {"user_id": user_id, "watchlist.title_key": {"$ne": key}},
-            {"$push": {"watchlist": entry}},
-        )
+        # Idempotent on EITHER identity: skip the push when an entry with the
+        # same TMDb ID or the same normalized title already exists.
+        filt = {"user_id": user_id,
+                "watchlist.title_key": {"$ne": key}}
+        if tmdb_id is not None:
+            filt["watchlist.tmdb_id"] = {"$ne": tmdb_id}
+        result = await users_col.update_one(filt, {"$push": {"watchlist": entry}})
         return bool(result.modified_count)
     except Exception as e:
         print(f"⚠️ add_to_watchlist failed for {user_id}: {e}")
@@ -142,9 +164,10 @@ async def get_watchlist(user_id: int):
 async def notify_watchlist(entry: dict) -> int:
     """DM every user watching a title when a new copy is indexed.
 
-    Matching is by normalized title (exact, case-insensitive) so a new season
-    or episode of a watched series notifies too. The DM carries a Get button
-    for the freshly indexed copy. Returns the number of users notified.
+    Matching is by TMDb ID first (exact across remakes/transliterations),
+    falling back to normalized title (exact, case-insensitive) so a new
+    season or episode of a watched series notifies too. The DM carries a
+    Get button for the freshly indexed copy. Returns users notified.
     """
     from .config import client
     from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -153,9 +176,15 @@ async def notify_watchlist(entry: dict) -> int:
     if not title or client is None:
         return 0
     key = _watch_key(title)
+    tmdb_id = entry.get("tmdb_id")
+
+    query = {"watchlist.title_key": key}
+    if tmdb_id is not None:
+        query = {"$or": [{"watchlist.tmdb_id": tmdb_id},
+                         {"watchlist.title_key": key}]}
 
     try:
-        docs = await users_col.find({"watchlist.title_key": key}).to_list(length=200)
+        docs = await users_col.find(query).to_list(length=200)
     except Exception as e:
         print(f"⚠️ notify_watchlist query failed: {e}")
         return 0

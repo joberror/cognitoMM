@@ -192,8 +192,10 @@ All callbacks (except `terms#`) require `should_process_command_for_user` + term
   `/search`-style bracket titles (`Title [1080p.1999]` via `format_search_info`);
   `/enrich` backfills older entries.
 - **Watchlist (`user_management.py`)** — `/watch` `/unwatch` `/watchlist`;
-  `notify_watchlist` DMs watchers (normalized-title match) when a new copy is
-  indexed. `/watchlist` lists entries in the `/search` bracket style
+  entries carry `tmdb_id` (resolved via cached enrichment at add time);
+  `notify_watchlist` DMs watchers on TMDb-ID match first (remake /
+  transliteration-proof) with normalized-title fallback when either side
+  lacks an ID. `/watchlist` lists entries in the `/search` bracket style
   (`1. Inception [2010.Movie]`) inside a code block.
 - **Scheduled rescan (`database_scan.py`)** — `start_db_rescan_monitor`
   (started in `bot.py`) runs `incremental_rescan` per channel every
@@ -295,9 +297,14 @@ handle_command + callbacks enforce: banned check → terms check (admins bypass)
 ### Requests
 ```
 /request → is_admin? (bypass) → check_rate_limits (3 pending / 1 per day / 20 global)
-        → validate_imdb_link → search_tmdb suggestion → save to requests_col (pending)
-        → update_user_limits
-/request_list → paginated admin view → req_done / req_all_done → status=completed → notify user
+        → TMDb picker captures tmdb_id → own-dup check (tmdb exact, else fuzzy ≥85%)
+        → global match? → offer free upvote (upvote_request, no quota) vs own request
+        → save to requests_col (pending, tmdb_id/votes/voters) → update_user_limits
+/request_list → pending sorted by request_priority_key (votes desc, oldest first,
+                ▲ counts shown) → req_done / req_all_done → status=completed →
+                notify requester + all voters
+auto-fulfill → index_message stores tmdb_id at enrich time, then
+        fulfill_matching_requests(entry) completes + DMs requester/voters w/ Get
 ```
 
 ### Broadcast

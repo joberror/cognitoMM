@@ -31,7 +31,7 @@ from .search import (
     send_search_results,
 )
 from .utils import format_search_info, format_latest_info, group_recent_content, format_recent_output, latest_copy
-from .request_management import check_rate_limits, update_user_limits, check_duplicate_request, get_queue_position, MAX_PENDING_REQUESTS_PER_USER
+from .request_management import check_rate_limits, update_user_limits, check_duplicate_request, get_queue_position, find_global_match, upvote_request, request_priority_key, MAX_PENDING_REQUESTS_PER_USER
 from .tmdb_integration import search_tmdb, get_random_background_image, enrich_title
 from .premium_management import is_premium_user, is_feature_premium_only
 from .broadcast import cmd_broadcast
@@ -200,7 +200,7 @@ USER_HELP = """
 ╰─────────────────────
 
 💡 Tips: /f = fastest • -e = perfect match
-📝 Requests: max 3 pending • 1 per day
+📝 Requests: max 3 pending • 1 per day • upvote existing ones
 """
 
 ADMIN_HELP = """
@@ -2541,6 +2541,7 @@ async def cmd_request(client, message: Message):
         tmdb_results = await search_tmdb(title, year, content_type)
 
         imdb_link = None
+        selected_tmdb_id = None
 
         if tmdb_results:
             # Display results
@@ -2597,6 +2598,7 @@ async def cmd_request(client, message: Message):
                 # Get IMDB link from selected result
                 selected_result = tmdb_results[selection_idx]
                 imdb_id = selected_result.get("imdb_id")
+                selected_tmdb_id = selected_result.get("tmdb_id")
 
                 if imdb_id:
                     imdb_link = f"https://www.imdb.com/title/{imdb_id}/"
@@ -2629,8 +2631,10 @@ async def cmd_request(client, message: Message):
                 await message.reply_text("❌ Invalid input. Please start over with /request")
                 return
 
-        # Check for duplicate requests
-        is_duplicate, similar_req = await check_duplicate_request(title, year, uid)
+        # Check for duplicate requests (TMDb ID match is exact even across
+        # spellings; falls back to fuzzy title + year)
+        is_duplicate, similar_req = await check_duplicate_request(
+            title, year, uid, tmdb_id=selected_tmdb_id)
         if is_duplicate:
             await message.reply_text(
                 f"⚠️ **Similar Request Found**\n\n"
@@ -2652,6 +2656,53 @@ async def cmd_request(client, message: Message):
                 await message.reply_text("❌ Request cancelled.")
                 return
 
+        # Another user may already have requested this title - offer an
+        # upvote (free, no quota consumed) instead of a duplicate request.
+        global_match = await find_global_match(
+            title, year, selected_tmdb_id, exclude_user_id=uid)
+        if global_match is not None:
+            match_votes = int(global_match.get("votes") or 0)
+            await message.reply_text(
+                f"👍 **Someone already requested this!**\n\n"
+                f"**Title:** {global_match.get('title')}\n"
+                f"**Year:** {global_match.get('year')}\n"
+                f"**Type:** {global_match.get('content_type')}\n"
+                f"**Votes:** {match_votes}\n\n"
+                f"Reply with **YES** to upvote it (you'll be notified when "
+                f"it's fulfilled, and votes push it up the admin queue).\n"
+                f"Reply with **NO** to file your own separate request."
+            )
+            try:
+                vote_msg = await wait_for_user_input(message.chat.id, uid, timeout=60)
+            except asyncio.TimeoutError:
+                await message.reply_text("⏰ Request timeout. Request cancelled.")
+                return
+            vote_choice = (vote_msg.text.strip().upper()
+                           if vote_msg and vote_msg.text else "")
+            if vote_choice == "YES":
+                ok, votes = await upvote_request(global_match.get("_id"), uid)
+                if ok:
+                    await log_action("request_upvoted", by=uid, extra={
+                        "title": global_match.get("title"),
+                        "year": global_match.get("year"),
+                        "votes": votes,
+                    })
+                    await message.reply_text(
+                        f"👍 **Upvoted!**\n\n"
+                        f"**{global_match.get('title')}** ({global_match.get('year')}) "
+                        f"now has **{votes}** vote(s).\n\n"
+                        f"You'll be notified when it's fulfilled."
+                    )
+                else:
+                    await message.reply_text(
+                        "⚠️ That request was just fulfilled or removed - "
+                        "please file a fresh request with /request."
+                    )
+                return
+            elif vote_choice != "NO":
+                await message.reply_text("❌ Request cancelled.")
+                return
+
         # Create request document
         now = datetime.now(timezone.utc)
         request_doc = {
@@ -2661,6 +2712,9 @@ async def cmd_request(client, message: Message):
             "title": title,
             "year": year,
             "imdb_link": imdb_link,
+            "tmdb_id": selected_tmdb_id,
+            "votes": 0,
+            "voters": [],
             "request_date": now,
             "status": "pending"
         }
@@ -2731,10 +2785,12 @@ async def cmd_request_list(client, message: Message):
         return
 
     try:
-        # Get all pending requests sorted by request date
+        # Get all pending requests sorted by request date, then prioritize by
+        # votes (most-voted first) so popular requests surface at the top.
         pending_requests = await requests_col.find(
             {"status": "pending"}
         ).sort("request_date", 1).to_list(length=1000)
+        pending_requests.sort(key=request_priority_key)
 
         if not pending_requests:
             await message.reply_text(
@@ -2812,8 +2868,12 @@ async def send_request_list_page(client, message, all_requests, request_list_id,
         user_id = req.get("user_id", "N/A")
         req_date = req.get("request_date")
         date_str = req_date.strftime("%Y-%m-%d %H:%M") if req_date else "N/A"
+        votes = int(req.get("votes") or 0)
 
-        list_text += f"#{idx} {req_type} {title} ({year})\n"
+        list_text += f"#{idx} {req_type} {title} ({year})"
+        if votes:
+            list_text += f" ▲{votes}"
+        list_text += "\n"
         list_text += f"    User: {username} (ID: {user_id})\n"
         list_text += f"    Date: {date_str}\n"
 
