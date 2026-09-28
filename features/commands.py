@@ -181,6 +181,7 @@ USER_HELP = """
 │ /search <title>        Smart search (exact + fuzzy)
 │ /search -e <title>     Exact title only
 │ Filters: /search Dune 2021 1080p movie
+│ Facets: lang:hindi subs:esub audio:atmos hdr
 ╰─────────────────────
 
 ╭─ 📌 Discover
@@ -385,12 +386,14 @@ async def cmd_search(client, message: Message):
     parts = message.text.split()
     if len(parts) < 2:
         return await message.reply_text(
-            "Usage: /search <title> [year] [quality] [movie|series]\n"
+            "Usage: /search <title> [year] [quality] [movie|series] [lang:/subs:/audio:/hdr:]\n"
             "Examples:\n"
             "/search Dune\n"
             "/search Dune 2021\n"
             "/search Dune 2021 1080p\n"
             "/search Breaking Bad series\n"
+            "/search RRR lang:hindi\n"
+            "/search Dune hdr\n"
             "/search -e <title>  (exact title only)"
         )
 

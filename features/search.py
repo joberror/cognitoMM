@@ -78,6 +78,24 @@ _YEAR_KV_RE = re.compile(r"\byear\s*:\s*(19\d{2}|20\d{2})\b", re.IGNORECASE)
 _QUALITY_KV_RE = re.compile(r"\bquality\s*:\s*([^\s]+)", re.IGNORECASE)
 _TYPE_KV_RE = re.compile(r"\btype\s*:\s*(movies?|films?|series|shows?|tv|serial)\b", re.IGNORECASE)
 _PAREN_YEAR_RE = re.compile(r"\(\s*(19\d{2}|20\d{2})\s*\)")
+# Library facets (explicit key:value anywhere; quote multi-word values:
+# lang:"dual audio"). Bare trailing `hdr` = any HDR.
+_KV_VAL = r"(?:\"([^\"]+)\"|([^\s]+))"
+_LANG_KV_RE = re.compile(r"\blang(?:uage)?\s*:\s*" + _KV_VAL, re.IGNORECASE)
+_SUBS_KV_RE = re.compile(r"\bsubs?(?:titles)?\s*:\s*" + _KV_VAL, re.IGNORECASE)
+_AUDIO_KV_RE = re.compile(r"\baudio\s*:\s*" + _KV_VAL, re.IGNORECASE)
+_HDR_KV_RE = re.compile(r"\bhdr\s*:\s*" + _KV_VAL, re.IGNORECASE)
+
+HDR_NAMES = {
+    "dv": "Dolby Vision",
+    "dolby vision": "Dolby Vision",
+    "dovi": "Dolby Vision",
+    "hdr10+": "HDR10+",
+    "hdr10": "HDR10",
+    "hdr": "HDR",
+    "hlg": "HLG",
+    "sdr": "SDR",
+}
 
 # A trailing type word is only a filter when the rest looks like a real
 # title: stripping "Show" off "The Show" would leave a bare article, so a
@@ -115,18 +133,32 @@ def parse_search_query(raw: str) -> dict:
     """Split ``/search`` input into title + structured filters.
 
     Returns ``{"title": str, "year": int|None, "quality": str|None,
-    "type": "Movie"|"Series"|None, "raw": str}``. Only TRAILING filter
-    tokens are stripped so a title like ``The Show`` keeps its words; the
-    explicit ``year:/quality:/type:`` forms are extracted from anywhere.
-    A lone year-like query (``/search 2012``) stays a title, not a filter.
+    "type": "Movie"|"Series"|None, "language": str|None,
+    "subtitles": str|None, "audio": str|None, "hdr": str|True|None,
+    "raw": str}``. Only TRAILING year/quality/type tokens are stripped so
+    words inside the title are never eaten; the explicit ``year:/quality:/
+    type:/lang:/subs:/audio:/hdr:`` forms are extracted from anywhere
+    (quote multi-word values: ``lang:"dual audio"``). Bare trailing ``hdr``
+    means any HDR copy. A lone year-like query (``/search 2012``) stays a
+    title, not a filter.
     """
     text = (raw or "").strip()
     if not text:
-        return {"title": "", "year": None, "quality": None, "type": None, "raw": raw or ""}
+        return {"title": "", "year": None, "quality": None, "type": None,
+                "language": None, "subtitles": None, "audio": None,
+                "hdr": None, "raw": raw or ""}
 
     year = None
     quality = None
     type_ = None
+    language = None
+    subtitles = None
+    audio = None
+    hdr = None
+
+    def _kv_value(match):
+        return (match.group(1) if match.group(1) is not None
+                else match.group(2) or "").strip()
 
     # Explicit key:value forms (removed wherever they appear).
     m = _YEAR_KV_RE.search(text)
@@ -141,6 +173,22 @@ def parse_search_query(raw: str) -> dict:
     if m:
         type_ = TYPE_TOKENS.get(m.group(1).lower())
         text = (_TYPE_KV_RE.sub(" ", text, count=1))
+    m = _LANG_KV_RE.search(text)
+    if m:
+        language = _kv_value(m) or None
+        text = (_LANG_KV_RE.sub(" ", text, count=1))
+    m = _SUBS_KV_RE.search(text)
+    if m:
+        subtitles = _kv_value(m) or None
+        text = (_SUBS_KV_RE.sub(" ", text, count=1))
+    m = _AUDIO_KV_RE.search(text)
+    if m:
+        audio = _kv_value(m) or None
+        text = (_AUDIO_KV_RE.sub(" ", text, count=1))
+    m = _HDR_KV_RE.search(text)
+    if m:
+        hdr = HDR_NAMES.get(_kv_value(m).lower(), _kv_value(m)) or None
+        text = (_HDR_KV_RE.sub(" ", text, count=1))
 
     # Parenthesised year anywhere ("Dune (2021)") — parser-style filenames
     # use this shape, so users paste it naturally.
@@ -154,6 +202,9 @@ def parse_search_query(raw: str) -> dict:
     original_count = len(tokens)
 
     # Trailing filter tokens only (loop so "Dune 2021 1080p movie" all pops).
+    # Bare `hdr` is the only library facet allowed unquoted (filenames never
+    # end a title in it); lang/subs/audio stay key:value-only so title words
+    # like "English" are never eaten.
     while tokens:
         t = tokens[-1].strip("(),[]")
         tl = t.lower()
@@ -173,6 +224,10 @@ def parse_search_query(raw: str) -> dict:
             type_ = TYPE_TOKENS[tl]
             tokens.pop()
             continue
+        if tl == "hdr" and hdr is None:
+            hdr = True
+            tokens.pop()
+            continue
         break
 
     title = " ".join(tokens).strip(" -:;")
@@ -184,14 +239,25 @@ def parse_search_query(raw: str) -> dict:
         # filters with an empty title (list-all-matching).
         if original_count <= 1:
             return {"title": text.strip(" -:;"), "year": None,
-                    "quality": None, "type": None, "raw": raw}
+                    "quality": None, "type": None, "language": None,
+                    "subtitles": None, "audio": None, "hdr": None,
+                    "raw": raw}
         title = ""
 
-    return {"title": title, "year": year, "quality": quality, "type": type_, "raw": raw}
+    return {"title": title, "year": year, "quality": quality, "type": type_,
+            "language": language, "subtitles": subtitles, "audio": audio,
+            "hdr": hdr, "raw": raw}
 
 
-def _build_base_filter(year=None, quality=None, type_=None) -> dict:
-    """Mongo filter for the structured facets (year/quality/type)."""
+def _build_base_filter(year=None, quality=None, type_=None, language=None,
+                     subtitles=None, audio=None, hdr=None) -> dict:
+    """Mongo filter for the structured facets.
+
+    Text facets (language/subtitles/audio/hdr-name) match case-insensitive
+    exact against the parser's canonical values (Hindi, English Subs,
+    Atmos, Dolby Vision...). ``hdr=True`` (bare ``hdr`` token) matches any
+    copy carrying HDR metadata.
+    """
     filt = {}
     if year is not None:
         try:
@@ -210,10 +276,21 @@ def _build_base_filter(year=None, quality=None, type_=None) -> dict:
             filt["type"] = {"$regex": "^movie$", "$options": "i"}
         elif t in ("series", "tv", "show"):
             filt["type"] = {"$regex": "^(series|tv|show)$", "$options": "i"}
+    if language:
+        filt["language"] = {"$regex": f"^{re.escape(str(language))}$", "$options": "i"}
+    if subtitles:
+        filt["subtitles"] = {"$regex": f"^{re.escape(str(subtitles))}$", "$options": "i"}
+    if audio:
+        filt["audio_codec"] = {"$regex": f"^{re.escape(str(audio))}$", "$options": "i"}
+    if hdr is True:
+        filt["hdr"] = {"$exists": True, "$ne": None}
+    elif hdr:
+        filt["hdr"] = {"$regex": f"^{re.escape(str(hdr))}$", "$options": "i"}
     return filt
 
 
-def format_active_filters(year=None, quality=None, type_=None) -> str:
+def format_active_filters(year=None, quality=None, type_=None, language=None,
+                          subtitles=None, audio=None, hdr=None) -> str:
     """Human line for the results header, e.g. ``year=2021 · 1080p · Series``."""
     parts = []
     if year is not None:
@@ -222,24 +299,40 @@ def format_active_filters(year=None, quality=None, type_=None) -> str:
         parts.append(str(quality))
     if type_:
         parts.append(str(type_))
+    if language:
+        parts.append(f"lang={language}")
+    if subtitles:
+        parts.append(f"subs={subtitles}")
+    if audio:
+        parts.append(f"audio={audio}")
+    if hdr is True:
+        parts.append("HDR")
+    elif hdr:
+        parts.append(f"HDR={hdr}")
     return " · ".join(parts)
 
 
 async def perform_search(query: str, exact_search: bool = False, fuzzy_threshold: int = None,
-                         year=None, quality=None, type_=None):
+                         year=None, quality=None, type_=None, language=None,
+                         subtitles=None, audio=None, hdr=None):
     """
     Perform a search for movies/series in the database.
 
     Args:
         query: Search query string (title text; may be the raw ``/search``
-            input — trailing ``<year> <quality> <type>`` tokens are parsed
-            out automatically unless explicit facet kwargs are given).
+            input — trailing ``<year> <quality> <type>`` tokens and
+            ``lang:/subs:/audio:/hdr:`` facets are parsed out automatically
+            unless explicit facet kwargs are given).
         exact_search: If True, only exact title matches are returned
         fuzzy_threshold: Threshold for fuzzy matching (default: FUZZY_THRESHOLD from config)
         year: Optional year facet (int or str). Overrides any year parsed
             from ``query`` when not None.
         quality: Optional quality facet (e.g. "1080p"). Same override rule.
         type_: Optional "Movie" / "Series" facet. Same override rule.
+        language: Optional audio-language facet (e.g. "Hindi"). Same rule.
+        subtitles: Optional subtitle facet (e.g. "English Subs"). Same rule.
+        audio: Optional audio-codec facet (e.g. "Atmos"). Same rule.
+        hdr: Optional HDR facet (format name, or True for any HDR). Same rule.
 
     Returns:
         Dict with ``results`` (list of matching copy documents), ``exact_ids``
@@ -261,8 +354,20 @@ async def perform_search(query: str, exact_search: bool = False, fuzzy_threshold
         quality = parsed["quality"]
     if type_ is None:
         type_ = parsed["type"]
-    base_filter = _build_base_filter(year=year, quality=quality, type_=type_)
-    filters = {"year": year, "quality": quality, "type": type_}
+    if language is None:
+        language = parsed.get("language")
+    if subtitles is None:
+        subtitles = parsed.get("subtitles")
+    if audio is None:
+        audio = parsed.get("audio")
+    if hdr is None:
+        hdr = parsed.get("hdr")
+    base_filter = _build_base_filter(year=year, quality=quality, type_=type_,
+                                     language=language, subtitles=subtitles,
+                                     audio=audio, hdr=hdr)
+    filters = {"year": year, "quality": quality, "type": type_,
+               "language": language, "subtitles": subtitles,
+               "audio": audio, "hdr": hdr}
 
     def _with_title(extra: dict) -> dict:
         filt = dict(base_filter)
@@ -506,6 +611,10 @@ def build_search_page(results, query, page, exact_ids=None, filters=None):
             year=filters.get("year"),
             quality=filters.get("quality"),
             type_=filters.get("type"),
+            language=filters.get("language"),
+            subtitles=filters.get("subtitles"),
+            audio=filters.get("audio"),
+            hdr=filters.get("hdr"),
         )
         if filt_line:
             search_text += f"Filters: {filt_line}\n"

@@ -103,7 +103,9 @@ def run(coro):
 
 def test_parse_basic_title_only():
     p = parse_search_query("Dune")
-    assert p == {"title": "Dune", "year": None, "quality": None, "type": None, "raw": "Dune"}, p
+    assert p == {"title": "Dune", "year": None, "quality": None, "type": None,
+                 "language": None, "subtitles": None, "audio": None,
+                 "hdr": None, "raw": "Dune"}, p
 
 
 def test_parse_trailing_facets():
@@ -160,7 +162,9 @@ def test_perform_search_applies_facets_server_side():
     search_mod.movies_col = fake
     out = run(perform_search("Dune 2021 1080p movie"))
     assert out["title"] == "Dune", out
-    assert out["filters"] == {"year": 2021, "quality": "1080p", "type": "Movie"}, out
+    assert out["filters"] == {"year": 2021, "quality": "1080p", "type": "Movie",
+                              "language": None, "subtitles": None,
+                              "audio": None, "hdr": None}, out
     assert [d["title"] for d in out["results"]] == ["Dune"]
     # The exact-stage filter must carry all three facets server-side.
     exact_call = fake.find_calls[1]

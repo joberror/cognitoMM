@@ -17,7 +17,8 @@ This is a Telegram bot hosted on Hugging Face Spaces.
 
 **🎬 Search & discover**
 - `/search <title>` — smart search (exact + fuzzy, with trailing filters:
-  `/search Dune 2021 1080p movie` — year, quality, type). Results are grouped **one
+  `/search Dune 2021 1080p movie` — year, quality, type; library facets
+  `lang:hindi`, `subs:esub`, `audio:atmos`, `hdr`). Results are grouped **one
   line per title** in a code block: `Search : X` / `Titles Found: N (X Exact | Y
   Fuzzy)` / `Files Found: N (Movie - X | Series - Y)`, then per-title lines with
   the file count and the **latest** file (`1. Lucky > 2 files > Latest: 1080p |
