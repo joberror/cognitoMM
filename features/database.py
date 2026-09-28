@@ -63,6 +63,18 @@ premium_features_col = db["premium_features"]
 premium_payments_col = db["premium_payments"]
 broadcasts_col = db["broadcasts"]
 
+# Text-index tuning. See the "title text index" entry in ensure_indexes():
+# MongoDB's text indexes read a per-document stemming language from a field
+# named "language" unless language_override points elsewhere. The movies
+# collection uses `language` for the release's AUDIO language, so the override
+# must move to an (unused) field or the build aborts on non-string values.
+TEXT_LANGUAGE_OVERRIDE = "text_language"
+UNIQUE_INDEX_DESCRIPTIONS = frozenset({
+    "user_id index", "channel_id index", "limits user_id index",
+    "premium user_id index", "premium feature_name index",
+    "broadcast_id index", "premium payment charge_id index",
+})
+
 async def ensure_indexes():
     """Create database indexes with error handling"""
     if MONGO_URI_WAS_EMPTY:
@@ -77,37 +89,49 @@ async def ensure_indexes():
         await mongo.admin.command('ping')
         print("✅ MongoDB connection successful")
         
-        # Create indexes with error handling
+        # Create indexes with error handling. Each entry is
+        # (collection, index_spec, description, extra_kwargs).
         indexes_to_create = [
-            (movies_col, [("title", 1)], "title index"),
-            (movies_col, [("title", "text")], "title text index"),
-            (movies_col, [("year", 1)], "year index"),
-            (movies_col, [("quality", 1)], "quality index"),
-            (movies_col, [("type", 1)], "type index"),
-            (movies_col, [("channel_id", 1), ("message_id", 1)], "channel_message index"),
-            (movies_col, [("tmdb_id", 1)], "tmdb_id index"),
-            (users_col, [("user_id", 1)], "user_id index"),
-            (channels_col, [("channel_id", 1)], "channel_id index"),
-            (requests_col, [("user_id", 1)], "request user_id index"),
-            (requests_col, [("status", 1)], "request status index"),
-            (requests_col, [("request_date", 1)], "request date index"),
-            (requests_col, [("tmdb_id", 1)], "request tmdb_id index"),
-            (user_request_limits_col, [("user_id", 1)], "limits user_id index"),
-            (premium_users_col, [("user_id", 1)], "premium user_id index"),
-            (premium_features_col, [("feature_name", 1)], "premium feature_name index"),
-            (premium_payments_col, [("charge_id", 1)], "premium payment charge_id index"),
-            (broadcasts_col, [("broadcast_id", 1)], "broadcast_id index"),
-            (broadcasts_col, [("admin_id", 1)], "broadcast admin_id index"),
-            (broadcasts_col, [("started_at", -1)], "broadcast started_at index"),
-            (broadcasts_col, [("status", 1)], "broadcast status index"),
+            (movies_col, [("title", 1)], "title index", {}),
+            # Text index: MongoDB treats a field named "language" (the default
+            # language_override) as the per-document stemming language. Our
+            # movies docs store `language` as the AUDIO language of the release
+            # (e.g. "Hindi"), and legacy docs can hold a non-string value there,
+            # which aborts the build with
+            #   "found language override field in document with non-string type"
+            # (code 17261). Point the override at a field we never write and
+            # disable stemming (movie titles aren't prose).
+            (movies_col, [("title", "text")], "title text index",
+             {"language_override": TEXT_LANGUAGE_OVERRIDE,
+              "default_language": "none"}),
+            (movies_col, [("year", 1)], "year index", {}),
+            (movies_col, [("quality", 1)], "quality index", {}),
+            (movies_col, [("type", 1)], "type index", {}),
+            (movies_col, [("channel_id", 1), ("message_id", 1)], "channel_message index", {}),
+            (movies_col, [("tmdb_id", 1)], "tmdb_id index", {}),
+            (users_col, [("user_id", 1)], "user_id index", {}),
+            (channels_col, [("channel_id", 1)], "channel_id index", {}),
+            (requests_col, [("user_id", 1)], "request user_id index", {}),
+            (requests_col, [("status", 1)], "request status index", {}),
+            (requests_col, [("request_date", 1)], "request date index", {}),
+            (requests_col, [("tmdb_id", 1)], "request tmdb_id index", {}),
+            (user_request_limits_col, [("user_id", 1)], "limits user_id index", {}),
+            (premium_users_col, [("user_id", 1)], "premium user_id index", {}),
+            (premium_features_col, [("feature_name", 1)], "premium feature_name index", {}),
+            (premium_payments_col, [("charge_id", 1)], "premium payment charge_id index", {}),
+            (broadcasts_col, [("broadcast_id", 1)], "broadcast_id index", {}),
+            (broadcasts_col, [("admin_id", 1)], "broadcast admin_id index", {}),
+            (broadcasts_col, [("started_at", -1)], "broadcast started_at index", {}),
+            (broadcasts_col, [("status", 1)], "broadcast status index", {}),
         ]
-        
-        for collection, index_spec, description in indexes_to_create:
+
+        for collection, index_spec, description, extra_kwargs in indexes_to_create:
             try:
-                if description in ["user_id index", "channel_id index", "limits user_id index", "premium user_id index", "premium feature_name index", "broadcast_id index", "premium payment charge_id index"]:
-                    await collection.create_index(index_spec, unique=True)
+                if description in UNIQUE_INDEX_DESCRIPTIONS:
+                    await collection.create_index(index_spec, unique=True,
+                                                  **extra_kwargs)
                 else:
-                    await collection.create_index(index_spec)
+                    await collection.create_index(index_spec, **extra_kwargs)
                 print(f"✅ Created {description}")
             except Exception as e:
                 print(f"⚠️ Failed to create {description}: {e}")
