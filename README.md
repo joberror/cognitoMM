@@ -64,9 +64,10 @@ command reference and `.env` options.
 
 ```bash
 make check          # run the static import check (re-export chains / broken imports / duplicate definitions)
+make lint           # run ruff (pyflakes F + E9): undefined names, unused imports/vars
 make test           # install deps, then run the full pytest suite (mirrors CI's tests job)
-make verify         # run everything CI gates on: check + test
-make install-hooks  # install the pre-commit hook (runs `make check` + version-bump check)
+make verify         # run everything CI gates on: check + lint + test
+make install-hooks  # install the pre-commit hook (runs `make check` + ruff + version-bump check)
 make bump           # bump the bot version (minor) before committing a new feature
 make bump-patch     # bump the bot version (patch) for small changes / bugfixes
 make bump-major     # bump the bot version (major)

@@ -254,7 +254,6 @@ def construct_final_caption(db_item, file_size_bytes=None, user_name="User"):
     # Copy-to-text format (monospace)
     title_formatted = f"{title}"
 
-    year = db_item.get('year')
     quality = db_item.get('quality')
     rip = db_item.get('rip')
     audio = db_item.get('audio')

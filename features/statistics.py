@@ -1165,7 +1165,7 @@ def format_user_stats_output(stats):
         joined_str = stats['joined_date'].strftime("%b %d, %Y")
         output.append(f"┎ <b>Joined:</b> {joined_str} <i>({stats['account_age_days']}d ago)</i>")
     else:
-        output.append(f"┎ <b>Joined:</b> Unknown")
+        output.append("┎ <b>Joined:</b> Unknown")
     
     if stats['last_seen']:
         # Ensure last_seen is timezone-aware for comparison
@@ -1182,7 +1182,7 @@ def format_user_stats_output(stats):
             last_seen_display = f"{days_ago}d ago"
         output.append(f"┖ <b>Last Seen:</b> {last_seen_display}")
     else:
-        output.append(f"┖ <b>Last Seen:</b> Unknown")
+        output.append("┖ <b>Last Seen:</b> Unknown")
     output.append("")
     
     # Premium status
@@ -1202,9 +1202,9 @@ def format_user_stats_output(stats):
             output.append(f"┎ {status_sym} <b>Active</b> - Expires: <code>{expires_str}</code>")
             output.append(f"┖ <b>Days Remaining:</b> {days_left}")
         else:
-            output.append(f"┖ ♾️ <b>Lifetime Premium</b>")
+            output.append("┖ ♾️ <b>Lifetime Premium</b>")
     else:
-        output.append(f"┖ 🆓 Free User")
+        output.append("┖ 🆓 Free User")
     output.append("")
     
     # Activity section with progress bar

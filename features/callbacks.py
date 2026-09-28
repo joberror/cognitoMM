@@ -5,16 +5,15 @@ This module contains all callback handlers for inline buttons and user interacti
 It handles file requests, pagination, bulk downloads, and other button interactions.
 """
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import io
 from bson import ObjectId
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, LinkPreviewOptions
 from pyrogram.enums import ParseMode
 
 # Import from our modules
-from .config import client
 from .database import users_col, movies_col, requests_col
-from .config import bulk_downloads, temp_data, user_input_events
+from .config import bulk_downloads
 from .utils import construct_final_caption
 from .file_deletion import track_file_for_deletion
 from .search import send_search_results
@@ -629,7 +628,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
             if failed_files:
                 result_text += f"\n❌ Failed: {len(failed_files)} files"
-                result_text += f"\n💡 Add bot as admin to channels for direct file access"
+                result_text += "\n💡 Add bot as admin to channels for direct file access"
 
             await callback_query.edit_message_text(
                 f"{result_text}\n\n{callback_query.message.text}",
@@ -802,7 +801,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 try:
                     await callback_query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
                     await callback_query.answer(f"{'Selected' if idx in session['selected'] else 'Deselected'} entry #{idx + 1}")
-                except Exception as e:
+                except Exception:
                     await callback_query.answer("Error updating selection.", show_alert=True)
 
             elif action == "confirm":
@@ -838,7 +837,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                             print(f"Error deleting entry {doc['_id']}: {e}")
                             # DIAGNOSTIC LOG: Check if this is the specific error
                             if "cannot access local variable 'movies_col'" in str(e):
-                                print(f"🔍 CRITICAL: This is the movies_col scoping error!")
+                                print("🔍 CRITICAL: This is the movies_col scoping error!")
                                 print(f"🔍 DEBUG: movies_col type in exception: {type(movies_col) if 'movies_col' in locals() else 'NOT IN LOCALS'}")
 
                 # Log the action
@@ -852,11 +851,11 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 })
 
                 # Update message with results
-                result_text = f"**Deletion Complete**\n\n"
+                result_text = "**Deletion Complete**\n\n"
                 result_text += f"Deleted: {deleted_count} entries\n"
                 if errors > 0:
                     result_text += f"Errors: {errors}\n"
-                result_text += f"\n**Deleted Entries:**\n"
+                result_text += "\n**Deleted Entries:**\n"
 
                 for title in deleted_titles[:10]:  # Show first 10
                     result_text += f"{title}\n"
@@ -934,7 +933,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 except Exception as e:
                     print(f"Failed to notify user {uid}: {e}")
 
-            await callback_query.answer(f"✅ Request marked as done!")
+            await callback_query.answer("✅ Request marked as done!")
 
             # Log the action
             await log_action("request_completed", by=user_id, target=request.get("user_id"), extra={
@@ -947,8 +946,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
             # Get the request_list_id from bulk_downloads to refresh the page
             # For simplicity, just update the message text
             await callback_query.message.edit_text(
-                f"✅ Request marked as done!\n\n"
-                f"Use /request_list to view updated list."
+                "✅ Request marked as done!\n\n"
+                "Use /request_list to view updated list."
             )
 
         elif data.startswith("req_page:"):
@@ -976,8 +975,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
             await callback_query.answer(f"📄 Page {page}")
 
-            # Import send_request_list_page from commands
-            from .commands import send_request_list_page
+            # send_request_list_page lives in request_commands (canonical home)
+            from .request_commands import send_request_list_page
 
             # Update message with new page (edit=True for pagination)
             await send_request_list_page(client, callback_query.message, requests_list, request_list_id, page, edit=True)

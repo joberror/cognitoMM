@@ -1178,7 +1178,6 @@ async def inline_handler(client, inline_query):
     from .database import movies_col, users_col
     from fuzzywuzzy import fuzz
     from pyrogram.types import InlineQueryResultArticle, InputTextMessageContent
-    from datetime import datetime, timezone
     
     query = inline_query.query.strip()
     if not query:

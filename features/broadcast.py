@@ -133,7 +133,7 @@ def format_progress_message(metrics: dict, elapsed: float, remaining: float) -> 
     lines = [
         "📢 **BROADCAST IN PROGRESS**",
         "",
-        f"📊 **Status:** Sending...",
+        "📊 **Status:** Sending...",
         f"👥 **Total Users:** {total:,}",
         f"✅ **Sent:** {sent:,} ({sent_pct:.1f}%)",
         f"❌ **Failed:** {failed:,} ({failed_pct:.1f}%)",
@@ -260,7 +260,7 @@ async def execute_broadcast(
     # Send final summary
     try:
         await status_msg.edit_text(format_summary_message(results))
-    except Exception as e:
+    except Exception:
         # If edit fails, send new message
         await admin_message.reply_text(format_summary_message(results))
     
@@ -416,7 +416,7 @@ async def cmd_broadcast(client: Client, message: Message):
         "📢 **Broadcast Confirmation**",
         "",
         f"👥 **Recipients:** {len(user_ids):,} users",
-        f"📝 **Message Preview:**",
+        "📝 **Message Preview:**",
         preview,
         "",
         "⚠️ **This will send the message to all eligible users.**",
@@ -458,7 +458,7 @@ async def cmd_broadcast(client: Client, message: Message):
         error_lines = [
             "❌ **Broadcast Error**",
             "",
-            f"An error occurred during broadcast:",
+            "An error occurred during broadcast:",
             str(e),
             "",
             "Some messages may have been sent."

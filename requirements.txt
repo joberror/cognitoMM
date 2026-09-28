@@ -18,3 +18,5 @@ waitress  # production WSGI server for the health-check webapp
 # pyproject.toml [tool.pytest.ini_options]) is supported.
 pytest>=7.0
 pytest-asyncio>=1.0
+# Lint gate (make lint); pinned so CI stays deterministic.
+ruff==0.16.9

@@ -6,6 +6,7 @@ for searching movies and TV series.
 """
 
 import os
+import asyncio
 import aiohttp
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta

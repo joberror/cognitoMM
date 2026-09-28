@@ -30,6 +30,27 @@ jobs:
       - name: Static import check (re-export / broken / duplicate)
         run: make check
 
+  # Lint gate — ruff (pyflakes + syntax): undefined names, unused imports /
+  # variables, redefinitions. Pinned in requirements.txt; runs via the Makefile
+  # so CI and `make lint` can't drift.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install ruff
+        run: pip install --quiet "ruff==0.16.9"
+
+      - name: Lint (ruff)
+        run: make lint
+
   # Full test suite — runs the standalone tests (also pytest-compatible) on
   # every push/PR so regressions are caught before merge. Does not require a
   # live MongoDB or Telegram connection (tests use fakes/mocks; the former

@@ -16,7 +16,7 @@ from .config import file_deletions, file_deletions_lock
 # Canonical implementation lives in utils.py (optional dict argument, defaults
 # to the shared config.bulk_downloads); re-exported here for backward compat
 # (identity is pinned by tests/test_critical_fixes.py).
-from .utils import cleanup_expired_bulk_downloads
+from .utils import cleanup_expired_bulk_downloads  # noqa: F401 - re-export pinned by tests/test_critical_fixes.py
 
 
 async def cleanup_expired_file_deletions():
@@ -158,16 +158,11 @@ async def check_files_for_deletion():
     failed_count = 0
 
     for file_id, data in files_to_delete:
-        deletion_success = False
-        retry_count = data.get('retry_count', 0)
-        max_retries = 3
-
         # Check if this is an immediate deletion (no warning sent)
         is_immediate = not data['notified']
 
         try:
             await client.delete_messages(data['user_id'], data['message_id'])
-            deletion_success = True
             deleted_count += 1
 
             # Send notification about deletion (only if not immediate deletion)
@@ -178,7 +173,7 @@ async def check_files_for_deletion():
                         "🗑️ **Auto-Deleted**\n\n"
                         "The file has been automatically deleted as scheduled."
                     )
-                except Exception as notify_error:
+                except Exception:
                     # Silently continue if notification fails - not critical
                     pass
 
@@ -186,7 +181,6 @@ async def check_files_for_deletion():
             failed_count += 1
             # Only log errors, not every deletion
             print(f"❌ Failed to delete message {data['message_id']} for user {data['user_id']}: {e}")
-            deletion_success = False
 
         # Remove from tracking (always remove, regardless of success/failure for test compatibility)
         async with file_deletions_lock:

@@ -3,10 +3,12 @@
 #
 #   make check     run the static import check (re-export chains / broken
 #                  imports / duplicate definitions)   -> CI: reexport-check
+#   make lint      run ruff (pyflakes + syntax) — undefined names, unused
+#                  imports/vars, redefinitions        -> CI: lint job
 #   make test      install deps, then run the full pytest suite
 #                                                     -> CI: tests job
 #   make deps      install Python dependencies (pip install -r requirements.txt)
-#   make verify    run everything CI gates on: check + test
+#   make verify    run everything CI gates on: check + lint + test
 #   make install-hooks  install the pre-commit hook (git config core.hooksPath)
 #   make bump      bump the bot version (minor) — run before committing a
 #                  new feature (pre-commit hook enforces this)
@@ -19,10 +21,13 @@
 PYTHON := $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python; fi)
 PIP    := $(shell if [ -x .venv/bin/pip ]; then echo .venv/bin/pip; else echo pip; fi)
 
-.PHONY: check test deps verify install-hooks bump bump-patch bump-major
+.PHONY: check lint test deps verify install-hooks bump bump-patch bump-major
 
 check:
 	$(PYTHON) scripts/check_reexports.py
+
+lint:
+	$(PYTHON) -m ruff check features/ main.py scripts/
 
 deps:
 	$(PIP) install -r requirements.txt
@@ -30,8 +35,8 @@ deps:
 test: deps
 	$(PYTHON) -m pytest tests/ -q
 
-verify: check test
-	@echo "✅ verify: static check + pytest both passed"
+verify: check lint test
+	@echo "✅ verify: static check + lint + pytest all passed"
 
 install-hooks:
 	git config core.hooksPath .githooks

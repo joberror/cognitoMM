@@ -53,4 +53,15 @@ if ! (cd "$ROOT" && "$PY" scripts/check_version_bump.py); then
     exit 1
 fi
 
+# Lint (ruff) — only when ruff is installed in the chosen interpreter, so the
+# hook still works for contributors who haven't run `make deps` yet.
+if "$PY" -m ruff --version >/dev/null 2>&1; then
+    echo "🔍 Running ruff lint ..."
+    if ! (cd "$ROOT" && "$PY" -m ruff check features/ main.py scripts/); then
+        echo "❌ Pre-commit ruff lint FAILED — fix the violations above before committing."
+        echo '   (Hint: run make lint to reproduce.)'
+        exit 1
+    fi
+fi
+
 exit 0

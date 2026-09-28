@@ -503,8 +503,6 @@ async def on_message(client, message):
     auto_index = s["v"] if s and "v" in s else AUTO_INDEX_DEFAULT
 
     if auto_index:
-        import threading
-        current_thread = threading.current_thread().ident
         timestamp = datetime.now(timezone.utc).isoformat()
         
         # Add message to queue for sequential processing

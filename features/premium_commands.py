@@ -243,7 +243,6 @@ async def handle_remove_premium_user(client, message: Message):
         return await message.reply_text("❌ Operation cancelled.")
 
     # Remove premium user
-    from .premium_management import remove_premium_user
     success, result_message = await remove_premium_user(target_user_id, uid)
 
     if success:
