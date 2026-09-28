@@ -31,6 +31,7 @@ import features.callbacks as callbacks
 import features.commands as commands
 import features.database_scan as dbs
 import features.user_management as um
+import features.watchlist as wl
 from features.tmdb_integration import format_enrichment_line, get_cached_enrichment, set_cached_enrichment
 from features.utils import pick_best_quality, quality_rank
 
@@ -441,22 +442,28 @@ async def test_cmd_watchlist_renders_bracket_lines(monkeypatch):
 
     async def _fake_watchlist(uid):
         return [
-            {"title": "Inception", "year": 2010, "type": "Movie"},
-            {"title": "Breaking Bad", "year": 2008, "type": "Series"},
+            {"title": "Inception", "year": 2010, "type": "Movie",
+             "status": "Released"},
+            {"title": "Breaking Bad", "year": 2008, "type": "Series",
+             "status": "Ended"},
             {"title": "No Year", "type": "Movie"},
         ]
 
-    monkeypatch.setattr(um, "get_watchlist", _fake_watchlist)
+    # cmd_watchlist lives in features/watchlist.py, which imports get_watchlist
+    # into its own namespace — patch it there (the canonical consumer).
+    monkeypatch.setattr(wl, "get_watchlist", _fake_watchlist)
     await commands.cmd_watchlist(None, msg)
 
     assert msg.replies
     text = msg.replies[0][0][0]
     assert text.startswith("👁️ <b>Your Watchlist</b>")
     assert "```" not in text
-    assert "1. <code>Inception</code> [2010.Movie]" in text
-    assert "2. <code>Breaking Bad</code> [2008.Series]" in text
-    assert "3. <code>No Year</code> [Movie]" in text
-    assert "Remove with /unwatch title" in text
+    # TMDb-verified line format: `Title: M / year / status`.
+    assert "1. <code>Inception</code>: M / 2010 / Released" in text
+    assert "2. <code>Breaking Bad</code>: S / 2008 / Ended" in text
+    # No year and no status -> both fall back rather than printing None.
+    assert "3. <code>No Year</code>: M / ? / Unknown" in text
+    assert "Remove with" in text and "/unwatch" in text
 
 
 # ------------------------------------------------------------------ #

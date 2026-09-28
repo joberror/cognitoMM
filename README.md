@@ -34,9 +34,15 @@ This is a Telegram bot hosted on Hugging Face Spaces.
 - `/request <title>` / `/request_list` — request missing titles (rate-limited, TMDb-verified with upvotes + auto-fulfill on index)
 
 **👤 Your library**
-- `/watch <title>` / `/unwatch <title>` — watchlist; you get a DM the moment a
-  watched title (or a new copy) is indexed
-- `/watchlist` — your watched titles (plain HTML, **tap any title to copy**) · `/my_history` — your searches (plain HTML, **tap any query to copy**, grouped by date)
+- `/watch <title>` — TMDb-verified watchlist: ambiguous titles come back as a
+  pick list, and the entry stores type, year, status, and IMDb/TMDb links
+  (5 titles free, 20 premium)
+- `/unwatch <title>` — remove from watchlist
+- `/watchlist` — your watched titles as `Title: M / 2026 / Released · IMDb`
+  (M = movie, S = series), **tap any title to copy**, with a 🔄 UPDATE button
+  to re-read each status from IMDb/TMDb. You get a DM the moment a copy is
+  indexed — once per title, so a full season dropping at once sends one message
+  · `/my_history` — your searches (plain HTML, **tap any query to copy**, grouped by date)
 - `/my_stat` — usage + premium info · `/premium` — premium info/management
 - `/buy_premium` — buy premium with Telegram Stars (activates on payment)
 - Delivered files auto-delete after a tier-based retention (free vs premium),

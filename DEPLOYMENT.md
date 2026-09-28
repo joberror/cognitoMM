@@ -112,7 +112,7 @@ the user IDs listed in `ADMINS`):
 | `/search <title>` | Results with deduplicated copies + `Pick [n]` quality chooser; TMDb rating/genres/IMDb when `TMDB_API` is set |
 | `/random` | A random indexed title (poster photo once metadata is enriched) |
 | `/genres` | Genre list with counts (needs enriched metadata — run `/enrich` once to backfill); `/genres <name>` browses paginated with one deduped line per title (series show DB + real TMDb season/episode totals) |
-| `/watch <title>` / `/watchlist` | Adds to your watchlist; you get a DM the moment a new copy is indexed |
+| `/watch <title>` / `/watchlist` | TMDb-verified watchlist: ambiguous titles return a pick list; entries store type, year, status, and IMDb/TMDb links (5 free / 20 premium). `/watchlist` shows `Title: M / 2026 / Released · IMDb` with a 🔄 UPDATE button to refresh statuses. You get one DM when a copy is indexed — a season batch sends a single message, not one per episode |
 | `/logs` | Recent audit-log entries from `logs_col` |
 | `/enrich [n]` / `/enrich_status` | Backfill TMDb metadata / show enriched–pending–no-match progress |
 

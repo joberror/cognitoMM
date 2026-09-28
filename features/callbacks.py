@@ -224,6 +224,55 @@ async def callback_handler(client, callback_query: CallbackQuery):
             await callback_query.answer("✅ Filtered to copies")
             return
 
+        if data.startswith("watchpick:"):
+            # /watch disambiguation picker: confirm one TMDb candidate, or
+            # cancel. Format ``watchpick:{token}:{idx}`` with idx == "cancel"
+            # for the cancel button. State lives in bulk_downloads under the
+            # token; ownership is checked so another user can't answer a
+            # picker they don't own.
+            _, token, arg = data.split(":", 2)
+            state = bulk_downloads.get(token)
+            if not state or state.get("type") != "watch_pick":
+                return await callback_query.answer(
+                    "⌛ This picker expired. Run /watch again.", show_alert=True)
+            if state.get("user_id") != user_id:
+                return await callback_query.answer(
+                    "🚫 This picker belongs to another user.", show_alert=True)
+
+            if arg == "cancel":
+                bulk_downloads.pop(token, None)
+                await callback_query.message.edit_text(
+                    "👁️ Cancelled — nothing added to your watchlist.",
+                    parse_mode=ParseMode.MARKDOWN)
+                return await callback_query.answer("Cancelled")
+
+            try:
+                idx = int(arg)
+            except ValueError:
+                return await callback_query.answer("⚠️ Invalid pick.", show_alert=True)
+            candidates = state.get("candidates") or []
+            if idx < 0 or idx >= len(candidates):
+                return await callback_query.answer(
+                    "⌛ This picker expired. Run /watch again.", show_alert=True)
+
+            from .watchlist import store_watch_pick
+            bulk_downloads.pop(token, None)
+            added = await store_watch_pick(user_id, candidates[idx],
+                                           callback_query.message,
+                                           raw_title=state.get("query"))
+            return await callback_query.answer(
+                "👁️ Added to your watchlist" if added else "👁️ Already on your watchlist")
+
+        if data.startswith("watchupd:"):
+            # /watchlist UPDATE button — re-check title status on TMDb/IMDb.
+            # ``watchupd:{all|one}:{owner_id}[:{title_key}]``
+            parts = data.split(":")
+            scope = parts[1] if len(parts) > 1 else "all"
+            arg = parts[3] if len(parts) > 3 else None
+            from .watchlist import handle_watch_update
+            await handle_watch_update(client, callback_query, scope, arg or "")
+            return
+
         if data.startswith("get_file:"):
             # Handle single file request
             _, channel_id, message_id = data.split(":")

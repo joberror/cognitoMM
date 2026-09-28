@@ -6,11 +6,13 @@ for searching movies and TV series.
 """
 
 import os
+import re
 import asyncio
 import aiohttp
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
-from .config import TMDB_API
+from .config import TMDB_API, WATCHLIST_IN_CINEMAS_DAYS
+from fuzzywuzzy import fuzz
 import random
 
 
@@ -190,6 +192,379 @@ def format_tmdb_result(result: Dict, index: int) -> str:
 
     # Create one-liner format
     return f"{index}. {title} ({year}) - {overview}..."
+
+
+# ------------------------------------------------------------------ #
+#  Release status (movies + series) for /watch                         #
+# ------------------------------------------------------------------ #
+
+# The four user-facing states. Movies get the first three, series the last two.
+STATUS_RELEASED = "Released"      # movie: out on digital/physical
+STATUS_UPCOMING = "Upcoming"      # movie: announced / in production
+STATUS_IN_CINEMAS = "In Cinemas"  # movie: in a limited/premiere theatrical run
+STATUS_CONTINUING = "Continuing"  # series: more seasons expected
+STATUS_ENDED = "Ended"            # series: no more seasons planned
+STATUS_UNKNOWN = "Unknown"        # TMDb unavailable or no data
+
+# TMDb's own `status` strings we treat as "already out".
+_MOVIE_RELEASED_TMDB = ("released",)
+# TMDb series `status` values that mean the show is finished.
+_SERIES_ENDED_TMDB = ("ended", "canceled")
+# Release-date types from /movie/{id}/release_dates. A film that only has a
+# Premiere (1) or a limited Theatrical (2) entry is still in its festival /
+# platform-premiere run; a wide Theatrical (3) entry means it's in cinemas.
+_RD_PREMERE = 1
+_RD_THEATRICAL_LIMITED = 2
+_RD_THEATRICAL = 3
+_RD_WIDE_TYPES = (_RD_THEATRICAL,)
+
+
+def normalize_content_type(raw) -> str:
+    """Coerce a stored/parsed type into ``"Movie"`` or ``"Series"``.
+
+    The indexer stores ``Movie``/``Series`` but metadata parsers and TMDb also
+    emit ``TV``, ``tv``, ``show`` and ``Movie/Series`` hybrids, so every watch
+    entry passes through here to keep one spelling in the database.
+    """
+    text = str(raw or "").strip().lower()
+    if not text:
+        return "Movie"
+    # Word-ish match so compound spellings land too ("TV Series", "tv_show",
+    # "Movie/Series"); "show"/"anime" are series even though they lack
+    # "series".
+    if "series" in text or re.search(r"\b(tv|show|anime)\b", text) or "tv_show" in text:
+        return "Series"
+    return "Movie"
+
+
+def _parse_tmdb_date(value):
+    """Parse a TMDb ``YYYY-MM-DD`` (or shorter) date into a ``date`` or None."""
+    from datetime import date as _date
+
+    if not value:
+        return None
+    text = str(value).strip()
+    if len(text) < 10:
+        text = f"{text}-01-01" if len(text) == 7 else text
+    try:
+        return _date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def derive_movie_status(release_date=None, tmdb_status=None,
+                        theatrical_types=None, today=None) -> str:
+    """Movie state from TMDb's ``release_date`` + ``status`` + release types.
+
+    ``theatrical_types`` is the set of release-type ids from the
+    ``/release_dates`` endpoint (3 = wide theatrical, 2 = limited, 1 =
+    premiere). A film is *In Cinemas* while it has no wide-theatrical release
+    yet but is already out somewhere and its earliest theatrical date is
+    within ``WATCHLIST_IN_CINEMAS_DAYS`` — that is the festival / limited-run
+    window before a wide rollout. Past that window we call it Released, since
+    by then the wide release has happened even if TMDb never listed it.
+
+    Falls back to the calendar when the release-types call is unavailable: a
+    ``Released`` film dated in the future is treated as Upcoming rather than
+    claiming a theatrical run we have no evidence for.
+    """
+    from datetime import date as _date, timedelta
+
+    today = today or _date.today()
+    released = str(tmdb_status or "").strip().lower() in _MOVIE_RELEASED_TMDB
+    dt = _parse_tmdb_date(release_date)
+
+    if not released:
+        # TMDb marks unreleased films Post Production / In Production / Planned.
+        # One exception: a film dated in the past but not yet flagged Released
+        # is out (TMDb lags a few days behind wide releases), so treat it as
+        # released rather than telling users an old film is "upcoming".
+        if dt is not None and dt <= today:
+            return STATUS_RELEASED
+        return STATUS_UPCOMING
+
+    if dt is not None and dt > today:
+        # "Released" with a future date is TMDb pre-announcing the release.
+        return STATUS_UPCOMING
+
+    if theatrical_types is None:
+        # No release_dates data — released, date in the past, nothing to add.
+        return STATUS_RELEASED
+
+    wide = bool(set(theatrical_types) & set(_RD_WIDE_TYPES))
+    limited = set(theatrical_types) & {_RD_PREMERE, _RD_THEATRICAL_LIMITED}
+    if not wide and limited and dt is not None:
+        if dt >= today - timedelta(days=WATCHLIST_IN_CINEMAS_DAYS):
+            return STATUS_IN_CINEMAS
+    return STATUS_RELEASED
+
+
+def derive_series_status(last_air_date=None, tmdb_status=None, next_episode=None,
+                         today=None) -> str:
+    """Series state: Continuing while more seasons are expected, else Ended.
+
+    TMDb's ``status`` is authoritative (``Returning Series`` / ``In
+    Production`` → Continuing, ``Ended`` / ``Canceled`` → Ended). The
+    ``next_air_date``/``next_episode`` fields override it: an announced next
+    season means Continuing even if the status hasn't flipped yet, and a show
+    that already aired its finale with nothing announced is Ended.
+    """
+    text = str(tmdb_status or "").strip().lower()
+    if text in _SERIES_ENDED_TMDB:
+        # TMDb says finished, but a confirmed next episode wins (status lags
+        # renewals by a season or two).
+        if next_episode:
+            return STATUS_CONTINUING
+        return STATUS_ENDED
+    if text:
+        return STATUS_CONTINUING
+
+    # No status from TMDb — infer from air dates so a partial payload still
+    # renders something sensible.
+    from datetime import date as _date, timedelta
+
+    today = today or _date.today()
+    if next_episode:
+        return STATUS_CONTINUING
+    dt = _parse_tmdb_date(last_air_date)
+    if dt is None:
+        return STATUS_UNKNOWN
+    # Long-finished with nothing upcoming reads as Ended; recently airing
+    # reads as Continuing.
+    if today - dt > timedelta(days=365):
+        return STATUS_ENDED
+    return STATUS_CONTINUING
+
+
+async def get_movie_release_types(tmdb_id: int) -> Optional[set]:
+    """Set of release-type ids for a movie, or None when unavailable.
+
+    Used only to separate "In Cinemas" from "Released"; a failure here just
+    means the caller falls back to the calendar-only decision.
+    """
+    if not TMDB_API or TMDB_API == "your_api_key_here" or not tmdb_id:
+        return None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{TMDB_BASE_URL}/movie/{tmdb_id}/release_dates",
+                params={"api_key": TMDB_API},
+                timeout=10,
+            ) as response:
+                if response.status != 200:
+                    return None
+                data = await response.json()
+    except Exception as e:
+        print(f"TMDb release_dates error: {e}")
+        return None
+    types = set()
+    for country in (data or {}).get("results") or []:
+        for release in country.get("release_dates") or []:
+            if release.get("type") is not None:
+                types.add(int(release["type"]))
+    return types or None
+
+
+async def fetch_title_status(tmdb_id: int, content_type: str = "Movie") -> Dict:
+    """Fetch TMDb details for a title and derive its watch status.
+
+    Returns a dict with ``status`` (one of the STATUS_* constants), plus the
+    identity fields the watchlist stores: ``title``, ``year``, ``type``,
+    ``imdb_id``, and ``seasons``/``episodes`` for series. Returns ``{}`` when
+    TMDb is unconfigured or the lookup fails, so callers can keep the stored
+    value instead of blanking it.
+    """
+    ctype = normalize_content_type(content_type)
+    if not TMDB_API or TMDB_API == "your_api_key_here" or not tmdb_id:
+        return {}
+    endpoint = "movie" if ctype == "Movie" else "tv"
+
+    details = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{TMDB_BASE_URL}/{endpoint}/{tmdb_id}",
+                params={"api_key": TMDB_API, "language": "en-US"},
+                timeout=10,
+            ) as response:
+                if response.status == 200:
+                    details = await response.json()
+    except Exception as e:
+        print(f"TMDb status details error: {e}")
+        return {}
+    if not details:
+        return {}
+
+    if ctype == "Movie":
+        release_types = await get_movie_release_types(tmdb_id)
+        status = derive_movie_status(
+            release_date=details.get("release_date"),
+            tmdb_status=details.get("status"),
+            theatrical_types=release_types,
+        )
+        out = {
+            "title": details.get("title") or details.get("original_title"),
+            "year": extract_year({"release_date": details.get("release_date")}, "Movie"),
+            "type": "Movie",
+            "imdb_id": details.get("imdb_id"),
+            "status": status,
+            "poster_url": (TMDB_IMAGE_BASE + details["poster_path"])
+            if details.get("poster_path") else None,
+            "rating": round(details.get("vote_average", 0) or 0, 1),
+            "overview": (details.get("overview") or "")[:200],
+        }
+        return out
+
+    status = derive_series_status(
+        last_air_date=details.get("last_air_date"),
+        tmdb_status=details.get("status"),
+        next_episode=details.get("next_episode_to_air"),
+    )
+    return {
+        "title": details.get("name") or details.get("original_name"),
+        "year": extract_year({"first_air_date": details.get("first_air_date")}, "Series"),
+        "type": "Series",
+        "imdb_id": details.get("imdb_id"),
+        "status": status,
+        "seasons": details.get("number_of_seasons"),
+        "episodes": details.get("number_of_episodes"),
+        "poster_url": (TMDB_IMAGE_BASE + details["poster_path"])
+        if details.get("poster_path") else None,
+        "rating": round(details.get("vote_average", 0) or 0, 1),
+        "overview": (details.get("overview") or "")[:200],
+    }
+
+
+async def search_watch_candidates(title: str, year=None, limit: int = 5) -> List[Dict]:
+    """Search both TMDb movie and tv endpoints for watchlist candidates.
+
+    A watch target is a *film or a show* and the user rarely says which, so we
+    query both and merge. Each candidate carries everything needed to save it
+    without a second round-trip: ``tmdb_id``, ``title``, ``year``, ``type``,
+    ``imdb_id``, ``status`` and ``poster_url``.
+
+    Results are ranked best-first: exact title matches, then popularity, so the
+    disambiguation picker shows the most likely intent at the top.
+    """
+    if not TMDB_API or TMDB_API == "your_api_key_here" or not title:
+        return []
+
+    async def _collect(endpoint: str, ctype: str) -> List[Dict]:
+        params = {"api_key": TMDB_API, "query": title, "language": "en-US", "page": 1}
+        if year and str(year).isdigit():
+            params["year" if endpoint == "movie" else "first_air_date_year"] = str(year)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{TMDB_BASE_URL}/search/{endpoint}", params=params, timeout=10
+                ) as response:
+                    if response.status != 200:
+                        return []
+                    data = await response.json()
+        except Exception as e:
+            print(f"TMDb watch search error ({endpoint}): {e}")
+            return []
+
+        out = []
+        for item in (data or {}).get("results") or []:
+            item_title = item.get("title") if endpoint == "movie" else item.get("name")
+            if not item_title:
+                continue
+            release_date = (item.get("release_date") if endpoint == "movie"
+                            else item.get("first_air_date"))
+            out.append({
+                "tmdb_id": item.get("id"),
+                "title": item_title,
+                "original_title": item.get("original_title") or item.get("original_name"),
+                "year": extract_year({("release_date" if endpoint == "movie"
+                                        else "first_air_date"): release_date}, ctype),
+                "type": ctype,
+                "imdb_id": None,
+                "poster_url": (TMDB_IMAGE_BASE + item["poster_path"])
+                if item.get("poster_path") else None,
+                "overview": (item.get("overview") or "")[:120],
+                "popularity": item.get("popularity") or 0,
+            })
+        return out
+
+    movie_results, tv_results = await asyncio.gather(
+        _collect("movie", "Movie"), _collect("tv", "Series"))
+
+    # The search endpoint returns no imdb_id, so fetch it for the candidates
+    # we actually show (bounded by `limit`).
+    candidates = _rank_watch_candidates(title, movie_results + tv_results, limit)
+    for cand in candidates:
+        if not cand.get("imdb_id"):
+            cand["imdb_id"] = await get_imdb_id(
+                cand["tmdb_id"], "movie" if cand["type"] == "Movie" else "tv")
+
+    # Fill in status for the shown candidates. Done after ranking so we only
+    # spend API calls on what the user will actually see.
+    for cand in candidates:
+        if cand.get("status"):
+            continue
+        detail = await fetch_title_status(cand["tmdb_id"], cand["type"])
+        if detail.get("status"):
+            cand["status"] = detail["status"]
+        if not cand.get("year") or cand["year"] == "N/A":
+            if detail.get("year"):
+                cand["year"] = detail["year"]
+        if not cand.get("poster_url") and detail.get("poster_url"):
+            cand["poster_url"] = detail["poster_url"]
+    return candidates
+
+
+def _rank_watch_candidates(query: str, candidates: List[Dict], limit: int) -> List[Dict]:
+    """Order candidates best-first: exact title, then popularity, then year."""
+    wanted = str(query or "").strip().lower()
+
+    def sort_key(c):
+        name = str(c.get("title") or "").strip().lower()
+        orig = str(c.get("original_title") or "").strip().lower()
+        if name == wanted or orig == wanted:
+            tier = 0
+        elif fuzz.partial_ratio(wanted, name) >= 90:
+            tier = 1
+        else:
+            tier = 2
+        return (tier, -(c.get("popularity") or 0), str(c.get("year") or ""))
+
+    ranked = sorted(candidates, key=sort_key)
+    # Drop duplicates TMDb returns for the same film across the two searches.
+    seen, out = set(), []
+    for cand in ranked:
+        key = (cand.get("type"), cand.get("tmdb_id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(cand)
+    return out[:limit]
+
+
+def is_ambiguous_title(query: str, candidates: List[Dict]) -> bool:
+    """True when a query needs the user to disambiguate.
+
+    We only auto-pick when there is exactly one plausible match whose title
+    actually matches the query. Anything else (several remakes, a movie and a
+    show with the same name, a fuzzy match) goes to the picker so the user
+    never gets silently subscribed to the wrong film.
+    """
+    if not candidates:
+        return False
+    if len(candidates) > 1:
+        return True
+    cand = candidates[0]
+    wanted = str(query or "").strip().lower()
+    name = str(cand.get("title") or "").strip().lower()
+    orig = str(cand.get("original_title") or "").strip().lower()
+    if name == wanted or orig == wanted:
+        # A unique exact match: auto-pick unless it is a Series, where the
+        # user may have meant the identically-titled film.
+        if cand.get("type") == "Series":
+            return True
+        return False
+    # A single non-exact match still needs confirmation.
+    return True
 
 
 async def get_trending_movies(time_window: str = "week", use_cache: bool = True) -> List[Dict]:

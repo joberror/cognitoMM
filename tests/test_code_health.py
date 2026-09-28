@@ -7,9 +7,11 @@ Pins cluster 9:
 1. The /request domain lives in features/request_commands.py and is imported
    into commands.py's router (single canonical definition; commands.py must
    NOT redefine send_request_list_page).
-2. The ruff lint gate is configured and clean (skipped when ruff is not
+2. The /watch domain lives in features/watchlist.py, imported into
+   commands.py's router the same way.
+3. The ruff lint gate is configured and clean (skipped when ruff is not
    installed, e.g. a bare interpreter without `make deps`).
-3. The Makefile exposes `lint` and `verify` runs check + lint + test.
+4. The Makefile exposes `lint` and `verify` runs check + lint + test.
 
 No live services.
 """
@@ -36,6 +38,22 @@ def test_request_domain_split():
     assert commands.cmd_request_list is request_commands.cmd_request_list
     # ...and no longer re-exports the admin page renderer (moved, not copied).
     assert not hasattr(commands, "send_request_list_page")
+
+
+def test_watchlist_domain_split():
+    import features.commands as commands
+    import features.watchlist as watchlist
+
+    # The canonical handlers live in watchlist...
+    for name in ("cmd_watch", "cmd_unwatch", "cmd_watchlist"):
+        assert hasattr(watchlist, name), name
+    # ...commands.py re-imports them for its router (identity preserved)...
+    assert commands.cmd_watch is watchlist.cmd_watch
+    assert commands.cmd_unwatch is watchlist.cmd_unwatch
+    assert commands.cmd_watchlist is watchlist.cmd_watchlist
+    # ...and the storage/render helpers are not duplicated into commands.py.
+    assert not hasattr(commands, "add_to_watchlist")
+    assert not hasattr(commands, "render_watchlist_text")
 
 
 def test_pyproject_ruff_config():
@@ -69,6 +87,7 @@ def test_ruff_is_clean_if_available():
 
 _TESTS = [
     test_request_domain_split,
+    test_watchlist_domain_split,
     test_pyproject_ruff_config,
     test_makefile_has_lint,
     test_ruff_is_clean_if_available,

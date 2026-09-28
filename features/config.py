@@ -27,7 +27,7 @@ BOT_START_TIME = datetime.now(timezone.utc)
 # `scripts/bump_version.py --set X.Y.Z`. The pre-commit hook fails commits
 # that add a new feature without bumping this constant. The webapp `/`
 # endpoint exposes it (overridable via the BOT_VERSION env var).
-BOT_VERSION = "1.15.0"
+BOT_VERSION = "1.16.0"
 
 # -------------------------
 # CONFIG / ENV
@@ -87,6 +87,30 @@ PREMIUM_EXPIRY_WARN_DAYS = [
 # Daily download quota by tier (0 = unlimited).
 FREE_DOWNLOAD_DAILY_LIMIT = int(os.getenv("FREE_DOWNLOAD_DAILY_LIMIT", "10"))
 PREMIUM_DOWNLOAD_DAILY_LIMIT = int(os.getenv("PREMIUM_DOWNLOAD_DAILY_LIMIT", "0"))
+
+# -------------------------
+# Watchlist
+# -------------------------
+# How many titles a user can track at once, by tier. /watch refuses additions
+# past the cap; admins bypass the cap (same rule as the /request rate limits).
+WATCHLIST_FREE_LIMIT = int(os.getenv("WATCHLIST_FREE_LIMIT", "5"))
+WATCHLIST_PREMIUM_LIMIT = int(os.getenv("WATCHLIST_PREMIUM_LIMIT", "20"))
+# Per-(user, title) floodgate for watchlist DMs. A series batch (S01E01..E10)
+# or a multi-file drop indexes in one burst and every file would otherwise DM
+# the watcher; only the FIRST copy inside the window notifies, the rest are
+# suppressed. Keyed per title, so two different titles uploaded together each
+# get their own single message.
+WATCHLIST_NOTIFY_COOLDOWN_SECONDS = float(
+    os.getenv("WATCHLIST_NOTIFY_COOLDOWN_SECONDS", "300"))  # default 5 min
+# Floor between two manual UPDATE presses on /watchlist (status re-fetch from
+# TMDb/IMDb costs one API call per entry, so taps are rate-limited).
+WATCHLIST_REFRESH_COOLDOWN_SECONDS = int(
+    os.getenv("WATCHLIST_REFRESH_COOLDOWN_SECONDS", "60"))
+# How many TMDb candidates the /watch disambiguation picker shows.
+WATCHLIST_PICK_LIMIT = int(os.getenv("WATCHLIST_PICK_LIMIT", "5"))
+# A movie is reported "In Cinemas" while it has no wide-theatrical release yet
+# and its earliest premiere/limited release is within this many days.
+WATCHLIST_IN_CINEMAS_DAYS = int(os.getenv("WATCHLIST_IN_CINEMAS_DAYS", "21"))
 
 # Auto-deletion retention (minutes) by tier - how long a delivered file stays
 # before the auto-delete monitor removes it.

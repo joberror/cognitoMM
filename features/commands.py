@@ -44,6 +44,7 @@ from .statistics import (
 )
 from .database_scan import scan_message_range
 from .request_commands import cmd_request, cmd_request_list
+from .watchlist import cmd_watch, cmd_unwatch, cmd_watchlist
 
 # -------------------------
 # Command Handler
@@ -1103,61 +1104,6 @@ async def send_genre_page(client, message, genre, page, total=None, files_split=
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
     return genre_id
-
-
-async def cmd_watch(client, message: Message):
-    """Handle /watch <title> - add a title to your watchlist."""
-    from .user_management import add_to_watchlist
-
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        return await message.reply_text(
-            "👁️ <b>Watchlist</b>\n\nUsage: <code>/watch &lt;title&gt;</code>\n"
-            "You'll be notified when a new copy of the title is indexed.",
-            parse_mode=ParseMode.HTML,
-        )
-    title = parts[1].strip()
-    added = await add_to_watchlist(message.from_user.id, title)
-    if added:
-        await message.reply_text(f"👁️ <b>{title}</b> added to your watchlist.\n\nYou'll be notified when it's available.", parse_mode=ParseMode.HTML)
-    else:
-        await message.reply_text(f"👁️ <b>{title}</b> is already on your watchlist.", parse_mode=ParseMode.HTML)
-
-
-async def cmd_unwatch(client, message: Message):
-    """Handle /unwatch <title> - remove a title from your watchlist."""
-    from .user_management import remove_from_watchlist
-
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        return await message.reply_text("👁️ Usage: <code>/unwatch &lt;title&gt;</code>", parse_mode=ParseMode.HTML)
-    removed = await remove_from_watchlist(message.from_user.id, parts[1].strip())
-    if removed:
-        await message.reply_text(f"✅ <b>{parts[1].strip()}</b> removed from your watchlist.", parse_mode=ParseMode.HTML)
-    else:
-        await message.reply_text(f"👁️ <b>{parts[1].strip()}</b> is not on your watchlist.", parse_mode=ParseMode.HTML)
-
-
-async def cmd_watchlist(client, message: Message):
-    """Handle /watchlist - show your watched titles."""
-    from .user_management import get_watchlist
-
-    entries = await get_watchlist(message.from_user.id)
-    if not entries:
-        return await message.reply_text(
-            "👁️ <b>Your watchlist is empty</b>\n\n"
-            "Use <code>/watch &lt;title&gt;</code> to get notified when a title is indexed.",
-            parse_mode=ParseMode.HTML,
-        )
-    # Plain HTML with tap-to-copy titles (year.type bracket details kept).
-    lines = []
-    for i, e in enumerate(entries, 1):
-        parts = [p for p in (e.get("year"), e.get("type") or "Movie") if p]
-        title = html.escape(str(e.get("title")))
-        lines.append(f"{i}. <code>{title}</code> [{".".join(map(str, parts))}]")
-    text = "👁️ <b>Your Watchlist</b>\n\n" + "\n".join(lines)
-    text += "\n\n<i>Tap any title to copy</i> · Remove with /unwatch title"
-    await message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def cmd_logs(client, message: Message):

@@ -194,12 +194,56 @@ All callbacks (except `terms#`) require `should_process_command_for_user` + term
   ⭐/🎭/IMDb details block; inline results use poster `thumbnail_url` and
   `/search`-style bracket titles (`Title [1080p.1999]` via `format_search_info`);
   `/enrich` backfills older entries.
-- **Watchlist (`user_management.py`)** — `/watch` `/unwatch` `/watchlist`;
-  entries carry `tmdb_id` (resolved via cached enrichment at add time);
-  `notify_watchlist` DMs watchers on TMDb-ID match first (remake /
-  transliteration-proof) with normalized-title fallback when either side
-  lacks an ID. `/watchlist` lists entries in the `/search` bracket style
-  (`1. Inception [2010.Movie]`) inside a code block.
+- **Watchlist (`watchlist.py` + `user_management.py` + `tmdb_integration.py`)**
+  — the whole `/watch` surface lives in its own module (like
+  `request_commands.py`); `commands.py` only re-imports `cmd_watch` /
+  `cmd_unwatch` / `cmd_watchlist` for its router.
+  - **Resolution** — `search_watch_candidates` (`tmdb_integration.py`) queries
+    BOTH the movie and tv search endpoints (a watch target is a film or a show
+    and users rarely say which), merges, then `_rank_watch_candidates` sorts
+    exact-title matches first, then by popularity, deduping per
+    `(type, tmdb_id)`. Each shown candidate gets an IMDb ID plus a derived
+    status. `is_ambiguous_title` decides whether to ask: anything but a
+    single exact **movie** match goes to the picker (remakes, a film and a
+    show sharing a name, a fuzzy-only hit, or a lone Series — a user typing
+    "Fargo" may have meant the film).
+  - **Statuses** — `derive_movie_status` / `derive_series_status` turn TMDb
+    fields into the six display states (`Released` / `In Cinemas` /
+    `Upcoming` / `Continuing` / `Ended` / `Unknown`). *In Cinemas* is decided
+    from `/release_dates` release types: a film with no wide-theatrical (type
+    3) entry but a premiere/limited (types 1-2) date inside
+    `WATCHLIST_IN_CINEMAS_DAYS` is still in its festival run. Series use TMDb
+    `status`, with `next_episode_to_air` overriding a stale *Ended*.
+  - **Picker** — state goes in `config.bulk_downloads` under
+    `type: "watch_pick"` with a 12-hex token; `watchpick:{token}:{idx}`
+    resolves it (ownership-checked, cancel + expiry handled). The message is
+    edited in place by `store_watch_pick`.
+  - **Capacity** — `watchlist_capacity` returns 5 free / 20 premium (admins get
+    the premium cap). Checked in `cmd_watch` BEFORE any TMDb call, so a full
+    list costs nothing.
+  - **Storage** — entries carry `tmdb_id` + `imdb_id` + `status` +
+    `poster_url` (+ `seasons`/`episodes` for series); only resolved fields are
+    written, so a TMDb-less entry has no null placeholders. Matching stays
+    TMDb-ID-first with normalized-title fallback.
+  - **UPDATE** — `watchupd:all:{uid}` and `watchupd:one:{uid}:{title_key}`.
+    `refresh_watchlist_statuses` re-reads each entry via `fetch_title_status`
+    and patches with `update_watchlist_status` (positional `$set`); entries
+    with no TMDb ID are skipped (no identity to query, so no status to derive)
+    and the user is told. Rate-limited per user by
+    `WATCHLIST_REFRESH_COOLDOWN_SECONDS`; the callback is answered BEFORE the
+    lookups so a 20-entry refresh can't blow Telegram's 15s window. Button
+    data carries the list owner's id so a forwarded message can't refresh
+    someone else's list.
+  - **Floodgate** — `notify_watchlist` DMs watchers on the first copy of a
+    title, then records `(uid, identity) -> (sent_at, count)` in
+    `_notify_cooldowns`; copies arriving inside
+    `WATCHLIST_NOTIFY_COOLDOWN_SECONDS` for the SAME identity are absorbed, so
+    a full season dropping at once produces one message per watcher. The key is
+    per title (TMDb ID when known, else normalized title), so two different
+    titles landing together each still notify, and a failed send is not
+    recorded so a transient Telegram error doesn't burn the user's window.
+  - **Rendering** — `1. Death of a Unicorn: M / 2026 / Released · IMDb`
+    (M/S letters, tap-to-copy `<code>` titles, series season/episode counts).
 - **Scheduled rescan (`database_scan.py`)** — `start_db_rescan_monitor`
   (started in `bot.py`) runs `incremental_rescan` per channel every
   `DB_RESCAN_INTERVAL_MINUTES`; cursor stored in `settings_col`

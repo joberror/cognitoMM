@@ -457,10 +457,13 @@ async def test_cmd_watchlist_plain_html_tap_to_copy():
     """cmd_watchlist renders plain HTML with tap-to-copy <code> titles."""
     msg = FakeUserMsg()
     entries = [
-        {"title": "Inception", "year": 2010, "type": "Movie"},
+        {"title": "Inception", "year": 2010, "type": "Movie",
+         "status": "Released", "imdb_id": "tt1375666"},
         {"title": "Rock & <Roll> Show", "year": None, "type": "Series"},
     ]
-    with patch("features.user_management.get_watchlist",
+    # cmd_watchlist lives in features/watchlist.py and calls get_watchlist from
+    # its own namespace, so patch it there.
+    with patch("features.watchlist.get_watchlist",
                AsyncMock(return_value=entries)):
         await commands.cmd_watchlist(None, msg)
 
@@ -468,10 +471,11 @@ async def test_cmd_watchlist_plain_html_tap_to_copy():
     assert "```" not in text, "no code block wrapper"
     assert kwargs.get("parse_mode") is ParseMode.HTML
     assert text.startswith("👁️ <b>Your Watchlist</b>")
-    assert "1. <code>Inception</code> [2010.Movie]" in text
-    # HTML-escaped title, still tap-to-copy; no year falls back to type only
-    assert "2. <code>Rock &amp; &lt;Roll&gt; Show</code> [Series]" in text
-    assert "Remove with /unwatch title" in text
+    assert "1. <code>Inception</code>: M / 2010 / Released" in text
+    assert "imdb.com/title/tt1375666" in text
+    # HTML-escaped title, still tap-to-copy; missing year/status fall back
+    assert "2. <code>Rock &amp; &lt;Roll&gt; Show</code>: S / ? / Unknown" in text
+    assert "Remove with" in text and "/unwatch" in text
 
 
 async def test_cmd_recent_uses_link_preview_options():

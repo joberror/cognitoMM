@@ -6,12 +6,15 @@ for the MovieBot. It includes functions for checking user roles,
 banning/unbanning users, and verifying terms acceptance.
 """
 
+import time
 from datetime import datetime, timezone
 from pyrogram.types import Message
 from pyrogram.enums import ChatType
 
-from .config import ADMINS
+from .config import ADMINS, WATCHLIST_FREE_LIMIT, WATCHLIST_PREMIUM_LIMIT, \
+    WATCHLIST_NOTIFY_COOLDOWN_SECONDS
 from .database import users_col, logs_col, channels_col
+from .tmdb_integration import normalize_content_type
 
 
 async def get_user_doc(user_id: int):
@@ -95,12 +98,18 @@ async def _resolve_tmdb_id(title: str, year=None, type_=None):
 
 
 async def add_to_watchlist(user_id: int, title: str, year=None, type_=None,
-                           tmdb_id=None) -> bool:
+                           tmdb_id=None, imdb_id=None, status=None,
+                           poster_url=None, seasons=None, episodes=None) -> bool:
     """Add a title to a user's watchlist (idempotent). Returns True if added.
 
     The entry carries the TMDb ID (resolved via the cached enrichment when
     not passed) so notifications match remakes/transliterations exactly;
     the normalized title stays as fallback for titles TMDb doesn't know.
+
+    Callers that already resolved a candidate through the /watch picker pass
+    the full detail set (``imdb_id``, ``status``, ``poster_url``, and for
+    series ``seasons``/``episodes``) so the stored entry renders the
+    type/year/status line in /watchlist without another API call.
     """
     if not title or not str(title).strip():
         return False
@@ -111,10 +120,20 @@ async def add_to_watchlist(user_id: int, title: str, year=None, type_=None,
         "title": str(title).strip(),
         "title_key": key,
         "year": year,
-        "type": type_ or "Movie",
+        "type": normalize_content_type(type_),
         "tmdb_id": tmdb_id,
         "added_at": datetime.now(timezone.utc),
     }
+    # Only store the optional detail fields when we actually have them, so a
+    # TMDb-less entry stays clean instead of carrying null placeholders.
+    for field, value in (("imdb_id", imdb_id), ("status", status),
+                         ("poster_url", poster_url), ("seasons", seasons),
+                         ("episodes", episodes)):
+        if value is not None:
+            entry[field] = value
+    if entry.get("status"):
+        entry["status_checked_at"] = entry["added_at"]
+
     try:
         # Ensure the user document exists FIRST (upsert on user_id alone). A
         # $ne-filtered upsert would insert a SECOND user document whenever the
@@ -161,6 +180,83 @@ async def get_watchlist(user_id: int):
     return (doc or {}).get("watchlist") or []
 
 
+async def watchlist_capacity(user_id: int) -> tuple:
+    """Return ``(limit, is_premium)`` for a user's watchlist cap.
+
+    Free users track WATCHLIST_FREE_LIMIT titles, premium users
+    WATCHLIST_PREMIUM_LIMIT. Admins get the premium cap without holding a
+    premium record (same bypass the /request rate limits use).
+    """
+    if await is_admin(user_id):
+        return WATCHLIST_PREMIUM_LIMIT, True
+    # Imported lazily: premium_management imports log_action from this module,
+    # so a top-level import here would be circular.
+    from .premium_management import is_premium_user
+    try:
+        premium = await is_premium_user(user_id)
+    except Exception as e:
+        print(f"⚠️ watchlist_capacity premium check failed for {user_id}: {e}")
+        premium = False
+    return (WATCHLIST_PREMIUM_LIMIT if premium else WATCHLIST_FREE_LIMIT), premium
+
+
+async def update_watchlist_status(user_id: int, title_key: str, fields: dict) -> bool:
+    """Patch the status/detail fields of one watchlist entry. True if changed.
+
+    Called by the /watchlist UPDATE button. Only the fields present in
+    ``fields`` are written, so a partial TMDb response (e.g. a failed status
+    derivation) never blanks data we already had.
+    """
+    allowed = {"status", "status_checked_at", "seasons", "episodes", "year"}
+    patch = {k: v for k, v in (fields or {}).items() if k in allowed and v is not None}
+    if not patch:
+        return False
+    try:
+        result = await users_col.update_one(
+            {"user_id": user_id, "watchlist.title_key": title_key},
+            {"$set": {f"watchlist.$.{k}": v for k, v in patch.items()}},
+        )
+        return bool(result.modified_count)
+    except Exception as e:
+        print(f"⚠️ update_watchlist_status failed for {user_id}/{title_key}: {e}")
+        return False
+
+
+# Per-(user, title) floodgate: (uid, identity) -> (sent_at, extra_count).
+# A series batch (S01E01..E10) or a multi-file drop indexes in one burst and
+# each file would otherwise DM the watcher. Only the first copy inside the
+# window notifies; the rest are suppressed. Keyed per title so two different
+# titles landing together each get their own single message.
+_notify_cooldowns: dict = {}
+
+
+def _notify_identity(title: str, tmdb_id) -> str:
+    """Cooldown key for one title: TMDb ID when known, else normalized title."""
+    if tmdb_id is not None:
+        return f"tmdb:{tmdb_id}"
+    return f"title:{_watch_key(title)}"
+
+
+def _cooldown_active(key: tuple) -> bool:
+    """True when this (user, title) was already notified inside the window."""
+    record = _notify_cooldowns.get(key)
+    if not record:
+        return False
+    sent_at, count = record
+    if (time.monotonic() - sent_at) > WATCHLIST_NOTIFY_COOLDOWN_SECONDS:
+        _notify_cooldowns.pop(key, None)
+        return False
+    # Already DMed in this window: absorb the extra copy into the count
+    # instead of sending a second message.
+    _notify_cooldowns[key] = (sent_at, count + 1)
+    return True
+
+
+def reset_notify_cooldowns() -> None:
+    """Clear the watchlist floodgate state (tests / manual recovery)."""
+    _notify_cooldowns.clear()
+
+
 async def notify_watchlist(entry: dict) -> int:
     """DM every user watching a title when a new copy is indexed.
 
@@ -168,6 +264,10 @@ async def notify_watchlist(entry: dict) -> int:
     falling back to normalized title (exact, case-insensitive) so a new
     season or episode of a watched series notifies too. The DM carries a
     Get button for the freshly indexed copy. Returns users notified.
+
+    Floodgate: a burst of copies for the same title (a full season dropping
+    at once, or several quality variants) sends each watcher ONE message —
+    the rest are absorbed by the per-(user, title) cooldown above.
     """
     from .config import client
     from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -192,8 +292,13 @@ async def notify_watchlist(entry: dict) -> int:
     notified = 0
     channel_id = entry.get("channel_id")
     message_id = entry.get("message_id")
+    identity = _notify_identity(title, tmdb_id)
     for doc in docs:
         uid = doc.get("user_id")
+        if uid is None:
+            continue
+        if _cooldown_active((uid, identity)):
+            continue
         try:
             text = (
                 f"🎬 **{title}** is now available!\n\n"
@@ -208,6 +313,9 @@ async def notify_watchlist(entry: dict) -> int:
                     )
                 ]])
             await client.send_message(uid, text, reply_markup=reply_markup)
+            # Record only after a successful send, so a failed DM does not
+            # burn the user's window.
+            _notify_cooldowns[(uid, identity)] = (time.monotonic(), 0)
             notified += 1
         except Exception as e:
             print(f"⚠️ notify_watchlist DM failed for {uid}: {e}")

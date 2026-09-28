@@ -23,9 +23,9 @@ router + this file together.
 | `/request_list` | View/manage your requests |
 | `/my_history` | Your search history (plain HTML, tap-to-copy queries, bracket = search time, grouped by date) |
 | `/my_stat` | Your usage + premium info |
-| `/watch <title>` | Add a title to your watchlist (notified when indexed) |
-| `/unwatch <title>` | Remove from watchlist |
-| `/watchlist` | Show your watched titles (plain HTML, tap-to-copy titles with year/type brackets) |
+| `/watch <title>` | Add a title to your watchlist. The title is resolved against TMDb (movies **and** shows); an ambiguous query (remakes, a film and a show with the same name, or a fuzzy-only match) returns a button list to pick from, and a unique exact match is stored straight away. Stored with its type, year, release status, and IMDb/TMDb links. No TMDb match still tracks on the title text alone. Notified when a file is indexed. **5 titles free / 20 premium** |
+| `/unwatch <title>` | Remove from watchlist (title match is case-insensitive) |
+| `/watchlist` | Your watched titles, one per line: `Title: M / 2026 / Released · IMDb` (M = movie, S = series; series also show `N seasons / M eps`). Titles stay tap-to-copy. Has a **🔄 UPDATE ALL** button plus a per-title 🔄 to re-read each status from IMDb/TMDb (rate-limited to one press a minute). Titles with no TMDb match have no status to refresh |
 | `/premium` | Premium info / management (admin-gated actions inside) |
 | `/buy_premium` | Buy premium with Telegram Stars (plan buttons → invoice; access activates on payment) |
 | Inline mode | `@yourbot <query>` — search straight from any chat (poster thumbnails) |
@@ -65,6 +65,12 @@ See `DEPLOYMENT.md` for the full table. Feature-specific extras:
 |---|---|---|
 | `TMDB_API` | "" | Enables trending, requests, and TMDb enrichment (posters/genres/ratings) |
 | `TMDB_ENRICH_INDEX` | `true` | Enrich newly indexed entries with TMDb metadata (cached per title) |
+| `WATCHLIST_FREE_LIMIT` | `5` | Max titles a free user can watch |
+| `WATCHLIST_PREMIUM_LIMIT` | `20` | Max titles a premium user can watch |
+| `WATCHLIST_NOTIFY_COOLDOWN_SECONDS` | `300` | Per-(user, title) window in which extra watchlist DMs are suppressed (the floodgate) |
+| `WATCHLIST_REFRESH_COOLDOWN_SECONDS` | `60` | Floor between UPDATE presses on `/watchlist` |
+| `WATCHLIST_PICK_LIMIT` | `5` | Candidates shown in the `/watch` disambiguation picker |
+| `WATCHLIST_IN_CINEMAS_DAYS` | `21` | How long a limited/premiere theatrical run counts as *In Cinemas* |
 | `DB_RESCAN_ENABLED` | `true` | Scheduled incremental rescan (background `/update_db`) |
 | `DB_RESCAN_INTERVAL_MINUTES` | `360` | Rescan cadence (every 6 hours) |
 | `KEEP_ALIVE_URL` | — | Public URL self-pinged to keep managed hosts awake (HF auto-derives) |
@@ -79,8 +85,10 @@ See `DEPLOYMENT.md` for the full table. Feature-specific extras:
   `message_id`, `indexed_at`, plus optional TMDb enrichment fields
   `tmdb_poster`, `tmdb_rating`, `tmdb_genres`, `tmdb_overview`, `imdb_id`.
 - `users_col` — `role`, `terms_accepted`, `search_history`,
-  `download_history`, `watchlist` (array of `{title, title_key, year, type,
-  added_at}`).
+  `download_history`, `watchlist` (array of TMDb-verified entries:
+  `{title, title_key, year, type, tmdb_id, imdb_id, status, poster_url,
+  seasons, episodes, added_at, status_checked_at}`; only the detail fields
+  that were actually resolved are stored).
 - `logs_col` — audit log: `{action, by, target, extra, ts}` (viewable with
   `/logs`).
 - `settings_col` — key/value (`k`/`v`): `auto_indexing`, per-channel scan
@@ -104,7 +112,24 @@ See `DEPLOYMENT.md` for the full table. Feature-specific extras:
   (`FILE_DELETION_MINUTES` free / `PREMIUM_FILE_DELETION_MINUTES` premium;
   bulk deliveries use `BULK_FILE_DELETION_MINUTES` /
   `PREMIUM_BULK_FILE_DELETION_MINUTES`), with a lead-time warning DM.
-- Watchlist notifications are sent the moment a new copy of a watched title is
-  indexed (DM with a Get button).
+- **Watchlist statuses** — movies render as `Released` / `In Cinemas` /
+  `Upcoming`, series as `Continuing` / `Ended` (falling back to `Unknown`
+  when TMDb has no data). A film is *In Cinemas* while it has no wide
+  theatrical release yet but is already out somewhere within the last
+  `WATCHLIST_IN_CINEMAS_DAYS` days; once the window passes (or a wide release
+  exists) it becomes *Released*. Movies are matched on
+  `release_date` + TMDb `status` + release types from `/release_dates`; series
+  on TMDb `status`, with a confirmed `next_episode_to_air` overriding a stale
+  *Ended*.
+- **Watchlist notifications** are sent the moment a copy of a watched title is
+  indexed (DM with a Get button), matched on TMDb ID first (remake /
+  transliteration-proof) with normalized-title fallback. A burst of copies for
+  the **same** title — a full season dropping at once, or several quality
+  variants — sends each watcher exactly **one** message; the rest are
+  suppressed for `WATCHLIST_NOTIFY_COOLDOWN_SECONDS`. The gate is keyed per
+  title, so two different titles uploaded together each still notify.
+- **Watchlist capacity** is `WATCHLIST_FREE_LIMIT` (5) free /
+  `WATCHLIST_PREMIUM_LIMIT` (20) premium; admins get the premium cap. The cap
+  is checked before any TMDb lookup, so a full list costs no API calls.
 - The scheduled rescan, orphan prune monitor, and keep-alive all run as
   background tasks started in `features/bot.py`.
