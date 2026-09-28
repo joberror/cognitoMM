@@ -27,7 +27,7 @@ BOT_START_TIME = datetime.now(timezone.utc)
 # `scripts/bump_version.py --set X.Y.Z`. The pre-commit hook fails commits
 # that add a new feature without bumping this constant. The webapp `/`
 # endpoint exposes it (overridable via the BOT_VERSION env var).
-BOT_VERSION = "1.12.1"
+BOT_VERSION = "1.13.0"
 
 # -------------------------
 # CONFIG / ENV
@@ -87,6 +87,18 @@ PREMIUM_EXPIRY_WARN_DAYS = [
 # Daily download quota by tier (0 = unlimited).
 FREE_DOWNLOAD_DAILY_LIMIT = int(os.getenv("FREE_DOWNLOAD_DAILY_LIMIT", "10"))
 PREMIUM_DOWNLOAD_DAILY_LIMIT = int(os.getenv("PREMIUM_DOWNLOAD_DAILY_LIMIT", "0"))
+
+# Auto-deletion retention (minutes) by tier - how long a delivered file stays
+# before the auto-delete monitor removes it.
+FILE_DELETION_MINUTES = int(os.getenv("FILE_DELETION_MINUTES", "5"))
+PREMIUM_FILE_DELETION_MINUTES = int(os.getenv("PREMIUM_FILE_DELETION_MINUTES", "30"))
+# Bulk deliveries (Get All / season packs) keep files longer than single ones.
+BULK_FILE_DELETION_MINUTES = int(os.getenv("BULK_FILE_DELETION_MINUTES", "15"))
+PREMIUM_BULK_FILE_DELETION_MINUTES = int(
+    os.getenv("PREMIUM_BULK_FILE_DELETION_MINUTES", "60"))
+# Lead time (minutes before deletion) for the "will be deleted" warning DM.
+# Scaled down automatically when retention is shorter than this.
+FILE_DELETION_WARN_MINUTES = int(os.getenv("FILE_DELETION_WARN_MINUTES", "2"))
 
 # Broadcast Configuration
 BROADCAST_RATE_LIMIT = int(os.getenv("BROADCAST_RATE_LIMIT", "25"))  # messages per second

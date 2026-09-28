@@ -39,6 +39,8 @@ This is a Telegram bot hosted on Hugging Face Spaces.
 - `/watchlist` — your watched titles (plain HTML, **tap any title to copy**) · `/my_history` — your searches (plain HTML, **tap any query to copy**, grouped by date)
 - `/my_stat` — usage + premium info · `/premium` — premium info/management
 - `/buy_premium` — buy premium with Telegram Stars (activates on payment)
+- Delivered files auto-delete after a tier-based retention (free vs premium),
+  with a lead-time warning; a pick-view `📦 Get All` sends a title/season pack
 - `/help` — full command menu
 
 **👑 Admin**

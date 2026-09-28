@@ -80,7 +80,7 @@ Subclasses Pyroblack `Client` and adds `iter_messages(chat_id, limit, offset)` (
 | `features/premium_payments.py` | 208 | Telegram Stars purchases: plan menu/keyboard, invoice send, pre-checkout validation, idempotent payment activation |
 | `features/premium_commands.py` | 309 | Multi-step interactive premium admin flows (user input handlers) |
 | `features/broadcast.py` | 469 | `cmd_broadcast`, recipient query, rate-limited send loop with progress edits, summary, `broadcasts_col` logging |
-| `features/file_deletion.py` | 287 | Auto-deletion of sent files: `track_file_for_deletion`, `check_files_for_deletion`, disk persistence (`file_deletions.json`), `start_deletion_monitor` |
+| `features/file_deletion.py` | 287 | Auto-deletion of sent files: `track_file_for_deletion` (tier retention + warn lead), `check_files_for_deletion`, disk persistence (`file_deletions.json`), `start_deletion_monitor` |
 | `features/deletion_events.py` | 153 | `handle_raw_update` — heuristic real-time deletion detection (limited; see gotchas) |
 | `features/webapp.py` | 55 | Flask `/` and `/health` endpoints |
 | `features/logger.py` | 194 | `TelegramLogger` — captures stdout/stderr, buffers, flushes to `LOG_CHANNEL` every 3s; ignores `[DIAGNOSTIC]`/`[INDEXED]` lines |
@@ -284,13 +284,21 @@ Diagnostic counters in `indexing_stats` track attempts/successes/duplicates/erro
 
 ### File delivery + auto-delete
 ```
-get_file/bulk → client.get_messages(channel, msg) → send_cached_media(file_id, caption)
-→ track_file_for_deletion(user_id, message_id) → file_deletions dict + file_deletions.json
+get_file/bulk/getpack → client.get_messages(channel, msg) → send_cached_media(file_id, caption)
+→ track_file_for_deletion(user_id, message_id, duration_minutes=<tier retention>)
+   (default 5; free FILE_DELETION_MINUTES vs premium PREMIUM_FILE_DELETION_MINUTES;
+    bulk packs use BULK_*/PREMIUM_BULK_*) → file_deletions dict + file_deletions.json
 → start_deletion_monitor loop (every 60s):
-     2-min warning message if not notified
-     delete via client.delete_messages at delete_at (default +5 min)
+     warn at delete_at - warn_minutes (stored per record; "N-Minute Warning")
+     delete via client.delete_messages at delete_at
      "Auto-Deleted" notification
+per-user daily quota gate (check_download_quota) + record_download on delivery
 ```
+**Pick-view "Get All" pack** — the pick view adds a `📦 Get All (N)` button
+(`getpack:{sid}:{gi}:{season}:{res}`) for /search pick views with >1 copy; the
+callback filters the stored group by the active season/resolution and delivers
+up to `MAX_PACK_FILES` (20) copies through the shared `_deliver_bulk_files`
+helper (same tracking/quota/notice path as `bulk:`).
 
 ### Terms gate
 ```

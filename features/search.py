@@ -1134,6 +1134,15 @@ def build_pick_view(search_id, group_index, copies, season=None, resolution=None
         buttons.append(row)
 
     back_data = f"{back_prefix or 'back'}:{search_id}"
+    # "Get All" pack: deliver every copy of this title (or the active
+    # season/resolution slice) in one batch. /search only - /genres pick views
+    # keep a different state shape, so they don't offer it.
+    if prefix == "choose" and len(get_buttons) > 1:
+        season_part = f"S{season:02d}" if season is not None else ""
+        buttons.append([InlineKeyboardButton(
+            f"📦 Get All ({len(get_buttons)})",
+            callback_data=f"getpack:{search_id}:{group_index}:{season_part}:{resolution or ''}",
+        )])
     buttons.append([InlineKeyboardButton("← Back", callback_data=back_data)])
 
     return text, InlineKeyboardMarkup(buttons) if buttons else None

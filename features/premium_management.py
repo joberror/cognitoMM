@@ -10,7 +10,10 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Tuple
 import asyncio
 from .config import (FREE_DOWNLOAD_DAILY_LIMIT, PREMIUM_DOWNLOAD_DAILY_LIMIT,
-                     PREMIUM_EXPIRY_WARN_DAYS)
+                     PREMIUM_EXPIRY_WARN_DAYS,
+                     FILE_DELETION_MINUTES, PREMIUM_FILE_DELETION_MINUTES,
+                     BULK_FILE_DELETION_MINUTES, PREMIUM_BULK_FILE_DELETION_MINUTES,
+                     FILE_DELETION_WARN_MINUTES)
 from .database import premium_users_col, premium_features_col, users_col
 from .user_management import log_action
 
@@ -556,7 +559,37 @@ async def get_download_quota_status(user_id: int) -> Dict:
     except Exception:
         pass
     return {"premium": premium, "limit": limit, "used": used,
-            "remaining": None if limit <= 0 else max(0, limit - used)}
+            "remaining": None if limit <= 0 else max(0, limit - used),
+            "retention_minutes": (PREMIUM_FILE_DELETION_MINUTES if premium
+                                  else FILE_DELETION_MINUTES),
+            "bulk_retention_minutes": (PREMIUM_BULK_FILE_DELETION_MINUTES if premium
+                                       else BULK_FILE_DELETION_MINUTES)}
+
+
+async def get_retention_minutes(user_id: int, bulk: bool = False,
+                                premium: Optional[bool] = None) -> int:
+    """Auto-delete retention (minutes) for a user's tier.
+
+    Pass ``premium`` to reuse an existing premium check (avoids a second DB
+    read); otherwise it is resolved here. Always at least 1 minute.
+    """
+    if premium is None:
+        try:
+            premium = await is_premium_user(user_id)
+        except Exception:
+            premium = False
+    if bulk:
+        minutes = PREMIUM_BULK_FILE_DELETION_MINUTES if premium else BULK_FILE_DELETION_MINUTES
+    else:
+        minutes = PREMIUM_FILE_DELETION_MINUTES if premium else FILE_DELETION_MINUTES
+    return max(1, int(minutes))
+
+
+def retention_warn_minutes(retention_minutes: int) -> int:
+    """Warning lead time for a given retention (never more than half of it)."""
+    retention_minutes = max(1, int(retention_minutes or 1))
+    warn = max(1, int(FILE_DELETION_WARN_MINUTES))
+    return max(1, min(warn, retention_minutes // 2 or 1))
 
 
 # ------------------------------------------------------------------ #

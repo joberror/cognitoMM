@@ -5,7 +5,7 @@ This module contains all callback handlers for inline buttons and user interacti
 It handles file requests, pagination, bulk downloads, and other button interactions.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import io
 from bson import ObjectId
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, LinkPreviewOptions
@@ -20,6 +20,87 @@ from .file_deletion import track_file_for_deletion
 from .search import send_search_results
 from .user_management import should_process_command_for_user, has_accepted_terms, is_admin, log_action
 from .premium_management import toggle_feature, get_all_premium_features
+
+# Upper bound on a single "Get All" / season-pack delivery (keeps one callback
+# from flooding Telegram with hundreds of sequential uploads).
+MAX_PACK_FILES = 20
+
+
+async def _deliver_bulk_files(client, callback_query, files, retention_minutes):
+    """Send every file in ``files`` to the caller (shared by ``bulk:`` and
+    ``getpack:``).
+
+    Tracks each delivered message for auto-deletion at ``retention_minutes``
+    and counts them against the caller's daily download quota. Returns
+    ``(success_count, failed_files)``.
+    """
+    from .premium_management import record_download
+
+    user_id = callback_query.from_user.id
+    user_name = callback_query.from_user.first_name
+    success_count = 0
+    failed_files = []
+    sent_messages = []
+
+    for file_info in files:
+        channel_id = int(file_info['channel_id'])
+        message_id = int(file_info['message_id'])
+        try:
+            msg = await client.get_messages(channel_id, message_id)
+            if not msg:
+                raise Exception("Message not found")
+
+            db_item = await movies_col.find_one(
+                {"channel_id": channel_id, "message_id": message_id})
+            file_size = 0
+            if msg.video:
+                file_size = msg.video.file_size
+            elif msg.document:
+                file_size = msg.document.file_size
+
+            final_caption = construct_final_caption(db_item, file_size, user_name) or msg.caption or ""
+
+            sent_message = None
+            if msg.video:
+                sent_message = await client.send_cached_media(
+                    chat_id=user_id, file_id=msg.video.file_id, caption=final_caption)
+            elif msg.document:
+                sent_message = await client.send_cached_media(
+                    chat_id=user_id, file_id=msg.document.file_id, caption=final_caption)
+            else:
+                raise Exception("Message does not contain video or document")
+
+            if sent_message:
+                sent_messages.append(sent_message.id)
+            success_count += 1
+        except Exception as e:
+            print(f"❌ Failed to send {channel_id}:{message_id}: {e}")
+            failed_files.append(f"{channel_id}:{message_id}")
+            continue
+
+    for msg_id in sent_messages:
+        await track_file_for_deletion(
+            user_id=user_id, message_id=msg_id,
+            duration_minutes=retention_minutes,
+        )
+    for _ in range(success_count):
+        await record_download(user_id)
+
+    if sent_messages:
+        try:
+            await client.send_message(
+                user_id,
+                f"⏰ **Auto-Delete Notice**\n\n"
+                f"All {len(sent_messages)} files will be **automatically deleted in "
+                f"{retention_minutes} minutes**.\n"
+                "You'll receive a warning before deletion.\n\n"
+                "💡 Please save files if you want to keep them!"
+            )
+        except Exception as notify_error:
+            print(f"❌ Failed to send bulk auto-delete notification: {notify_error}")
+
+    return success_count, failed_files
+
 
 async def callback_handler(client, callback_query: CallbackQuery):
     """Handle inline button callbacks"""
@@ -151,10 +232,14 @@ async def callback_handler(client, callback_query: CallbackQuery):
             message_id = int(message_id)
 
             # Daily download quota gate (free vs premium tier).
-            from .premium_management import check_download_quota, record_download
+            from .premium_management import (check_download_quota, record_download,
+                                              get_retention_minutes)
             allowed, remaining, limit, quota_msg = await check_download_quota(user_id)
             if not allowed:
                 return await callback_query.answer(quota_msg, show_alert=True)
+
+            # Tier-based auto-delete retention (premium keeps files longer).
+            retention_minutes = await get_retention_minutes(user_id)
 
             await callback_query.answer("📥 Fetching file...")
             
@@ -217,7 +302,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 if sent_message:
                     await track_file_for_deletion(
                         user_id=callback_query.from_user.id,
-                        message_id=sent_message.id
+                        message_id=sent_message.id,
+                        duration_minutes=retention_minutes,
                     )
                     # Count against the daily download quota.
                     await record_download(callback_query.from_user.id)
@@ -226,9 +312,10 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     try:
                         await client.send_message(
                             callback_query.from_user.id,
-                            "⏰ **Auto-Delete Notice**\n\n"
-                            "This file will be **automatically deleted in 5 minutes**.\n"
-                            "You'll receive a 2-minute warning before deletion.\n\n"
+                            f"⏰ **Auto-Delete Notice**\n\n"
+                            f"This file will be **automatically deleted in "
+                            f"{retention_minutes} minute(s)**.\n"
+                            f"You'll receive a warning before deletion.\n\n"
                             "💡 Please save the file if you want to keep it!"
                         )
                     except Exception as notify_error:
@@ -503,10 +590,13 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 return
 
             # Daily download quota gate (bulk counts each delivered file).
-            from .premium_management import check_download_quota, record_download
+            from .premium_management import check_download_quota, get_retention_minutes
             allowed, remaining, limit, quota_msg = await check_download_quota(user_id)
             if not allowed:
                 return await callback_query.answer(quota_msg, show_alert=True)
+
+            # Tier-based retention for bulk deliveries (longer than single).
+            bulk_retention = await get_retention_minutes(user_id, bulk=True)
 
             files = bulk_data['files']
             await callback_query.answer(f"📦 Fetching {len(files)} files...")
@@ -528,84 +618,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
             except Exception as e:
                 print(f"⚠️ Failed to track bulk download for user {user_id}: {e}")
 
-            success_count = 0
-            failed_files = []
-            sent_messages = []  # Track sent messages for auto-deletion
-
-            for file_info in files:
-                try:
-                    channel_id = int(file_info['channel_id'])
-                    message_id = int(file_info['message_id'])
-
-                    # Get the message from the channel to extract media
-                    msg = await client.get_messages(channel_id, message_id)
-
-                    if not msg:
-                        raise Exception("Message not found")
-
-                    # Parse custom caption from database
-                    db_item = await movies_col.find_one({"channel_id": channel_id, "message_id": message_id})
-                    
-                    # Get file size and user info
-                    file_size = 0
-                    if msg.video:
-                        file_size = msg.video.file_size
-                    elif msg.document:
-                        file_size = msg.document.file_size
-                        
-                    user_name = callback_query.from_user.first_name
-                    
-                    final_caption = construct_final_caption(db_item, file_size, user_name) or msg.caption or ""
-
-                    # Extract media and send using send_cached_media (no forward header)
-                    sent_message = None
-                    if msg.video:
-                        sent_message = await client.send_cached_media(
-                            chat_id=callback_query.from_user.id,
-                            file_id=msg.video.file_id,
-                            caption=final_caption
-                        )
-                    elif msg.document:
-                        sent_message = await client.send_cached_media(
-                            chat_id=callback_query.from_user.id,
-                            file_id=msg.document.file_id,
-                            caption=final_caption
-                        )
-                    else:
-                        raise Exception("Message does not contain video or document")
-
-                    if sent_message:
-                        sent_messages.append(sent_message.id)
-                    success_count += 1
-
-                except Exception as e:
-                    print(f"❌ Failed to send {channel_id}:{message_id}: {e}")
-                    failed_files.append(f"{channel_id}:{message_id}")
-                    continue
-
-            # Track all sent files for auto-deletion
-            for msg_id in sent_messages:
-                await track_file_for_deletion(
-                    user_id=callback_query.from_user.id,
-                    message_id=msg_id
-                )
-
-            # Count each delivered file against the daily download quota.
-            for _ in range(success_count):
-                await record_download(callback_query.from_user.id)
-
-            # Send notification about auto-deletion for bulk files
-            if sent_messages:
-                try:
-                    await client.send_message(
-                        callback_query.from_user.id,
-                        f"⏰ **Auto-Delete Notice**\n\n"
-                        f"All {len(sent_messages)} files will be **automatically deleted in 15 minutes**.\n"
-                        "You'll receive a 5-minute warning before deletion.\n\n"
-                        "💡 Please save files if you want to keep them!"
-                    )
-                except Exception as notify_error:
-                    print(f"❌ Failed to send bulk auto-delete notification: {notify_error}")
+            success_count, failed_files = await _deliver_bulk_files(
+                client, callback_query, files, bulk_retention)
 
             # Clean up temporary data after use
             del bulk_downloads[bulk_id]
@@ -621,6 +635,70 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 f"{result_text}\n\n{callback_query.message.text}",
                 reply_markup=callback_query.message.reply_markup
             )
+
+        elif data.startswith("getpack:"):
+            # "Get All" from the pick view: deliver every copy of the chosen
+            # title (optionally narrowed by the active season/resolution
+            # filter) as one batch - the season-pack flow.
+            parts = data.split(":")
+            if len(parts) != 5:
+                return await callback_query.answer("⚠️ Invalid pack data.")
+            _, search_id, gi_str, season_str, res_str = parts
+            search_data = bulk_downloads.get(search_id)
+            if not search_data or search_data.get("user_id") != user_id:
+                return await callback_query.answer("⚠️ This search expired. Run /search again.")
+            groups = search_data.get("groups") or []
+            try:
+                gi = int(gi_str)
+            except (TypeError, ValueError):
+                return await callback_query.answer("⚠️ Invalid pack data.")
+            if gi >= len(groups) or not groups[gi]:
+                return await callback_query.answer("⚠️ This search expired. Run /search again.")
+
+            season = int(season_str[1:]) if season_str and season_str.startswith("S") else None
+            resolution = res_str or None
+            from .search import filter_copies
+            selected = filter_copies(groups[gi], season=season, resolution=resolution)
+            files = [{"channel_id": c.get("channel_id"), "message_id": c.get("message_id")}
+                     for c in selected if c.get("channel_id") and c.get("message_id")]
+            if not files:
+                return await callback_query.answer("❌ No downloadable copies for this filter.",
+                                                   show_alert=True)
+            files = files[:MAX_PACK_FILES]
+
+            from .premium_management import check_download_quota, get_retention_minutes
+            allowed, remaining, limit, quota_msg = await check_download_quota(user_id)
+            if not allowed:
+                return await callback_query.answer(quota_msg, show_alert=True)
+            pack_retention = await get_retention_minutes(user_id, bulk=True)
+
+            await callback_query.answer(f"📦 Fetching {len(files)} files...")
+            try:
+                await users_col.update_one(
+                    {"user_id": user_id},
+                    {
+                        "$inc": {"download_count": len(files)},
+                        "$push": {"download_history": {
+                            "bulk": True,
+                            "file_count": len(files),
+                            "ts": datetime.now(timezone.utc)
+                        }}
+                    },
+                    upsert=True
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to track pack download for user {user_id}: {e}")
+
+            success_count, failed_files = await _deliver_bulk_files(
+                client, callback_query, files, pack_retention)
+
+            summary = f"✅ Sent {success_count}/{len(files)} files from the pack!"
+            if failed_files:
+                summary += f"\n❌ Failed: {len(failed_files)}"
+            try:
+                await client.send_message(user_id, summary)
+            except Exception as e:
+                print(f"⚠️ pack summary send failed: {e}")
 
         elif data.startswith("hsearch#") or data.startswith("hsearch_exact#"):
             # Handle history search callback

@@ -96,8 +96,14 @@ See `DEPLOYMENT.md` for the full table. Feature-specific extras:
   per-season `Pick[n][Sxx]` buttons; long-running series page through the
   seasons — `S◀`/`S▶` buttons in both the results list and the pick view, 10
   seasons per page); `[720p]/[1080p]/[2160p]`
-  resolution filters narrow further and `← Back` restores the full results. Results carry
+  resolution filters narrow further and `← Back` restores the full results. A
+  `📦 Get All (N)` button in the pick view delivers every copy of the title
+  (or the active season/resolution slice) as one batch. Results carry
   TMDb ratings/genres/IMDb links when `TMDB_API` is configured.
+- Delivered files are auto-deleted after a tier-based retention
+  (`FILE_DELETION_MINUTES` free / `PREMIUM_FILE_DELETION_MINUTES` premium;
+  bulk deliveries use `BULK_FILE_DELETION_MINUTES` /
+  `PREMIUM_BULK_FILE_DELETION_MINUTES`), with a lead-time warning DM.
 - Watchlist notifications are sent the moment a new copy of a watched title is
   indexed (DM with a Get button).
 - The scheduled rescan, orphan prune monitor, and keep-alive all run as
