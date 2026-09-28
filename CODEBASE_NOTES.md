@@ -300,6 +300,18 @@ callback filters the stored group by the active season/resolution and delivers
 up to `MAX_PACK_FILES` (20) copies through the shared `_deliver_bulk_files`
 helper (same tracking/quota/notice path as `bulk:`).
 
+### Reliability
+```
+retry_on_flood(coro_factory, max_retries=, base_delay=, max_delay=, jitter=)
+  ├─ FloodWait -> wait the API-reported seconds (clamped), up to max_retries
+  ├─ retry_on=(ExcType,) -> exponential backoff for transient errors
+  └─ injectable sleep/rng (tests never wait)
+```
+Used by `CognitoBot.iter_messages` (backfills survive rate limits) and
+`scan_message_range` (`flood_retries`/`retry_sleep`; default 0 keeps the
+pause-on-FloodWait semantics). `struct_log(event, **fields)` emits grep-able
+`[EVENT] event key=value` lines (captured by the logger like any print).
+
 ### Terms gate
 ```
 /start → has_accepted_terms? → yes: welcome photo+buttons

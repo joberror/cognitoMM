@@ -27,6 +27,7 @@ from .keepalive import start_keep_alive
 from .database_scan import start_db_rescan_monitor
 from .premium_payments import handle_pre_checkout, handle_successful_payment
 from .premium_management import start_premium_expiry_monitor
+from .reliability import retry_on_flood
 
 # -------------------------
 # CUSTOM BOT CLASS WITH iter_messages
@@ -62,7 +63,13 @@ class CognitoBot(Client):
             new_diff = min(200, limit - current)
             if new_diff <= 0:
                 return
-            messages = await self.get_messages(chat_id, list(range(current, current+new_diff+1)))
+            # FloodWait-aware fetch: a long backfill pauses on Telegram's
+            # reported wait (with backoff+jitter) instead of crashing the scan.
+            messages = await retry_on_flood(
+                lambda: self.get_messages(
+                    chat_id, list(range(current, current + new_diff + 1))),
+                max_retries=3,
+            )
             for message in messages:
                 yield message
                 current += 1

@@ -14,6 +14,7 @@ from pyrogram.errors import FloodWait
 
 from .database import movies_col
 from .indexing import ACCESS_ERRORS, index_message
+from .reliability import retry_on_flood
 
 
 async def scan_message_range(
@@ -24,6 +25,8 @@ async def scan_message_range(
     movies_col_ref=None,
     index_message_ref=None,
     progress_cb=None,
+    flood_retries=0,
+    retry_sleep=None,
 ):
     """
     Scan message ids ``start_id``..``end_id`` on a channel and reconcile the
@@ -48,6 +51,10 @@ async def scan_message_range(
     messages or 3 seconds with a state dict (scanned, total_range,
     progress_pct, eta_str, bar, orphan/new/already/skipped/error counters) so
     the caller can render progress.
+
+    ``flood_retries`` (default 0) retries a FloodWait-throttled fetch that
+    many times using reliability.retry_on_flood before pausing the scan;
+    ``retry_sleep`` injects the sleeper (tests pass a no-op).
 
     Returns:
         dict: {scanned, orphans_removed, new_indexed, already_indexed,
@@ -81,6 +88,10 @@ async def scan_message_range(
     # Step 4b: Iterate through messages in the range
     last_update = 0
     scan_start_time = datetime.now(timezone.utc).timestamp()
+
+    fetch_kwargs = {"max_retries": max(0, int(flood_retries))}
+    if retry_sleep is not None:
+        fetch_kwargs["sleep"] = retry_sleep
 
     for msg_id in range(start_id, end_id + 1):
         scanned += 1
@@ -133,8 +144,9 @@ async def scan_message_range(
                       f"Orphans: {orphans_removed} | New: {new_indexed} | ETA: {eta_str}")
 
         try:
-            # Fetch the message from channel
-            msg = await client.get_messages(channel_id, msg_id)
+            # Fetch the message from channel (FloodWait-aware when retries set)
+            msg = await retry_on_flood(
+                lambda: client.get_messages(channel_id, msg_id), **fetch_kwargs)
 
             if not msg or getattr(msg, "empty", False):
                 # Message doesn't exist - check if we have it indexed
