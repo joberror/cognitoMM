@@ -27,6 +27,7 @@ router + this file together.
 | `/unwatch <title>` | Remove from watchlist |
 | `/watchlist` | Show your watched titles (plain HTML, tap-to-copy titles with year/type brackets) |
 | `/premium` | Premium info / management (admin-gated actions inside) |
+| `/buy_premium` | Buy premium with Telegram Stars (plan buttons → invoice; access activates on payment) |
 | Inline mode | `@yourbot <query>` — search straight from any chat (poster thumbnails) |
 
 ## 👑 Admin commands

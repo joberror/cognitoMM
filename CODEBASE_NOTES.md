@@ -76,7 +76,8 @@ Subclasses Pyroblack `Client` and adds `iter_messages(chat_id, limit, offset)` (
 | `features/user_management.py` | 169 | Admin/banned/terms checks, `log_action`, `should_process_command`, `require_not_banned` |
 | `features/request_management.py` | 169 | Rate limits (3 pending / 1 per day / 20 global per day), duplicate check (fuzzy ≥85%), IMDB link validation, queue position |
 | `features/tmdb_integration.py` | 427 | `search_tmdb`, `get_imdb_id`, trending movies/shows, new releases, `get_random_background_image`; 30-min in-memory cache |
-| `features/premium_management.py` | 446 | Premium users CRUD + expiry handling + feature toggles (defaults: `recent`, `request`, `get_all`) |
+| `features/premium_management.py` | 646 | Premium users CRUD + expiry handling + feature toggles (defaults: `recent`, `request`, `get_all`), daily download quota, expiry-warning monitor |
+| `features/premium_payments.py` | 208 | Telegram Stars purchases: plan menu/keyboard, invoice send, pre-checkout validation, idempotent payment activation |
 | `features/premium_commands.py` | 309 | Multi-step interactive premium admin flows (user input handlers) |
 | `features/broadcast.py` | 469 | `cmd_broadcast`, recipient query, rate-limited send loop with progress edits, summary, `broadcasts_col` logging |
 | `features/file_deletion.py` | 287 | Auto-deletion of sent files: `track_file_for_deletion`, `check_files_for_deletion`, disk persistence (`file_deletions.json`), `start_deletion_monitor` |
@@ -102,6 +103,7 @@ Collections (all in `database.py`):
 | `user_request_limits` | `user_id`, `last_request_date` (for per-day limit) |
 | `premium_users` | `user_id`, `expiry_date`, `added_date`, `added_by`, `last_updated`, `last_updated_by` |
 | `premium_features` | `feature_name`, `description`, `enabled` (premium-only flag), `added_date`, `added_by` |
+| `premium_payments` | Stars purchases: `user_id`, `plan_key`, `days`, `stars`, `charge_id` (unique), `status`, `created_at` |
 | `broadcasts` | Broadcast history: `broadcast_id`, `admin_id`, `message_text`, totals, error breakdown, timestamps |
 
 **Indexes** created by `ensure_indexes()`: title, year, quality, type, (channel_id+message_id), user_id, channel_id, request user_id/status/date, limits user_id, premium user_id/feature_name, broadcast id/admin_id/started_at/status. The user/channel/limits/premium/broadcast-id indexes are **unique**.
@@ -321,9 +323,15 @@ auto-fulfill → index_message stores tmdb_id at enrich time, then
 
 ### Premium
 ```
+/buy_premium → plan buttons (buyplan:<key>) → send_invoice (currency XTR)
+  → Telegram pre_checkout_query → handle_pre_checkout (validate payload)
+  → successful_payment → handle_successful_payment → activate_payment
+     (idempotent per telegram_payment_charge_id; records premium_payments_col)
 /premium → menu → add/edit/remove user (interactive inputs via premium_commands.py)
         → manage_features → toggle premium-only flags (recent/request/get_all)
 Gate checks inline: is_feature_premium_only(name) && !is_premium_user && !is_admin → blocked
+Download quota: check_download_quota on get_file/bulk (free cap vs premium lift;
+        day counter on the user doc) · expiry DMs 3d/1d via start_premium_expiry_monitor
 ```
 
 ---

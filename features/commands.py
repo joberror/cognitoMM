@@ -144,6 +144,8 @@ async def handle_command(client, message: Message):
         await cmd_manual_deletion(client, message)
     elif command == 'premium':
         await cmd_premium(client, message)
+    elif command == 'buy_premium':
+        await cmd_buy_premium(client, message)
     elif command == 'broadcast':
         await cmd_broadcast(client, message)
     elif command == 'stat':
@@ -199,6 +201,7 @@ USER_HELP = """
 │ /my_stat               Usage + premium info
 │ /watch <title>         Watchlist (get notified)
 │ /watchlist             Your watched titles
+│ /buy_premium           ⭐ Get premium (Stars)
 │ /help                  This menu
 ╰─────────────────────
 
@@ -3208,3 +3211,39 @@ async def cmd_premium(client, message: Message):
     )
 
     await message.reply_text(help_text, reply_markup=keyboard)
+
+
+async def cmd_buy_premium(client, message: Message):
+    """User-facing premium purchase menu (Telegram Stars)."""
+    from .premium_payments import build_plans_keyboard, format_plans_text
+    from .config import PREMIUM_STARS_ENABLED
+    from .premium_management import get_download_quota_status
+
+    uid = message.from_user.id
+
+    if not PREMIUM_STARS_ENABLED:
+        return await message.reply_text(
+            "⭐ **Premium**\n\n"
+            "Purchases are temporarily unavailable. Please contact an admin "
+            "to get premium access."
+        )
+
+    keyboard = build_plans_keyboard()
+    if keyboard is None:
+        return await message.reply_text(
+            "⭐ Premium plans are not configured yet. Please try again later.")
+
+    text = format_plans_text()
+    try:
+        status = await get_download_quota_status(uid)
+        if status.get("premium"):
+            used = status.get("used", 0)
+            text += f"\n\n✅ You're already premium · {used} downloads today"
+        else:
+            remaining = status.get("remaining")
+            if remaining is not None:
+                text += f"\n\n📥 Free tier: {remaining} downloads left today"
+    except Exception as e:
+        print(f"⚠️ buy_premium status failed: {e}")
+
+    await message.reply_text(text, reply_markup=keyboard)

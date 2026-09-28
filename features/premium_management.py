@@ -8,7 +8,10 @@ and controlling premium features.
 
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Tuple
-from .database import premium_users_col, premium_features_col
+import asyncio
+from .config import (FREE_DOWNLOAD_DAILY_LIMIT, PREMIUM_DOWNLOAD_DAILY_LIMIT,
+                     PREMIUM_EXPIRY_WARN_DAYS)
+from .database import premium_users_col, premium_features_col, users_col
 from .user_management import log_action
 
 
@@ -443,5 +446,201 @@ async def cleanup_expired_premium():
 
     except Exception as e:
         print(f"Error cleaning up expired premium users: {e}")
+
+
+# ------------------------------------------------------------------ #
+# Daily download quota (tier-based gates)                             #
+# ------------------------------------------------------------------ #
+# Free users get FREE_DOWNLOAD_DAILY_LIMIT downloads/day; premium users
+# get PREMIUM_DOWNLOAD_DAILY_LIMIT (0 = unlimited). Counters live on the
+# user doc (download_day / downloads_today) so there is no extra collection.
+
+def _day_key(now: datetime) -> str:
+    """UTC day key used to roll the per-day download counter."""
+    return now.strftime("%Y-%m-%d")
+
+
+async def check_download_quota(user_id: int) -> Tuple[bool, Optional[int], int, Optional[str]]:
+    """Check whether a user may download right now.
+
+    Returns ``(allowed, remaining, limit, message)`` where ``limit`` 0 means
+    unlimited and ``remaining`` is None for unlimited. The premium lookup only
+    runs once the free allowance is exhausted, so the common path is a single
+    cheap read. Any DB error fails OPEN (allow) so a hiccup never blocks users.
+    """
+    now = datetime.now(timezone.utc)
+    today = _day_key(now)
+    free_limit = FREE_DOWNLOAD_DAILY_LIMIT
+
+    try:
+        doc = await users_col.find_one({"user_id": user_id})
+    except Exception:
+        return True, None, free_limit, None
+
+    count = 0
+    if isinstance(doc, dict) and doc.get("download_day") == today:
+        try:
+            count = int(doc.get("downloads_today") or 0)
+        except (TypeError, ValueError):
+            count = 0
+
+    # Fast path: free tier still has room (or free is unlimited).
+    if free_limit <= 0 or count < free_limit:
+        return True, (None if free_limit <= 0 else free_limit - count), \
+            max(free_limit, 0), None
+
+    # At the free cap - premium may raise (or lift) the limit.
+    try:
+        premium = await is_premium_user(user_id)
+    except Exception:
+        premium = False
+    limit = PREMIUM_DOWNLOAD_DAILY_LIMIT if premium else free_limit
+
+    if limit <= 0:
+        return True, None, 0, None
+    if count < limit:
+        return True, limit - count, limit, None
+
+    reset_at = (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    message = (
+        f"🚫 **Daily download limit reached**\n\n"
+        f"You've used {count}/{limit} downloads today.\n"
+        f"Limit resets at {reset_at.strftime('%H:%M UTC')}.\n\n"
+        f"⭐ Premium lifts this limit - use /buy_premium."
+    )
+    return False, 0, limit, message
+
+
+async def record_download(user_id: int) -> int:
+    """Increment the caller's daily download counter (resets on a new day).
+
+    Returns the new count. Best-effort: failures are swallowed so a stats
+    hiccup never breaks a download.
+    """
+    now = datetime.now(timezone.utc)
+    today = _day_key(now)
+    try:
+        doc = await users_col.find_one({"user_id": user_id})
+    except Exception:
+        doc = None
+    if isinstance(doc, dict) and doc.get("download_day") == today:
+        try:
+            new_count = int(doc.get("downloads_today") or 0) + 1
+        except (TypeError, ValueError):
+            new_count = 1
+    else:
+        new_count = 1
+    try:
+        await users_col.update_one(
+            {"user_id": user_id},
+            {"$set": {"download_day": today, "downloads_today": new_count}},
+            upsert=True,
+        )
+    except Exception as e:
+        print(f"⚠️ record_download failed for {user_id}: {e}")
+    return new_count
+
+
+async def get_download_quota_status(user_id: int) -> Dict:
+    """Human-facing quota snapshot for /my_stat + /premium info."""
+    now = datetime.now(timezone.utc)
+    today = _day_key(now)
+    premium = await is_premium_user(user_id)
+    limit = PREMIUM_DOWNLOAD_DAILY_LIMIT if premium else FREE_DOWNLOAD_DAILY_LIMIT
+    used = 0
+    try:
+        doc = await users_col.find_one({"user_id": user_id})
+        if isinstance(doc, dict) and doc.get("download_day") == today:
+            used = int(doc.get("downloads_today") or 0)
+    except Exception:
+        pass
+    return {"premium": premium, "limit": limit, "used": used,
+            "remaining": None if limit <= 0 else max(0, limit - used)}
+
+
+# ------------------------------------------------------------------ #
+# Premium expiry reminders (DM 3d / 1d before)                        #
+# ------------------------------------------------------------------ #
+
+async def _send_expiry_warning(user_id: int, days_left: int, expiry: datetime) -> bool:
+    """DM a premium user that their subscription is about to lapse."""
+    from .config import client
+    if client is None or user_id is None:
+        return False
+    try:
+        await client.send_message(
+            user_id,
+            f"⏳ **Premium expiring soon**\n\n"
+            f"Your premium access expires in {days_left} day(s) "
+            f"(on {expiry.strftime('%Y-%m-%d')}).\n\n"
+            f"Renew anytime with /buy_premium to avoid losing premium features.",
+        )
+        return True
+    except Exception as e:
+        print(f"⚠️ premium expiry DM failed for {user_id}: {e}")
+        return False
+
+
+async def warn_expiring_premium(warn_days=None, now: datetime = None) -> int:
+    """DM users whose premium lapses within a threshold (once per threshold).
+
+    Thresholds are applied SMALLEST-first: a user inside several windows gets
+    only the tightest applicable reminder, and every larger threshold is then
+    marked as warned so a later pass cannot emit a back-dated "3 days left"
+    message to someone with hours remaining. Returns the number of DMs sent.
+    """
+    thresholds = sorted(warn_days or PREMIUM_EXPIRY_WARN_DAYS)
+    now = now or datetime.now(timezone.utc)
+    try:
+        docs = await premium_users_col.find({}).to_list(length=2000)
+    except Exception as e:
+        print(f"⚠️ warn_expiring_premium query failed: {e}")
+        return 0
+
+    sent = 0
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        expiry = doc.get("expiry_date")
+        if not expiry:
+            continue
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        delta = expiry - now
+        if delta.total_seconds() <= 0:
+            continue  # already expired - no reminder
+        days_left = delta.days
+        for idx, threshold in enumerate(thresholds):
+            flag = f"warned_{threshold}d"
+            if days_left <= threshold and not doc.get(flag):
+                if await _send_expiry_warning(doc.get("user_id"), days_left, expiry):
+                    sent += 1
+                updates = {flag: True}
+                # Larger thresholds no longer apply (user is already closer
+                # to expiry): mark them so they never fire later.
+                for larger in thresholds[idx + 1:]:
+                    updates[f"warned_{larger}d"] = True
+                try:
+                    await premium_users_col.update_one(
+                        {"user_id": doc.get("user_id")}, {"$set": updates})
+                except Exception as e:
+                    print(f"⚠️ expiry flag update failed: {e}")
+                break
+    return sent
+
+
+async def start_premium_expiry_monitor(interval_minutes: int = 60):
+    """Background task: DM premium users before their access lapses.
+
+    Runs warn_expiring_premium every `interval_minutes` minutes. Started from
+    features/bot.py alongside the other background monitors.
+    """
+    while True:
+        try:
+            await warn_expiring_premium()
+        except Exception as e:
+            print(f"⚠️ Premium expiry monitor error: {e}")
+        await asyncio.sleep(interval_minutes * 60)
 
 

@@ -8,7 +8,8 @@ It sets up the Pyroblack client, registers handlers, and manages the bot lifecyc
 import sys
 import asyncio
 from pyrogram import Client, filters
-from pyrogram.handlers import MessageHandler, InlineQueryHandler, CallbackQueryHandler
+from pyrogram.handlers import (MessageHandler, InlineQueryHandler,
+                               CallbackQueryHandler, PreCheckoutQueryHandler)
 
 # Import from our modules
 from .config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL, BOT_VERSION
@@ -24,6 +25,8 @@ from .webapp import start_webapp, set_stats_provider
 from .statistics import collect_comprehensive_stats, cache_bot_info
 from .keepalive import start_keep_alive
 from .database_scan import start_db_rescan_monitor
+from .premium_payments import handle_pre_checkout, handle_successful_payment
+from .premium_management import start_premium_expiry_monitor
 
 # -------------------------
 # CUSTOM BOT CLASS WITH iter_messages
@@ -148,6 +151,10 @@ async def main():
             app.add_handler(MessageHandler(on_message))
             app.add_handler(InlineQueryHandler(inline_handler))
             app.add_handler(CallbackQueryHandler(callback_handler))
+            # Telegram Stars premium payments
+            app.add_handler(PreCheckoutQueryHandler(handle_pre_checkout))
+            app.add_handler(MessageHandler(handle_successful_payment,
+                                           filters.successful_payment))
 
             # Register RawUpdateHandler for real-time deletions (if available)
             try:
@@ -172,6 +179,9 @@ async def main():
 
             # Scheduled /update_db: periodically rescan channels for new content
             asyncio.create_task(start_db_rescan_monitor())
+
+            # Premium expiry reminders (DM 3d / 1d before lapse)
+            asyncio.create_task(start_premium_expiry_monitor())
 
             # Self-keep-alive: ping the public URL so managed hosts (HF
             # Spaces) never put the container to sleep. No-op when no public

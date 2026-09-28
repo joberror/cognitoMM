@@ -40,6 +40,7 @@ for path in (ROOT_DIR, os.path.dirname(os.path.abspath(__file__))):
 import features.config
 import features.file_deletion as file_deletion_module
 import features.callbacks as callbacks_module
+import features.premium_management as premium_management_module
 from features.config import file_deletions, bulk_downloads
 from features.file_deletion import (
     track_file_for_deletion,
@@ -419,7 +420,9 @@ def test_integration_points():
              patch.object(callbacks_module, 'movies_col', AsyncMock()) as movies_mock, \
              patch.object(callbacks_module, 'track_file_for_deletion', AsyncMock()) as mock_track, \
              patch.object(callbacks_module, 'should_process_command_for_user', AsyncMock(return_value=True)), \
-             patch.object(callbacks_module, 'has_accepted_terms', AsyncMock(return_value=True)):
+             patch.object(callbacks_module, 'has_accepted_terms', AsyncMock(return_value=True)), \
+             patch.object(premium_management_module, 'check_download_quota', AsyncMock(return_value=(True, 10, 10, None))), \
+             patch.object(premium_management_module, 'record_download', AsyncMock(return_value=1)):
             
             movies_mock.find_one.return_value = None  # no custom DB caption
             

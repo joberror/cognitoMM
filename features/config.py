@@ -27,7 +27,7 @@ BOT_START_TIME = datetime.now(timezone.utc)
 # `scripts/bump_version.py --set X.Y.Z`. The pre-commit hook fails commits
 # that add a new feature without bumping this constant. The webapp `/`
 # endpoint exposes it (overridable via the BOT_VERSION env var).
-BOT_VERSION = "1.11.0"
+BOT_VERSION = "1.12.0"
 
 # -------------------------
 # CONFIG / ENV
@@ -48,6 +48,45 @@ AUTO_INDEX_DEFAULT = os.getenv("AUTO_INDEXING", "True").lower() in ("1", "true",
 TMDB_API = os.getenv("TMDB_API", "")               # TMDb API key for request feature
 START_MESSAGE = os.getenv("START_MESSAGE", os.getenv("START_MESSAGEE", "Welcome to the bot! Use buttons below to navigate."))
 SUPPORT_LINK = os.getenv("SUPPORT_LINK", "https://t.me/")
+
+# -------------------------
+# Premium monetization (Telegram Stars)
+# -------------------------
+# Stars purchases use currency "XTR" (no external payment provider needed).
+PREMIUM_STARS_ENABLED = os.getenv("PREMIUM_STARS_ENABLED", "true").lower() in ("1", "true", "yes")
+PREMIUM_STARS_CURRENCY = "XTR"
+
+
+def _parse_premium_plans(raw: str) -> dict:
+    """Parse "key:days:stars,key:days:stars" into {key: {key, days, stars}}."""
+    plans = {}
+    for part in (raw or "").split(","):
+        bits = part.strip().split(":")
+        if len(bits) != 3:
+            continue
+        key, days, stars = (b.strip() for b in bits)
+        if not key or key in plans:
+            continue
+        try:
+            days_i, stars_i = int(days), int(stars)
+        except ValueError:
+            continue
+        if days_i <= 0 or stars_i <= 0:
+            continue
+        plans[key] = {"key": key, "days": days_i, "stars": stars_i}
+    return plans
+
+
+PREMIUM_PLANS = _parse_premium_plans(
+    os.getenv("PREMIUM_PLANS", "1m:30:50,3m:90:120,6m:180:200,12m:365:350"))
+# Days-before-expiry at which a DM reminder is sent (largest first applied).
+PREMIUM_EXPIRY_WARN_DAYS = [
+    int(x) for x in os.getenv("PREMIUM_EXPIRY_WARN_DAYS", "3,1").split(",")
+    if x.strip().lstrip("-").isdigit() and int(x) > 0
+] or [3, 1]
+# Daily download quota by tier (0 = unlimited).
+FREE_DOWNLOAD_DAILY_LIMIT = int(os.getenv("FREE_DOWNLOAD_DAILY_LIMIT", "10"))
+PREMIUM_DOWNLOAD_DAILY_LIMIT = int(os.getenv("PREMIUM_DOWNLOAD_DAILY_LIMIT", "0"))
 
 # Broadcast Configuration
 BROADCAST_RATE_LIMIT = int(os.getenv("BROADCAST_RATE_LIMIT", "25"))  # messages per second

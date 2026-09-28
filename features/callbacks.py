@@ -95,6 +95,20 @@ async def callback_handler(client, callback_query: CallbackQuery):
             )
             return
 
+        if data.startswith("buyplan:"):
+            # Premium purchase: send a Telegram Stars invoice for the plan.
+            plan_key = data.split(":", 1)[1]
+            from .premium_payments import send_premium_invoice
+            ok, err = await send_premium_invoice(
+                client, callback_query.from_user.id, plan_key,
+                user_id=callback_query.from_user.id)
+            if ok:
+                await callback_query.answer("⭐ Invoice sent - complete the payment in Telegram!")
+            else:
+                await callback_query.answer(f"⚠️ {err or 'Could not start payment.'}",
+                                            show_alert=True)
+            return
+
         if data.startswith("choose:"):
             # In-place pick filter: replace the search message with only the
             # chosen title's copies (series get per-season pick buttons, all
@@ -135,6 +149,12 @@ async def callback_handler(client, callback_query: CallbackQuery):
             _, channel_id, message_id = data.split(":")
             channel_id = int(channel_id)
             message_id = int(message_id)
+
+            # Daily download quota gate (free vs premium tier).
+            from .premium_management import check_download_quota, record_download
+            allowed, remaining, limit, quota_msg = await check_download_quota(user_id)
+            if not allowed:
+                return await callback_query.answer(quota_msg, show_alert=True)
 
             await callback_query.answer("📥 Fetching file...")
             
@@ -199,6 +219,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
                         user_id=callback_query.from_user.id,
                         message_id=sent_message.id
                     )
+                    # Count against the daily download quota.
+                    await record_download(callback_query.from_user.id)
                     
                     # Send immediate notification about auto-deletion
                     try:
@@ -480,6 +502,12 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 await callback_query.answer("❌ You can only download your own searches", show_alert=True)
                 return
 
+            # Daily download quota gate (bulk counts each delivered file).
+            from .premium_management import check_download_quota, record_download
+            allowed, remaining, limit, quota_msg = await check_download_quota(user_id)
+            if not allowed:
+                return await callback_query.answer(quota_msg, show_alert=True)
+
             files = bulk_data['files']
             await callback_query.answer(f"📦 Fetching {len(files)} files...")
             
@@ -561,6 +589,10 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     user_id=callback_query.from_user.id,
                     message_id=msg_id
                 )
+
+            # Count each delivered file against the daily download quota.
+            for _ in range(success_count):
+                await record_download(callback_query.from_user.id)
 
             # Send notification about auto-deletion for bulk files
             if sent_messages:

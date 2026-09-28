@@ -38,6 +38,7 @@ This is a Telegram bot hosted on Hugging Face Spaces.
   watched title (or a new copy) is indexed
 - `/watchlist` — your watched titles (plain HTML, **tap any title to copy**) · `/my_history` — your searches (plain HTML, **tap any query to copy**, grouped by date)
 - `/my_stat` — usage + premium info · `/premium` — premium info/management
+- `/buy_premium` — buy premium with Telegram Stars (activates on payment)
 - `/help` — full command menu
 
 **👑 Admin**
