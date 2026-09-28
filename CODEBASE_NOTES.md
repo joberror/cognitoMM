@@ -201,7 +201,11 @@ All callbacks (except `terms#`) require `should_process_command_for_user` + term
   (started in `bot.py`) runs `incremental_rescan` per channel every
   `DB_RESCAN_INTERVAL_MINUTES`; cursor stored in `settings_col`
   (`scan_cursor:<channel_id>`), first run bounded to the last 1000 msgs.
-- **Admin `/logs [n]`** — recent `logs_col` entries in-chat. **`/random`** —
+- **Admin `/logs [n]`** — recent `logs_col` entries in-chat. **`/queue`** —
+  live ops snapshot: index-queue depth vs the deque cap (with a
+  near-capacity drop warning), queue-processor liveness (read via the
+  `config` module because `indexing.py` rebinds the global), orphan-prune
+  stats, auto-indexing flag and per-channel rescan cursors. **`/random`** —
   random indexed title (poster photo when available). **`/genres`** — browse
   by stored `tmdb_genres` (aggregation with counts; `$regex` array match).
   `/genres <name>` is paginated (12/page) with a `🔤 A–Z`/`🆕 Newest`/`⭐

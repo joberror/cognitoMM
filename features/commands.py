@@ -20,7 +20,7 @@ from .utils import wait_for_user_input, cleanup_expired_bulk_downloads, resolve_
 
 from .user_management import is_admin, has_accepted_terms, load_terms_and_privacy, log_action, check_banned, check_terms_acceptance, should_process_command
 from .config import indexing_lock, message_queue
-from .statistics_store import indexing_stats
+from .statistics_store import indexing_stats, prune_stats
 from .search import (
     MAX_SEASON_BUTTONS,
     SEARCH_HINT,
@@ -134,6 +134,8 @@ async def handle_command(client, message: Message):
         await cmd_trending(client, message)
     elif command == 'indexing_stats':
         await cmd_indexing_stats(client, message)
+    elif command == 'queue':
+        await cmd_queue(client, message)
     elif command == 'reset_stats':
         await cmd_reset_stats(client, message)
     elif command == 'update_db':
@@ -242,6 +244,7 @@ ADMIN_HELP = """
 │ /update_db             Cleanup duplicates/orphans
 │ /manual_deletion <t>   Delete by title
 │ /indexing_stats        Diagnose indexing skips
+│ /queue                 Live queue + background ops
 │ /reset_stats           Reset counters
 │ /logs [n]              Recent audit log entries
 │ /enrich [n]            Backfill TMDb metadata
@@ -1870,6 +1873,102 @@ async def cmd_indexing_stats(client, message: Message):
 
     # Log statistics viewing
     await log_action("indexing_stats_viewed", by=message.from_user.id, extra=indexing_stats)
+
+async def cmd_queue(client, message: Message):
+    """Admin: live ops snapshot - index queue, processor, prune + rescan state.
+
+    Surfaces the runtime health that /indexing_stats (cumulative counters)
+    doesn't: current queue depth vs the deque cap (overflow silently drops
+    the oldest message), whether the queue processor task is alive, the last
+    orphan-prune run, and per-channel rescan cursors.
+    """
+    from . import config as _config
+
+    if not await is_admin(message.from_user.id):
+        return await message.reply_text("🚫 Admins only.")
+
+    # Queue depth vs cap (collections.deque silently discards from the left
+    # once full - flag it before messages start disappearing).
+    try:
+        depth = len(message_queue)
+        cap = message_queue.maxlen or 0
+    except Exception:
+        depth, cap = 0, 0
+    fill = f"{depth}/{cap}" if cap else str(depth)
+    warn = ""
+    if cap and depth >= cap * 0.8:
+        warn = ("\n⚠️ QUEUE NEAR CAPACITY - oldest messages will be dropped "
+                "once full (burst traffic).")
+
+    # Processor liveness. NOTE: read via the config module - indexing.py
+    # rebinds the global on (re)start, so a from-import would go stale.
+    task = _config.queue_processor_task
+    if task is None:
+        proc = "not started (starts on first auto-indexed message)"
+    else:
+        try:
+            if task.done():
+                try:
+                    err = task.exception()
+                except Exception:
+                    err = None
+                proc = f"STOPPED{f' - {err}' if err else ''} (restarts on next message)"
+            elif task.cancelled():
+                proc = "CANCELLED (restarts on next message)"
+            else:
+                proc = "running"
+        except Exception:
+            proc = "unknown"
+
+    lines = [
+        "```",
+        "QUEUE & BACKGROUND OPS",
+        "",
+        f"Index queue: {fill} pending{warn}",
+        f"Processor: {proc}",
+        f"Indexing: {indexing_stats.get('total_attempts', 0)} attempts · "
+        f"{indexing_stats.get('successful_inserts', 0)} ok · "
+        f"{indexing_stats.get('duplicate_errors', 0)} dup · "
+        f"{indexing_stats.get('other_errors', 0)} err",
+        f"Orphan prune: {prune_stats.get('runs', 0)} runs · "
+        f"last {prune_stats.get('last_run') or 'never'} · "
+        f"verified {prune_stats.get('last_verified', 0)} · "
+        f"deleted {prune_stats.get('last_deleted', 0)}"
+        + (" · PAUSED on FloodWait" if prune_stats.get("last_paused") else "")
+        + (f" · ERROR {prune_stats.get('last_error')}" if prune_stats.get("last_error") else ""),
+    ]
+
+    # Auto-indexing flag + per-channel rescan cursors (best-effort; the bot
+    # stays useful even when the DB hiccups).
+    try:
+        s = await settings_col.find_one({"k": "auto_indexing"})
+        auto = s["v"] if s and "v" in s else AUTO_INDEX_DEFAULT
+        lines.append(f"Auto-indexing: {'ON' if auto else 'OFF'}")
+    except Exception as e:
+        lines.append(f"Auto-indexing: unknown ({e})")
+    try:
+        cursors = await settings_col.find(
+            {"k": {"$regex": "^scan_cursor:"}}).to_list(length=100)
+        channels = await channels_col.find({}).to_list(length=100)
+        titles = {c.get("channel_id"): c.get("channel_title", "?") for c in channels}
+        if cursors:
+            lines.append("Rescan cursors:")
+            for cur in sorted(cursors, key=lambda c: str(c.get("k"))):
+                try:
+                    ch_id = int(str(cur.get("k", "")).split(":", 1)[1])
+                except (ValueError, IndexError):
+                    continue
+                lines.append(f"  {titles.get(ch_id, ch_id)}: msg {cur.get('v')}")
+        else:
+            lines.append("Rescan cursors: none yet (first rescan pending)")
+    except Exception as e:
+        lines.append(f"Rescan cursors: unavailable ({e})")
+
+    lines.append("```")
+    await message.reply_text("\n".join(lines),
+                             link_preview_options=LinkPreviewOptions(is_disabled=True))
+    await log_action("queue_viewed", by=message.from_user.id,
+                     extra={"depth": depth, "processor": proc})
 
 async def cmd_reset_stats(client, message: Message):
     """Reset indexing statistics counters"""

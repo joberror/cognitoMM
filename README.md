@@ -47,7 +47,7 @@ This is a Telegram bot hosted on Hugging Face Spaces.
 - `/add_channel` / `/remove_channel` / `/manage_channel` / `/index_channel`
   `/toggle_indexing` — channel management & indexing
 - `/update_db` — reconcile a channel (also runs on a background schedule)
-- `/manual_deletion <title>` · `/indexing_stats` · `/reset_stats`
+- `/manual_deletion <title>` · `/indexing_stats` · `/queue` · `/reset_stats`
 - `/stat` / `/quickstat` — statistics dashboard (incl. prune stats, CSV export)
 - `/broadcast` · `/ban_user` / `/unban_user` · `/promote` / `/demote`
 - `/reset_channel` · `/reset` (full wipe, confirmed)

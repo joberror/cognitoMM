@@ -21,14 +21,14 @@ extends):
    A spy constructor replaces InlineQueryResultArticle and records every
    kwarg call, so reverting to ``thumb_url`` fails the assertion.
 
-3. The link_preview_options migration (14 call sites across logger.py,
+3. The link_preview_options migration (21 call sites across logger.py,
    search.py, callbacks.py, commands.py): every send/edit path that once
    passed ``disable_web_page_preview=True`` must now pass
    ``link_preview_options=LinkPreviewOptions(is_disabled=True)``. The
    receiver methods (reply_text / edit_text / edit_message_text /
    send_message) are spied on via recorder fakes, and every recorded call is
    asserted to carry the modern kwarg. A source-level scan additionally pins
-   the exact per-file count of all 14 sites, so a partial revert anywhere is
+   the exact per-file count of all 21 sites, so a partial revert anywhere is
    caught even if a flow is not driven.
 
 All handlers run against injected fakes - no real DB or Telegram access.
@@ -642,7 +642,7 @@ async def test_trending_callback_uses_link_preview_options():
 
 
 def test_link_preview_options_migration_fully_applied():
-    """Source-level scan: pins ALL link_preview_options call sites (20).
+    """Source-level scan: pins ALL link_preview_options call sites (21).
 
     The exact per-file counts are the pin: adding a site or refactoring the
     kwarg construction (e.g. into a helper) fails until the counts here are
@@ -650,13 +650,14 @@ def test_link_preview_options_migration_fully_applied():
     grew from 14 to 18 when the /random, /genres, /logs commands were added;
     the pick-filter refactor then moved the page:/choose: renders from
     callbacks.py into search.py, shifting 2 sites: search 1->3, callbacks 3->1;
-    the genre pick view added a site in callbacks.py: 1->2.)
+    the genre pick view added a site in callbacks.py: 1->2; the /queue ops
+    command added one in commands.py: 14->15.)
     """
     expected = {
         "features/logger.py": 1,
         "features/search.py": 3,
         "features/callbacks.py": 2,
-        "features/commands.py": 14,
+        "features/commands.py": 15,
     }
     total = 0
     for rel, count in expected.items():
@@ -668,7 +669,7 @@ def test_link_preview_options_migration_fully_applied():
         assert found == count, \
             f"{rel}: expected {count} link_preview_options sites, found {found}"
         total += found
-    assert total == 20, f"expected 20 total sites, found {total}"
+    assert total == 21, f"expected 21 total sites, found {total}"
 
 
 # ---------------------------

@@ -47,6 +47,7 @@ router + this file together.
 | `/update_db` | Reconcile a channel's messages vs the index (interactive) |
 | `/manual_deletion <title>` | Delete indexed entries by title |
 | `/indexing_stats` | Diagnose indexing skips |
+| `/queue` | Live ops snapshot: index queue depth vs cap (drop warning), processor liveness, prune stats, auto-indexing flag, per-channel rescan cursors |
 | `/reset_stats` | Reset indexing counters |
 | `/logs [n]` | View the most recent audit-log entries from `logs_col` (default 10, max 50) |
 | `/enrich [n]` | Backfill TMDb metadata (poster/genres/rating/IMDb) for entries missing it |
