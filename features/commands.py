@@ -180,6 +180,7 @@ USER_HELP = """
 │ /f <title>             Quick search
 │ /search <title>        Smart search (exact + fuzzy)
 │ /search -e <title>     Exact title only
+│ Filters: /search Dune 2021 1080p movie
 ╰─────────────────────
 
 ╭─ 📌 Discover
@@ -383,30 +384,40 @@ async def cmd_search(client, message: Message):
     uid = message.from_user.id
     parts = message.text.split()
     if len(parts) < 2:
-        return await message.reply_text("Usage: /search <title>")
+        return await message.reply_text(
+            "Usage: /search <title> [year] [quality] [movie|series]\n"
+            "Examples:\n"
+            "/search Dune\n"
+            "/search Dune 2021\n"
+            "/search Dune 2021 1080p\n"
+            "/search Breaking Bad series\n"
+            "/search -e <title>  (exact title only)"
+        )
 
     # Check for exact search flag
     exact_search = False
     if parts[1] == "-e" and len(parts) >= 3:
         exact_search = True
-        query = " ".join(parts[2:]).strip()
+        raw_query = " ".join(parts[2:]).strip()
     else:
-        query = " ".join(parts[1:]).strip()
+        raw_query = " ".join(parts[1:]).strip()
 
-    # record search history
-    await users_col.update_one({"user_id": uid}, {"$push": {"search_history": {"q": query, "ts": datetime.now(timezone.utc)}}}, upsert=True)
+    # record search history (raw input so /my_history re-search reproduces it)
+    await users_col.update_one({"user_id": uid}, {"$push": {"search_history": {"q": raw_query, "ts": datetime.now(timezone.utc)}}}, upsert=True)
 
     # The search engine (exact + fuzzy matching, exact/fuzzy classification)
-    # lives in search.py - keep a single canonical implementation.
-    search = await perform_search(query, exact_search=exact_search)
+    # lives in search.py - keep a single canonical implementation. Trailing
+    # "<year> <quality> <type>" tokens are parsed there; the raw query is
+    # kept for the header/history while the parsed title drives matching.
+    search = await perform_search(raw_query, exact_search=exact_search)
     all_results = search["results"]
 
     if not all_results:
         if exact_search:
             # No exact matches found - suggest normal search
             await message.reply_text(
-                f"⚠️ No exact matches found for \"{query}\"\n\n"
-                f"💡 **Try normal search:** /search {query}\n"
+                f"⚠️ No exact matches found for \"{raw_query}\"\n\n"
+                f"💡 **Try normal search:** /search {raw_query}\n"
                 f"🔍 Normal search finds partial and similar titles"
             )
         else:
@@ -415,8 +426,9 @@ async def cmd_search(client, message: Message):
 
     # Create flashy, neat search results
     # Pass client explicitly to avoid relative import issues inside search module
-    await send_search_results(client, message, all_results, query,
-                              exact_ids=search["exact_ids"])
+    await send_search_results(client, message, all_results, raw_query,
+                              exact_ids=search["exact_ids"],
+                              filters=search.get("filters"))
 
 
 

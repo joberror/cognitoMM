@@ -14,7 +14,7 @@ router + this file together.
 | `/start` | Welcome, terms acceptance |
 | `/help` | Show this menu (user + admin sections) |
 | `/f <title>` | Quick search |
-| `/search <title>` | Smart search (exact + fuzzy); `-e` flag for exact only. Code-block result list — one line per title with file count + latest file (`1. Lucky > 2 files > Latest: 1080p | 2.5GB | WebRip`), header with `Titles Found: N (X Exact | Y Fuzzy)` / `Files Found: N (Movie - X | Series - Y)`, and a TMDb Title(s) Information block below (⭐ · 🎭 · IMDb) that survives pagination. Every title gets `Pick [n]` (in-place filter; series also `Pick[n][Sxx]`) + `Get [n]` (latest file) |
+| `/search <title>` | Smart search (exact + fuzzy); `-e` flag for exact only. Append filters after the title: `/search Dune 2021 1080p movie` (year, quality `480p/720p/1080p/2160p/4k`, type `movie/series`; also `year:2021`, `Dune (2021)`). Code-block result list — one line per title with file count + latest file (`1. Lucky > 2 files > Latest: 1080p | 2.5GB | WebRip`), header with applied `Filters:` line, `Titles Found: N (X Exact | Y Fuzzy)` / `Files Found: N (Movie - X | Series - Y)`, and a TMDb Title(s) Information block below (⭐ · 🎭 · IMDb) that survives pagination. Every title gets `Pick [n]` (in-place filter; series also `Pick[n][Sxx]`) + `Get [n]` (latest file) |
 | `/recent` | Newly indexed content (last batch) — plain HTML listing with MOVIES/SERIES sections; **tap a line to copy the `Title (year)` string, ready for `/search`** |
 | `/trending` | TMDb trending movies / shows / new releases (buttons) — `/search`-style lines with ⭐ ratings + clickable IMDb/TMDb links |
 | `/random` | Random indexed title (poster when available; caption uses the `/search` bracket info) |

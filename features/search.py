@@ -38,52 +38,306 @@ def is_exact_title(title, query):
     return len(t) == len(q) or not t[len(q)].isalpha()
 
 
-async def perform_search(query: str, exact_search: bool = False, fuzzy_threshold: int = None):
+# ----------------------------------------------------------------------
+# Search query parsing (``/search Dune 2021 1080p series``)
+# ----------------------------------------------------------------------
+# Trailing-token syntax (filters come AFTER the title so words inside the
+# title are never eaten): a 4-digit year (1900-2099), a quality token
+# (480p/720p/1080p/2160p/4k/UHD/FHD/HD/1080i/480i) and a type token
+# (movie(s)/series/show(s)/tv). Explicit ``key:value`` forms
+# (``year:2021 quality:1080p type:series``) may appear anywhere.
+
+QUALITY_TOKENS = {
+    "480p": "480p",
+    "480i": "480i",
+    "720p": "720p",
+    "1080p": "1080p",
+    "1080i": "1080i",
+    "2160p": "2160p",
+    "4k": "2160p",
+    "uhd": "2160p",
+    "fhd": "1080p",
+    "fullhd": "1080p",
+    "hd": "720p",
+}
+
+TYPE_TOKENS = {
+    "movie": "Movie",
+    "movies": "Movie",
+    "film": "Movie",
+    "films": "Movie",
+    "series": "Series",
+    "show": "Series",
+    "shows": "Series",
+    "tv": "Series",
+    "serial": "Series",
+}
+
+_YEAR_RE = re.compile(r"^(19\d{2}|20\d{2})$")
+_YEAR_KV_RE = re.compile(r"\byear\s*:\s*(19\d{2}|20\d{2})\b", re.IGNORECASE)
+_QUALITY_KV_RE = re.compile(r"\bquality\s*:\s*([^\s]+)", re.IGNORECASE)
+_TYPE_KV_RE = re.compile(r"\btype\s*:\s*(movies?|films?|series|shows?|tv|serial)\b", re.IGNORECASE)
+_PAREN_YEAR_RE = re.compile(r"\(\s*(19\d{2}|20\d{2})\s*\)")
+
+# A trailing type word is only a filter when the rest looks like a real
+# title: stripping "Show" off "The Show" would leave a bare article, so a
+# single remaining article ("the"/"a"/"an") keeps the token as title text.
+# (Single-word titles with a filter — "Dune series" — still strip, since a
+# bare "Dune series" title would otherwise match nothing.)
+_ARTICLE_STOPWORDS = frozenset({"the", "a", "an"})
+
+# DB projection for fuzzy candidate scans (kept narrow so a 500-doc scan
+# stays cheap). Must include every field the renderers/grouping need.
+_CANDIDATE_PROJECTION = {
+    "title": 1, "year": 1, "quality": 1, "channel_title": 1,
+    "message_id": 1, "channel_id": 1, "type": 1, "season": 1,
+    "episode": 1, "rip": 1,
+}
+
+# Hard caps so one search can never pull an unbounded cursor into memory.
+FUZZY_CANDIDATE_LIMIT = 500
+FILTER_ONLY_LIMIT = 200
+TEXT_SEARCH_LIMIT = 50
+
+
+def _normalize_quality_token(token: str):
+    """Map a raw quality token to the canonical DB quality (or None)."""
+    if not token:
+        return None
+    t = str(token).strip().lower().strip("(),[]")
+    if t in QUALITY_TOKENS:
+        return QUALITY_TOKENS[t]
+    # Fall back to the shared normalizer (handles 720/1080/2160/FHD/4K...).
+    return normalize_resolution(t)
+
+
+def parse_search_query(raw: str) -> dict:
+    """Split ``/search`` input into title + structured filters.
+
+    Returns ``{"title": str, "year": int|None, "quality": str|None,
+    "type": "Movie"|"Series"|None, "raw": str}``. Only TRAILING filter
+    tokens are stripped so a title like ``The Show`` keeps its words; the
+    explicit ``year:/quality:/type:`` forms are extracted from anywhere.
+    A lone year-like query (``/search 2012``) stays a title, not a filter.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return {"title": "", "year": None, "quality": None, "type": None, "raw": raw or ""}
+
+    year = None
+    quality = None
+    type_ = None
+
+    # Explicit key:value forms (removed wherever they appear).
+    m = _YEAR_KV_RE.search(text)
+    if m:
+        year = int(m.group(1))
+        text = (_YEAR_KV_RE.sub(" ", text, count=1))
+    m = _QUALITY_KV_RE.search(text)
+    if m:
+        quality = _normalize_quality_token(m.group(1))
+        text = (_QUALITY_KV_RE.sub(" ", text, count=1))
+    m = _TYPE_KV_RE.search(text)
+    if m:
+        type_ = TYPE_TOKENS.get(m.group(1).lower())
+        text = (_TYPE_KV_RE.sub(" ", text, count=1))
+
+    # Parenthesised year anywhere ("Dune (2021)") — parser-style filenames
+    # use this shape, so users paste it naturally.
+    m = _PAREN_YEAR_RE.search(text)
+    if m and year is None:
+        year = int(m.group(1))
+        text = (_PAREN_YEAR_RE.sub(" ", text, count=1))
+
+    text = re.sub(r"\s+", " ", text).strip()
+    tokens = text.split()
+    original_count = len(tokens)
+
+    # Trailing filter tokens only (loop so "Dune 2021 1080p movie" all pops).
+    while tokens:
+        t = tokens[-1].strip("(),[]")
+        tl = t.lower()
+        if _YEAR_RE.match(tl) and year is None:
+            year = int(tl)
+            tokens.pop()
+            continue
+        q = _normalize_quality_token(tl)
+        if q is not None and quality is None and tl in QUALITY_TOKENS:
+            quality = q
+            tokens.pop()
+            continue
+        if tl in TYPE_TOKENS and type_ is None:
+            remaining = tokens[:-1]
+            if len(remaining) == 1 and remaining[0].lower() in _ARTICLE_STOPWORDS:
+                break  # e.g. "The Show" — the word is the title, not a filter
+            type_ = TYPE_TOKENS[tl]
+            tokens.pop()
+            continue
+        break
+
+    title = " ".join(tokens).strip(" -:;")
+    if not title:
+        # Everything was a filter token (e.g. "/search 2021" or
+        # "/search 1080p"): keep the raw text as the title and drop the
+        # filters so a film literally called "2012" still finds itself.
+        # Multi-token filter-only queries ("/search 2021 1080p") keep the
+        # filters with an empty title (list-all-matching).
+        if original_count <= 1:
+            return {"title": text.strip(" -:;"), "year": None,
+                    "quality": None, "type": None, "raw": raw}
+        title = ""
+
+    return {"title": title, "year": year, "quality": quality, "type": type_, "raw": raw}
+
+
+def _build_base_filter(year=None, quality=None, type_=None) -> dict:
+    """Mongo filter for the structured facets (year/quality/type)."""
+    filt = {}
+    if year is not None:
+        try:
+            y = int(year)
+        except (TypeError, ValueError):
+            y = None
+        if y is not None:
+            # Year is stored as int by the parser, but tolerate legacy
+            # string values so old docs still match.
+            filt["year"] = {"$in": [y, str(y)]}
+    if quality:
+        filt["quality"] = {"$regex": f"^{re.escape(str(quality))}$", "$options": "i"}
+    if type_:
+        t = str(type_).lower()
+        if t == "movie":
+            filt["type"] = {"$regex": "^movie$", "$options": "i"}
+        elif t in ("series", "tv", "show"):
+            filt["type"] = {"$regex": "^(series|tv|show)$", "$options": "i"}
+    return filt
+
+
+def format_active_filters(year=None, quality=None, type_=None) -> str:
+    """Human line for the results header, e.g. ``year=2021 · 1080p · Series``."""
+    parts = []
+    if year is not None:
+        parts.append(f"year={year}")
+    if quality:
+        parts.append(str(quality))
+    if type_:
+        parts.append(str(type_))
+    return " · ".join(parts)
+
+
+async def perform_search(query: str, exact_search: bool = False, fuzzy_threshold: int = None,
+                         year=None, quality=None, type_=None):
     """
     Perform a search for movies/series in the database.
 
     Args:
-        query: Search query string
+        query: Search query string (title text; may be the raw ``/search``
+            input — trailing ``<year> <quality> <type>`` tokens are parsed
+            out automatically unless explicit facet kwargs are given).
         exact_search: If True, only exact title matches are returned
         fuzzy_threshold: Threshold for fuzzy matching (default: FUZZY_THRESHOLD from config)
+        year: Optional year facet (int or str). Overrides any year parsed
+            from ``query`` when not None.
+        quality: Optional quality facet (e.g. "1080p"). Same override rule.
+        type_: Optional "Movie" / "Series" facet. Same override rule.
 
     Returns:
         Dict with ``results`` (list of matching copy documents), ``exact_ids``
         (set of ``_id`` values whose title counts as an exact match - empty for
-        ``exact_search`` mode where every result is exact).
+        ``exact_search`` mode where every result is exact), plus ``title``
+        (parsed title text) and ``filters`` (applied facet dict).
     """
     if fuzzy_threshold is None:
         fuzzy_threshold = FUZZY_THRESHOLD
 
+    # Split trailing "<year> <quality> <type>" tokens out of the raw input.
+    # Explicit kwargs win over parsed tokens so programmatic callers can
+    # override (e.g. history re-search passes the stored raw query through).
+    parsed = parse_search_query(query)
+    title = parsed["title"]
+    if year is None:
+        year = parsed["year"]
+    if quality is None:
+        quality = parsed["quality"]
+    if type_ is None:
+        type_ = parsed["type"]
+    base_filter = _build_base_filter(year=year, quality=quality, type_=type_)
+    filters = {"year": year, "quality": quality, "type": type_}
+
+    def _with_title(extra: dict) -> dict:
+        filt = dict(base_filter)
+        filt.update(extra)
+        return filt
+
     if exact_search:
         # Exact search mode - only look for exact title matches
-        exact_pattern = f"^{re.escape(query)}$"
-        exact = await movies_col.find({"title": {"$regex": exact_pattern, "$options": "i"}}).to_list(length=None)
-        return {"results": exact, "exact_ids": {r.get("_id") for r in exact}}
+        exact_pattern = f"^{re.escape(title)}$" if title else "^$"
+        exact = await movies_col.find(
+            _with_title({"title": {"$regex": exact_pattern, "$options": "i"}})
+        ).to_list(length=None)
+        return {"results": exact, "exact_ids": {r.get("_id") for r in exact},
+                "title": title, "filters": filters}
+
+    # Normal search: $text fast path -> regex substring -> fuzzy re-rank.
+    # Every stage carries the facet filter server-side so a query like
+    # "Dune 2021 1080p" never pulls unrelated copies into memory.
+    seen_ids = set()
+    all_results = []
+
+    async def _text_candidates():
+        if not title or len(title.strip()) < 3:
+            return None
+        try:
+            filt = _with_title({"$text": {"$search": title}})
+            cursor = movies_col.find(
+                filt,
+                {**_CANDIDATE_PROJECTION,
+                 "score": {"$meta": "textScore"}},
+            ).sort([("score", {"$meta": "textScore"})]).limit(TEXT_SEARCH_LIMIT)
+            return await cursor.to_list(length=TEXT_SEARCH_LIMIT)
+        except Exception:
+            # No text index yet (old DBs) — fall through to regex + fuzzy.
+            return None
+
+    text_hits = await _text_candidates()
+    if text_hits:
+        all_results.extend(text_hits)
+        seen_ids.update(r.get("_id") for r in text_hits)
+
+    if title:
+        # Substring stage (escaped: a query like "C++" must not be a regex).
+        exact = await movies_col.find(
+            _with_title({"title": {"$regex": re.escape(title), "$options": "i"}})
+        ).to_list(length=None)
     else:
-        # Normal search - exact + fuzzy
-        # Search for exact matches (no limit - show all results)
-        exact = await movies_col.find({"title": {"$regex": query, "$options": "i"}}).to_list(length=None)
+        # Filter-only query (e.g. "/search 2021 1080p"): list matching
+        # copies, newest-indexed first is handled at render; cap the pull.
+        exact = await movies_col.find(base_filter).to_list(length=FILTER_ONLY_LIMIT)
+    for r in exact:
+        if r.get("_id") not in seen_ids:
+            all_results.append(r)
+            seen_ids.add(r.get("_id"))
 
-        # Search for fuzzy matches if we have less exact matches
-        all_results = list(exact)
-        if len(exact) < 50:  # Only do fuzzy search if we don't have many exact matches
-            candidates = []
-            cursor = movies_col.find({}, {"title": 1, "year": 1, "quality": 1, "channel_title": 1, "message_id": 1, "channel_id": 1, "type": 1, "season": 1, "episode": 1, "rip": 1}).limit(500)
-            async for r in cursor:
-                # Skip if already in exact matches
-                if any(ex.get("_id") == r.get("_id") for ex in exact):
-                    continue
-                title = r.get("title", "")
-                score = fuzz.partial_ratio(query.lower(), title.lower())
-                if score >= fuzzy_threshold:
-                    candidates.append((score, r))
+    # Fuzzy re-rank only when the cheap stages came up short, over a
+    # facet-narrowed candidate set (was: unfiltered 500-doc scan + O(N*M)
+    # duplicate check against exact hits).
+    if title and len(all_results) < 50:
+        candidates = []
+        cursor = movies_col.find(base_filter, _CANDIDATE_PROJECTION).limit(FUZZY_CANDIDATE_LIMIT)
+        ql = title.lower()
+        async for r in cursor:
+            if r.get("_id") in seen_ids:
+                continue
+            score = fuzz.partial_ratio(ql, str(r.get("title", "")).lower())
+            if score >= fuzzy_threshold:
+                candidates.append((score, r))
 
-            candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
-            all_results.extend([c[1] for c in candidates])
+        candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
+        all_results.extend([c[1] for c in candidates])
 
-        exact_ids = {r.get("_id") for r in all_results if is_exact_title(r.get("title"), query)}
-        return {"results": all_results, "exact_ids": exact_ids}
+    exact_ids = {r.get("_id") for r in all_results if is_exact_title(r.get("title"), title)}
+    return {"results": all_results, "exact_ids": exact_ids,
+            "title": title, "filters": filters}
 
 
 # ----------------------------------------------------------------------
@@ -200,7 +454,7 @@ def _copy_type_label(copy):
     return "Series" if (copy.get("type") or "Movie").lower() in SERIES_TYPES else "Movie"
 
 
-def build_search_page(results, query, page, exact_ids=None):
+def build_search_page(results, query, page, exact_ids=None, filters=None):
     """Build the paginated search-result text + per-line button metadata.
 
     The result list is a code block of per-title lines:
@@ -210,6 +464,9 @@ def build_search_page(results, query, page, exact_ids=None):
         Files Found: 15 (Movie - 5 | Series - 10)
         ...
         1. Lucky > 2 files > Latest: 1080p | 2.5GB | WebRip
+
+    ``filters`` is the applied facet dict (``{"year","quality","type"}``) and
+    renders as a ``Filters: ...`` header line when non-empty.
 
     Returns ``(search_text, button_data, groups, total_pages)`` where
     ``groups`` are ALL per-title groups (so the Pick view can index into the
@@ -243,6 +500,16 @@ def build_search_page(results, query, page, exact_ids=None):
     search_text = (
         f"```\n"
         f"Search : {query}\n"
+    )
+    if filters:
+        filt_line = format_active_filters(
+            year=filters.get("year"),
+            quality=filters.get("quality"),
+            type_=filters.get("type"),
+        )
+        if filt_line:
+            search_text += f"Filters: {filt_line}\n"
+    search_text += (
         f"Titles Found: {total_titles} ({exact_titles} Exact | {fuzzy_titles} Fuzzy)\n"
         f"Files Found: {len(results)} (Movie - {movie_files} | Series - {series_files})\n\n"
         f"{SEARCH_HINT}\n\n"
@@ -480,7 +747,7 @@ async def build_search_keyboard(search_id, total_results, page, total_pages,
 
 
 async def send_search_results(client, message: Message, results, query, page=1,
-                              exact_ids=None):
+                              exact_ids=None, filters=None):
     """Send beautifully formatted search results with pagination.
 
     The search (its per-title groups, exact/fuzzy split and TMDb metas) is
@@ -493,7 +760,7 @@ async def send_search_results(client, message: Message, results, query, page=1,
     from .config import bulk_downloads
 
     search_text, button_data, groups, total_pages = build_search_page(
-        results, query, page, exact_ids=exact_ids)
+        results, query, page, exact_ids=exact_ids, filters=filters)
 
     # TMDb enrichment (cached per title; no-op without an API key) - the
     # Title(s) Information block below the results with rating/genres/IMDb
@@ -517,6 +784,7 @@ async def send_search_results(client, message: Message, results, query, page=1,
             'groups': groups,     # Per-title groups for the pick filter view
             'query': query,
             'exact_ids': set(exact_ids or ()),
+            'filters': filters,   # Applied facets so pagination re-renders them
             'metas': metas,       # global group index -> TMDb meta (or None)
             'created_at': datetime.now(timezone.utc),
             'user_id': message.from_user.id,
@@ -541,7 +809,8 @@ async def render_search_page(callback_query, search_data, page, search_id):
     query = search_data['query']
     exact_ids = search_data.get("exact_ids")
     search_text, button_data, groups, total_pages = build_search_page(
-        results, query, page, exact_ids=exact_ids)
+        results, query, page, exact_ids=exact_ids,
+        filters=search_data.get("filters"))
     total_results = len(results)
     search_data['page'] = page
 
@@ -811,8 +1080,8 @@ async def inline_handler(client, inline_query):
     # Search for movies matching the query
     results = []
     
-    # Exact matches first
-    exact_cursor = movies_col.find({"title": {"$regex": query, "$options": "i"}}).limit(10)
+    # Exact matches first (escaped: inline text is raw user input)
+    exact_cursor = movies_col.find({"title": {"$regex": re.escape(query), "$options": "i"}}).limit(10)
     exact_results = await exact_cursor.to_list(length=10)
 
     # Attach TMDb poster thumbnails to the first few exact matches (cached per

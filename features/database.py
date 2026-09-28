@@ -79,6 +79,7 @@ async def ensure_indexes():
         # Create indexes with error handling
         indexes_to_create = [
             (movies_col, [("title", 1)], "title index"),
+            (movies_col, [("title", "text")], "title text index"),
             (movies_col, [("year", 1)], "year index"),
             (movies_col, [("quality", 1)], "quality index"),
             (movies_col, [("type", 1)], "type index"),
