@@ -18,7 +18,7 @@ from .config import AUTO_INDEX_DEFAULT, temp_data, bulk_downloads, START_MESSAGE
 from .database import movies_col, users_col, channels_col, settings_col, logs_col
 from .utils import wait_for_user_input, cleanup_expired_bulk_downloads, resolve_chat_ref
 
-from .user_management import is_admin, has_accepted_terms, load_terms_and_privacy, log_action, check_banned, check_terms_acceptance, should_process_command
+from .user_management import is_admin, has_accepted_terms, load_terms_and_privacy, log_action, check_banned, check_terms_acceptance, should_process_command, apply_role_action, format_role_summary, format_role_skipped_lines, resolve_targets
 from .config import indexing_lock, message_queue
 from .statistics_store import indexing_stats, prune_stats
 from .search import (
@@ -44,6 +44,7 @@ from .statistics import (
 )
 from .database_scan import scan_message_range
 from .request_commands import cmd_request, cmd_request_list
+from .user_commands import cmd_user
 from .watchlist import cmd_watch, cmd_unwatch, cmd_watchlist
 
 # -------------------------
@@ -125,6 +126,8 @@ async def handle_command(client, message: Message):
         await cmd_ban_user(client, message)
     elif command == 'unban_user':
         await cmd_unban_user(client, message)
+    elif command == 'user':
+        await cmd_user(client, message)
     elif command == 'reset':
         await cmd_reset(client, message)
     elif command == 'reset_channel':
@@ -238,10 +241,7 @@ ADMIN_HELP = """
 ╰─────────────────────
 
 ╭─ 👥 Users
-│ /promote <user_id>     Make admin
-│ /demote <user_id>      Remove admin
-│ /ban_user <user_id>    Ban
-│ /unban_user <user_id>  Unban
+│ /user                  Unified user manager (filters, batch actions)
 ╰─────────────────────
 
 ╭─ 🗄️ Database
@@ -257,7 +257,8 @@ ADMIN_HELP = """
 ╰─────────────────────
 
 ✨ Highlights
-• /mc unified management • interactive + cancellable indexing
+• /mc unified management • /user unified user manager
+• interactive + cancellable indexing • batch actions with preview + confirm
 • Better errors + supports all video types • diagnostics for indexing
 • Safe resets + cleanup tools • premium feature access control
 
@@ -1436,65 +1437,48 @@ async def cmd_toggle_indexing(client, message: Message):
     await message.reply_text(f"Auto-indexing set to {new}")
     await log_action("toggle_indexing", by=uid, extra={"new": new})
 
-async def cmd_promote(client, message: Message):
+async def _run_role_alias(client, message: Message, action: str, usage: str):
+    """Shared body of the hidden /promote /demote /ban_user /unban_user aliases.
+
+    They are the same operation as the /user dashboard, minus the preview
+    step: identical gates (private chat only, comma-separated ids AND
+    @usernames, all the guards) and an immediate result summary. The single
+    write path is `apply_role_action`, so a forged/targeted alias can never
+    bypass a guard.
+    """
     uid = message.from_user.id
     if not await is_admin(uid):
         return await message.reply_text("🚫 Admins only.")
+    if message.chat.type != ChatType.PRIVATE:
+        return await message.reply_text("🔒 Use this command in a private chat with me.")
     parts = message.text.split()
     if len(parts) < 2:
-        return await message.reply_text("Usage: /promote <user_id>")
-    try:
-        target = int(parts[1])
-        await users_col.update_one({"user_id": target}, {"$set": {"role": "admin"}}, upsert=True)
-        await message.reply_text(f"✅ {target} promoted to admin.")
-        await log_action("promote", by=uid, target=target)
-    except Exception:
-        await message.reply_text("Invalid user id.")
+        return await message.reply_text(usage)
+    records = await resolve_targets(client, " ".join(parts[1:]), actor_id=uid,
+                                    guard_action=action)
+    if not records:
+        return await message.reply_text("❌ No numeric id or @username recognised.")
+    summary = await apply_role_action(uid, action, records, via="alias")
+    lines = [format_role_summary(summary)]
+    lines += format_role_skipped_lines(summary["skipped"])
+    lines.append("💡 Tip: /user opens the same action with a preview.")
+    await message.reply_text("\n".join(lines))
+
+async def cmd_promote(client, message: Message):
+    return await _run_role_alias(client, message, "promote",
+                                 "Usage: /promote <user_id|@username> [, ...]")
 
 async def cmd_demote(client, message: Message):
-    uid = message.from_user.id
-    if not await is_admin(uid):
-        return await message.reply_text("🚫 Admins only.")
-    parts = message.text.split()
-    if len(parts) < 2:
-        return await message.reply_text("Usage: /demote <user_id>")
-    try:
-        target = int(parts[1])
-        await users_col.update_one({"user_id": target}, {"$set": {"role": "user"}}, upsert=True)
-        await message.reply_text(f"✅ {target} demoted to user.")
-        await log_action("demote", by=uid, target=target)
-    except Exception:
-        await message.reply_text("Invalid user id.")
+    return await _run_role_alias(client, message, "demote",
+                                 "Usage: /demote <user_id|@username> [, ...]")
 
 async def cmd_ban_user(client, message: Message):
-    uid = message.from_user.id
-    if not await is_admin(uid):
-        return await message.reply_text("🚫 Admins only.")
-    parts = message.text.split()
-    if len(parts) < 2:
-        return await message.reply_text("Usage: /ban_user <user_id>")
-    try:
-        target = int(parts[1])
-        await users_col.update_one({"user_id": target}, {"$set": {"role": "banned"}}, upsert=True)
-        await message.reply_text(f"🚫 {target} has been banned.")
-        await log_action("ban_user", by=uid, target=target)
-    except Exception:
-        await message.reply_text("Invalid user id.")
+    return await _run_role_alias(client, message, "ban_user",
+                                 "Usage: /ban_user <user_id|@username> [, ...]")
 
 async def cmd_unban_user(client, message: Message):
-    uid = message.from_user.id
-    if not await is_admin(uid):
-        return await message.reply_text("🚫 Admins only.")
-    parts = message.text.split()
-    if len(parts) < 2:
-        return await message.reply_text("Usage: /unban_user <user_id>")
-    try:
-        target = int(parts[1])
-        await users_col.update_one({"user_id": target}, {"$set": {"role": "user"}}, upsert=True)
-        await message.reply_text(f"✅ {target} has been unbanned.")
-        await log_action("unban_user", by=uid, target=target)
-    except Exception:
-        await message.reply_text("Invalid user id.")
+    return await _run_role_alias(client, message, "unban_user",
+                                 "Usage: /unban_user <user_id|@username> [, ...]")
 
 async def cmd_reset(client, message: Message):
     """Reset command - clears all indexed data with confirmation"""

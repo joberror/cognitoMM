@@ -9,7 +9,7 @@ and controlling premium features.
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Tuple
 import asyncio
-from .config import (FREE_DOWNLOAD_DAILY_LIMIT, PREMIUM_DOWNLOAD_DAILY_LIMIT,
+from .config import (ADMINS, FREE_DOWNLOAD_DAILY_LIMIT, PREMIUM_DOWNLOAD_DAILY_LIMIT,
                      PREMIUM_EXPIRY_WARN_DAYS,
                      FILE_DELETION_MINUTES, PREMIUM_FILE_DELETION_MINUTES,
                      BULK_FILE_DELETION_MINUTES, PREMIUM_BULK_FILE_DELETION_MINUTES,
@@ -57,38 +57,55 @@ async def initialize_premium_features():
 
 async def is_premium_user(user_id: int) -> bool:
     """
-    Check if user has active premium status
-    
+    Check if user has active premium status.
+
+    Admin == premium: an admin always gets the premium tier (download quota,
+    auto-delete retention, premium-only features) without holding a premium
+    record. Two fast paths keep this cheap:
+
+    1. Config ``ADMINS`` short-circuit with ZERO queries.
+    2. Only a user with NO active premium record pays the extra ``role``
+       lookup (``is_admin``) — a paying premium user still costs one read.
+
+    ``is_admin`` is imported lazily: ``user_management`` imports this module
+    from inside a function, so a top-level import would be circular.
+
     Args:
         user_id: User ID to check
         
     Returns:
-        True if user has active premium, False otherwise
+        True if user has active premium (or is an admin), False otherwise
     """
+    # (1) Super admins are premium without touching the database.
+    if user_id in ADMINS:
+        return True
+
+    active = False
     try:
         premium_doc = await premium_users_col.find_one({"user_id": user_id})
         
-        if not premium_doc:
-            return False
-        
-        # Check if premium has expired
-        expiry_date = premium_doc.get("expiry_date")
-        if not expiry_date:
-            return False
-        
-        # Ensure expiry_date is timezone-aware
-        if expiry_date.tzinfo is None:
-            expiry_date = expiry_date.replace(tzinfo=timezone.utc)
-        
-        now = datetime.now(timezone.utc)
-        
-        # If expired, return False
-        if now >= expiry_date:
-            return False
-        
-        return True
+        if premium_doc:
+            # Check if premium has expired
+            expiry_date = premium_doc.get("expiry_date")
+            if expiry_date:
+                # Ensure expiry_date is timezone-aware
+                if expiry_date.tzinfo is None:
+                    expiry_date = expiry_date.replace(tzinfo=timezone.utc)
+                # If expired, fall through to the admin check below
+                active = datetime.now(timezone.utc) < expiry_date
     except Exception as e:
         print(f"Error checking premium status for user {user_id}: {e}")
+        return False
+
+    if active:
+        return True
+
+    # (2) No active premium record: a database admin is premium too.
+    from .user_management import is_admin
+    try:
+        return bool(await is_admin(user_id))
+    except Exception as e:
+        print(f"⚠️ Admin premium fallback failed for user {user_id}: {e}")
         return False
 
 

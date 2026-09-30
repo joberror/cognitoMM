@@ -621,6 +621,64 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     reply_markup=reply_markup
                 )
 
+        elif data.startswith("usr#"):
+            # /user dashboard: status filters, action prompts, and the
+            # confirm/cancel step of a batch role change.
+            #   usr#pg#<page>#<filter>   usr#act#<action>
+            #   usr#cnf#<token>          usr#can#<token>   usr#all
+            from .user_commands import (
+                FILTER_ALL,
+                FILTER_UID,
+                VISIBLE_FILTERS,
+                can_use_dashboard,
+                cancel_user_action,
+                confirm_user_action,
+                render_user_page,
+                start_user_action,
+            )
+
+            parts = data.split("#")
+            kind = parts[1] if len(parts) > 1 else ""
+            chat = getattr(callback_query.message, "chat", None)
+            # Re-checked on every press, not just at render time: callback
+            # data can be forged, and promote/demote need a config Super Admin.
+            if not await can_use_dashboard(user_id, getattr(chat, "type", None)):
+                return await callback_query.answer("🚫 Admins only.", show_alert=True)
+
+            if kind == "pg":
+                if len(parts) < 4:
+                    return await callback_query.answer("⚠️ Invalid page data.", show_alert=True)
+                try:
+                    page = max(1, int(parts[2]))
+                except ValueError:
+                    return await callback_query.answer("⚠️ Invalid page data.", show_alert=True)
+                filter_key = parts[3]
+                if filter_key != FILTER_UID and filter_key not in VISIBLE_FILTERS:
+                    return await callback_query.answer("⚠️ Unknown filter.", show_alert=True)
+                await callback_query.answer()
+                await render_user_page(client, callback_query, page, filter_key)
+
+            elif kind == "act":
+                if len(parts) < 3:
+                    return await callback_query.answer("⚠️ Invalid action.", show_alert=True)
+                await start_user_action(client, callback_query, parts[2])
+
+            elif kind == "cnf":
+                await confirm_user_action(client, callback_query,
+                                          parts[2] if len(parts) > 2 else "")
+
+            elif kind == "can":
+                await cancel_user_action(client, callback_query,
+                                         parts[2] if len(parts) > 2 else "")
+
+            elif kind == "all":
+                await callback_query.answer()
+                await render_user_page(client, callback_query, 1, FILTER_ALL)
+
+            else:
+                await callback_query.answer("⚠️ Unknown action.", show_alert=True)
+            return
+
         elif data.startswith("bulk:"):
             # Handle bulk download request using stored data
             _, bulk_id = data.split(":", 1)

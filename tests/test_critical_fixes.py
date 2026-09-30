@@ -62,15 +62,25 @@ def make_message(chat_type, chat_id, user_id, text="/start"):
 
 
 def run_should_process(chat_type, chat_id, user_id, admin_ids=(), enabled_ids=()):
-    """Run should_process_command with patched deps; return the bool result."""
+    """Run should_process_command with patched deps; return the bool result.
+
+    The stubs are restored in the `finally`: they are plain module attributes,
+    so a leaked `is_admin` would silently answer for every LATER test file
+    (e.g. the /user dashboard's admin gate).
+    """
+    saved = (user_management.is_admin, user_management.channels_col)
+
     async def _is_admin(uid):
         return uid in admin_ids
 
     user_management.is_admin = _is_admin
     user_management.channels_col = FakeChannelsCol(enabled_ids)
-    return asyncio.run(user_management.should_process_command(
-        make_message(chat_type, chat_id, user_id)
-    ))
+    try:
+        return asyncio.run(user_management.should_process_command(
+            make_message(chat_type, chat_id, user_id)
+        ))
+    finally:
+        user_management.is_admin, user_management.channels_col = saved
 
 
 # ---------------------------
@@ -110,11 +120,15 @@ def test_disabled_channel_rejected():
     async def _find_one(query):
         return {"channel_id": query.get("channel_id"), "enabled": False}
 
+    saved = (user_management.is_admin, user_management.channels_col)
     user_management.is_admin = _is_admin
     user_management.channels_col = SimpleNamespace(find_one=_find_one)
-    result = asyncio.run(user_management.should_process_command(
-        make_message(ChatType.CHANNEL, -100456, 1)
-    ))
+    try:
+        result = asyncio.run(user_management.should_process_command(
+            make_message(ChatType.CHANNEL, -100456, 1)
+        ))
+    finally:
+        user_management.is_admin, user_management.channels_col = saved
     assert result is False
 
 
@@ -183,12 +197,17 @@ def test_add_channel_end_to_end():
     async def _log_action(action, by=None, target=None, extra=None):
         logs.append({"action": action, "target": target})
 
+    # Restored in the `finally` — see run_should_process.
+    saved = (commands.is_admin, commands.channels_col, commands.log_action)
     commands.is_admin = _is_admin
     commands.channels_col = channels
     commands.log_action = _log_action
 
     msg = FakeMessage()
-    asyncio.run(commands.cmd_add_channel(FakeClient(), msg))
+    try:
+        asyncio.run(commands.cmd_add_channel(FakeClient(), msg))
+    finally:
+        commands.is_admin, commands.channels_col, commands.log_action = saved
 
     assert channels.upserted, "channel must have been upserted"
     assert channels.upserted[0][1]["channel_id"] == -100123

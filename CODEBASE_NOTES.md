@@ -41,7 +41,7 @@ pyproject.toml              # codeflash config (module root: features, tests-roo
 run_bot()
 ├─ start_webapp()              # Flask on 0.0.0.0:7860, background daemon thread
 └─ asyncio.run(main())
-   ├─ ensure_indexes()         # 21 MongoDB indexes (see database.py)
+   ├─ ensure_indexes()         # 25 MongoDB indexes (see database.py)
    ├─ initialize_premium_features()
    ├─ CognitoBot() async context
    │  ├─ get_me() → verify bot, set config.client = app   # client starts as None!
@@ -67,22 +67,23 @@ Subclasses Pyroblack `Client` and adds `iter_messages(chat_id, limit, offset)` (
 |---|---|---|
 | `features/bot.py` | 225 | `CognitoBot`, `run_bot()`, `main()` — startup, handler registration, background monitors (deletion, orphan prune, rescan, premium expiry, keep-alive) |
 | `features/config.py` | 175 | All env vars + `BOT_VERSION` + **global in-memory state**: `bulk_downloads`, `file_deletions`, `file_deletions_lock`, `indexing_lock`, `INDEX_EXTENSIONS`, `message_queue`, `queue_processor_task`, `user_input_events`, `TempData`/`temp_data`, `client` |
-| `features/database.py` | 165 | Motor client (60s timeouts), 11 collections, `ensure_indexes()` (21 indexes), lazy PEP 562 re-exports of the user-management helpers |
-| `features/commands.py` | 2660 | `handle_command()` dispatcher + most command handlers (see §6) |
+| `features/database.py` | 174 | Motor client (60s timeouts), 11 collections, `ensure_indexes()` (25 indexes), lazy PEP 562 re-exports of the user-management helpers |
+| `features/commands.py` | 2644 | `handle_command()` dispatcher + most command handlers (see §6) |
 | `features/request_commands.py` | 563 | `/request` user flow + `/request_list` admin queue (`cmd_request`, `cmd_request_list`, `send_request_list_page`); imported into the commands.py router |
 | `features/watchlist.py` | 489 | `/watch` `/unwatch` `/watchlist` — TMDb resolution, disambiguation picker, status rendering, UPDATE (see §8 *Watchlist*); imported into the commands.py router |
 | `features/broadcast.py` | 469 | `cmd_broadcast`, recipient query, rate-limited send loop with progress edits, summary, `broadcasts_col` logging; imported into the commands.py router |
-| `features/callbacks.py` | 1580 | `callback_handler()` — all inline-button flows (see §7) |
+| `features/callbacks.py` | 1638 | `callback_handler()` — all inline-button flows (see §7) |
 | `features/indexing.py` | 693 | `start_indexing_process`, `save_file_to_db`, `index_message`, `process_message_queue`, `on_message` (queue-based auto-indexing), `prune_orphaned_index_entries` + monitor |
 | `features/metadata_parser.py` | 1062 | Single canonical parser module: `ParsedMedia` + `MovieFilenameParser` (deep filename engine — regex dictionaries for resolutions/sources/codecs/audio/bit-depth/HDR/languages/subtitles/editions; the engine owns ALL parsing incl. quality, CH-suffixed channels, bit depth, rip/source, audio/video codecs, HDR, publisher, context-aware multi-year release-year/title selection, IMDB IDs and x-dimension resolutions; `parse_metadata` is a pure mapper with zero fallback logic) |
 | `features/search.py` | 1307 | `perform_search` (returns `{results, exact_ids}`), `send_search_results` (per-title pages + Title(s) Information), `render_search_page` (pagination keeps the info block), `build_pick_view`/`render_pick_view`, `inline_handler` — live `/search`/`/recent` handlers live in `commands.py`; line formatters live in `utils.py` (`format_latest_info`, `format_pick_line`, `series_label`, `format_rip_label`) |
 | `features/statistics.py` | 1247 | `collect_comprehensive_stats`, `collect_quick_stats`, `collect_user_stats` + their formatters (dashboard rendering) |
 | `features/tmdb_integration.py` | 950 | `search_tmdb`, `get_imdb_id`, `enrich_title` (6h cache), trending/new-releases, **and the watchlist layer**: `search_watch_candidates`, `derive_movie_status`/`derive_series_status`, `fetch_title_status`, `get_movie_release_types`, `is_ambiguous_title` |
 | `features/utils.py` | 588 | `wait_for_user_input`/`set_user_input` (client.listen replacement), `cleanup_expired_bulk_downloads`, `get_readable_time`, `format_file_size`, `construct_final_caption`, `resolve_chat_ref`, quality dedup (`quality_rank`/`pick_best_quality`), recent-content grouping helpers, access-control re-exports |
-| `features/user_management.py` | 407 | Admin/banned/terms checks, `log_action`, `should_process_command`, plus the watchlist store: `add_to_watchlist`, `remove_from_watchlist`, `get_watchlist`, `watchlist_capacity`, `update_watchlist_status`, `notify_watchlist` (+ `_notify_cooldowns` floodgate) |
+| `features/user_management.py` | 723 | Admin/banned/terms checks, `log_action`, `should_process_command`, the shared role-action core (`resolve_targets` → `apply_role_action` + guards, used by `/user` and the 4 text aliases), plus the watchlist store: `add_to_watchlist`, `remove_from_watchlist`, `get_watchlist`, `watchlist_capacity`, `update_watchlist_status`, `notify_watchlist` (+ `_notify_cooldowns` floodgate) |
+| `features/user_commands.py` | 731 | `/user` unified user manager: filters (All/Free/⭐/👑/🚫/Active/Recent), `last_seen`-sorted pagination with Super Admins pinned, header counts derived from the same queries as the list views, prompt → preview → confirm action flow (state in `bulk_downloads`), `usr#` callbacks, HTML-escaped rendering |
 | `features/request_management.py` | 329 | Rate limits (3 pending / 1 per day / 20 global per day), duplicate check (TMDb-first, fuzzy ≥85% fallback), IMDB link validation, queue position, `upvote_request`, `fulfill_matching_requests` |
 | `features/database_scan.py` | 358 | `start_db_rescan_monitor`, `incremental_rescan`, `scan_message_range`, per-channel cursor persistence |
-| `features/premium_management.py` | 679 | Premium users CRUD + expiry handling + feature toggles (defaults: `recent`, `request`, `get_all`), daily download quota, expiry-warning monitor |
+| `features/premium_management.py` | 696 | Premium users CRUD + expiry handling + feature toggles (defaults: `recent`, `request`, `get_all`), daily download quota, expiry-warning monitor; `is_premium_user` short-circuits config `ADMINS` then falls back to the `is_admin` role |
 | `features/premium_payments.py` | 208 | Telegram Stars purchases: plan menu/keyboard, invoice send, pre-checkout validation, idempotent payment activation |
 | `features/premium_commands.py` | 306 | Multi-step interactive premium admin flows (user input handlers) |
 | `features/reliability.py` | 130 | `retry_on_flood` (FloodWait-aware backoff, injectable sleep/rng) + `struct_log` |
@@ -114,7 +115,7 @@ Collections (all in `database.py`):
 | `premium_payments` | Stars purchases: `user_id`, `plan_key`, `days`, `stars`, `charge_id` (unique), `status`, `created_at` |
 | `broadcasts` | Broadcast history: `broadcast_id`, `admin_id`, `message_text`, totals, error breakdown, timestamps |
 
-**Indexes** created by `ensure_indexes()` — 21 in total: movies `title`, `title` (text), `year`, `quality`, `type`, `(channel_id+message_id)`, `tmdb_id`; users `user_id`; channels `channel_id`; requests `user_id`/`status`/`request_date`/`tmdb_id`; limits `user_id`; premium `user_id`/`feature_name`; payments `charge_id`; broadcasts `broadcast_id`/`admin_id`/`started_at`/`status`. The ones listed in `UNIQUE_INDEX_DESCRIPTIONS` (users user_id, channels channel_id, limits user_id, premium user_id + feature_name, payments charge_id, broadcasts broadcast_id) are **unique**. The movies text index needs `language_override` pointed at an unused field — see the comment block in `ensure_indexes()`.
+**Indexes** created by `ensure_indexes()` — 25 in total: movies `title`, `title` (text), `year`, `quality`, `type`, `(channel_id+message_id)`, `tmdb_id`; users `user_id`, `last_seen` (dashboard page sort), `role` (status filters), `terms_accepted_at` (Recent 30-day join window); channels `channel_id`; requests `user_id`/`status`/`request_date`/`tmdb_id`; limits `user_id`; premium `user_id`/`feature_name`/`expiry_date` (active-premium scan); payments `charge_id`; broadcasts `broadcast_id`/`admin_id`/`started_at`/`status`. The ones listed in `UNIQUE_INDEX_DESCRIPTIONS` (users user_id, channels channel_id, limits user_id, premium user_id + feature_name, payments charge_id, broadcasts broadcast_id) are **unique**. The movies text index needs `language_override` pointed at an unused field — see the comment block in `ensure_indexes()`.
 
 **`movies` doc shape** (from `index_message`): `title`, `year`, `rip`, `source`, `quality`, `extension`, `resolution`, `audio`, `imdb`, `type`, `season`, `episode`, `file_size`, `upload_date`, `channel_id`, `channel_title`, `message_id`, `caption`, `indexed_at`, plus all extra parsed fields (edition, language, tags, flags, etc.). TMDb enrichment later `$set`s `tmdb_poster`/`tmdb_rating`/`tmdb_genres`/`tmdb_overview`/`imdb_id` and persists `tmdb_id` — **`tmdb_id` is the canonical identity** shared by watchlist matching and request fulfilment.
 
@@ -172,14 +173,15 @@ A handler in `commands.py` that starts `async def cmd_` is *usually* routed from
 | `/queue` | Live ops snapshot: index-queue depth vs cap (with a near-capacity drop warning), processor liveness, orphan-prune stats, auto-indexing flag, per-channel rescan cursors. |
 | `/manual_deletion` | Search and batch-delete indexed entries (selection buttons). |
 | `/indexing_stats`, `/reset_stats` | Indexing diagnostic counters / reset them. |
-| `/promote`, `/demote`, `/ban_user`, `/unban_user` | User role + ban control (numeric id or @username). |
+| `/user` | Unified user manager: paginated list (10/page, sorted by `last_seen` DESC, Super Admins pinned to the top of page 1) with All/Free/⭐/👑/🚫/Active(7d)/Recent(30d) filters, live names via one batched `get_users`, and Search / Ban / Unban / Demote / Promote buttons (prompt → preview → confirm). Private chat only. |
+| `/promote`, `/demote`, `/ban_user`, `/unban_user` | Hidden text aliases for the same role actions — no preview, immediate summary. |
 | `/reset` | Wipe **all** indexed movies (CONFIRM gate). |
 
 `/request_list` is admin-only despite the name reading like a personal list — it returns `🚫 Admins only.` for regular users; users track their own requests through the auto-fulfill DM.
 
 **Premium gating** is per-feature, not per-command: `is_feature_premium_only(name)` is checked inline (currently `recent`, `request`, `get_all`) and admins always pass. A feature flag is only meaningful once toggled in `/premium` → Manage Features; the defaults in `DEFAULT_PREMIUM_FEATURES` start enabled.
 
-**Help text** (`USER_HELP` / `ADMIN_HELP`) is defined in `commands.py` and rendered by `cmd_help`. It is a **hand-maintained duplicate** of the tables above — adding a command without updating the help block leaves it undiscoverable in the menu. `/start` (obvious) and `/unwatch` (documented in the `/watch` line) are the only routed commands absent from both blocks; `/manage_channel` appears only as its `/mc` alias. Everything else is in sync, and `ADMIN_HELP` covers all 18 admin commands.
+**Help text** (`USER_HELP` / `ADMIN_HELP`) is defined in `commands.py` and rendered by `cmd_help`. It is a **hand-maintained duplicate** of the tables above — adding a command without updating the help block leaves it undiscoverable in the menu. `/start` (obvious) and `/unwatch` (documented in the `/watch` line) are the only routed commands absent from both blocks; `/manage_channel` appears only as its `/mc` alias. Everything else is in sync, and `ADMIN_HELP` covers all routed admin commands; the four role aliases (`/promote`, `/demote`, `/ban_user`, `/unban_user`) are hidden from the menu on purpose — `/user` is their dashboard.
 
 ---
 
@@ -200,6 +202,7 @@ Routing order (important — first match wins):
 | `back:` | Restore the full `/search` results from a pick view |
 | `index#` | `index#yes#{chat}#{last_id}#{skip}` starts `start_indexing_process`; `index#cancel` sets `temp_data.CANCEL = True` |
 | `mc#` | Channel manager actions (`add/remove/index/update/reset/monitoring`) — builds a `PseudoMessage` and invokes the command handlers; `monitoring` toggles auto-indexing and re-renders |
+| `usr#` | `/user` dashboard (see §6) — `usr#pg#{page}#{filter}` paginate/filter, `usr#act#{action}` opens the target prompt → preview, `usr#cnf#{token}` / `usr#can#{token}` confirm/cancel (state in `bulk_downloads`, ownership-checked), `usr#all` resets to All; admin and Super-Admin gates re-checked on every press |
 | `bulk:{bulk_id}` | Sends up to 10 stored files, each tracked for auto-deletion (bulk retention) |
 | `getpack:{sid}:{gi}:{season}:{res}` | Pick-view `📦 Get All` — delivers up to `MAX_PACK_FILES` (20) copies of the active season/resolution slice |
 | `hsearch#` / `hsearch_exact#` | Re-runs a search from `/my_history` |

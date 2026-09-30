@@ -58,7 +58,7 @@ This is a Telegram bot hosted on Hugging Face Spaces.
 - `/update_db` — reconcile a channel (also runs on a background schedule)
 - `/manual_deletion <title>` · `/indexing_stats` · `/queue` · `/reset_stats`
 - `/stat` / `/quickstat` — statistics dashboard (incl. prune stats, CSV export)
-- `/broadcast` · `/ban_user` / `/unban_user` · `/promote` / `/demote`
+- `/broadcast` · `/user` — user manager (filters + promote/demote/ban/unban)
 - `/reset_channel` · `/reset` (full wipe, confirmed)
 
 When `TMDB_API` is configured, search/recent/trending results carry posters,

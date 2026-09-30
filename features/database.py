@@ -109,6 +109,15 @@ async def ensure_indexes():
             (movies_col, [("type", 1)], "type index", {}),
             (movies_col, [("channel_id", 1), ("message_id", 1)], "channel_message index", {}),
             (movies_col, [("tmdb_id", 1)], "tmdb_id index", {}),
+            # /user dashboard (features/user_commands.py): page sort on
+            # last_seen, status filters on role, the Recent(30d) join-window
+            # query on terms_accepted_at, and the active-premium scan on
+            # expiry_date. Without these the dashboard falls back to
+            # collection scans, which is what the OLD read caps were hiding.
+            (users_col, [("last_seen", -1)], "user last_seen index", {}),
+            (users_col, [("role", 1)], "user role index", {}),
+            (users_col, [("terms_accepted_at", 1)], "user terms_accepted_at index", {}),
+            (premium_users_col, [("expiry_date", 1)], "premium expiry index", {}),
             (users_col, [("user_id", 1)], "user_id index", {}),
             (channels_col, [("channel_id", 1)], "channel_id index", {}),
             (requests_col, [("user_id", 1)], "request user_id index", {}),

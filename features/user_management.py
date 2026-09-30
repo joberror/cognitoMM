@@ -6,6 +6,7 @@ for the MovieBot. It includes functions for checking user roles,
 banning/unbanning users, and verifying terms acceptance.
 """
 
+import re
 import time
 from datetime import datetime, timezone
 from pyrogram.types import Message
@@ -75,6 +76,322 @@ async def log_action(action: str, by: int = None, target: int = None, extra: dic
             await client.send_message(int(LOG_CHANNEL), msg)
         except Exception:
             pass
+
+
+# ------------------------------------------------------------------ #
+#  Role actions (shared by /user and the /promote /demote /ban_user /   #
+#  unban_user aliases)                                                 #
+# ------------------------------------------------------------------ #
+#
+# `role` stays a SINGLE field (user | admin | banned), so a banned target is
+# always a plain "user" and unban -> "user" is always correct. There is no
+# role stash / `role_before_bun`: the demote-then-ban rule below makes a
+# multi-state role unnecessary.
+#
+#   action       -> role written to users_col
+ROLE_ACTIONS = {
+    "promote": "admin",
+    "demote": "user",
+    "ban_user": "banned",
+    "unban_user": "user",
+}
+
+# Past-tense labels for the result summary / dashboard banner.
+ACTION_LABELS = {
+    "promote": "Promoted",
+    "demote": "Demoted",
+    "ban_user": "Banned",
+    "unban_user": "Unbanned",
+}
+
+# Only a config Super Admin (ADMINS) may hand out or revoke the admin role.
+SUPER_ONLY_ACTIONS = frozenset({"promote", "demote"})
+
+# Verdict strings — shared by the /user preview table, the result banner and
+# the text aliases so one target always reports the same reason. They are
+# self-contained phrases: the "— skipped" suffix is part of the hard skips, a
+# no-op says "(no-op)" instead.
+VERDICT_SUPER_ADMIN = "👑 Super admin — skipped"
+VERDICT_SELF = "⚠️ You — skipped"
+VERDICT_NOT_FOUND = "❌ Not found"
+VERDICT_BAD_INPUT = "⚠️ Bad input"
+VERDICT_BANNED_NOOP = "⚠️ Already banned (no-op)"
+VERDICT_DEMOTE_FIRST = "⚠️ Demote first — skipped"
+VERDICT_UNBAN_FIRST = "⚠️ Unban first — skipped"
+VERDICT_ALREADY_ADMIN = "⚠️ Already admin (no-op)"
+VERDICT_NOT_ADMIN = "⚠️ Not an admin (no-op)"
+VERDICT_NOT_BANNED = "⚠️ Not banned (no-op)"
+VERDICT_SUPER_ONLY = "🚫 Super admin only — skipped"
+VERDICT_WRITE_FAILED = "❌ Write failed — skipped"
+
+# Telegram handles: a letter, then letters/digits/underscores. The lower bound
+# is deliberately loose (Telegram itself only issues 5+ character handles) so a
+# short or hand-typed name still resolves instead of being called "not found".
+_HANDLE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{2,31}$")
+
+
+def parse_target_tokens(raw_text: str) -> list:
+    """Split a raw target list into int user ids and '@handle' strings.
+
+    Commas AND whitespace separate, so `123, @bob` and `123 @bob` both work.
+    Handles are normalised to a leading '@'; anything that is neither a
+    number nor a plausible handle is dropped (a bad token must never reach
+    the database or the Telegram RPC).
+    """
+    tokens = []
+    for chunk in re.split(r"[,\s]+", (raw_text or "").strip()):
+        if not chunk:
+            continue
+        try:
+            tokens.append(int(chunk))
+            continue
+        except ValueError:
+            pass
+        handle = chunk[1:] if chunk.startswith("@") else chunk
+        if _HANDLE_RE.match(handle):
+            tokens.append("@" + handle)
+    return tokens
+
+
+async def lookup_users_batched(client, targets) -> dict:
+    """Resolve ids/@handles with ONE batched `get_users` -> {id: user}.
+
+    pyrogram answers a list input with a `types.List` in arbitrary order and
+    silently omits ids it cannot resolve (deleted accounts), so the result is
+    keyed by id rather than by position. Any failure degrades to {} — a
+    lookup problem must never break a render or a command.
+    """
+    if client is None or not targets:
+        return {}
+    try:
+        found = await client.get_users(list(targets))
+    except Exception as e:
+        print(f"⚠️ batched get_users failed: {e}")
+        return {}
+    users = found if isinstance(found, (list, tuple)) else [found]
+    resolved = {}
+    for user in users or []:
+        uid = getattr(user, "id", None)
+        if uid is not None:
+            resolved[uid] = user
+    return resolved
+
+
+async def _load_user_roles(user_ids) -> dict:
+    """One query for {user_id: role} (default "user" for unknown ids)."""
+    ids = [int(uid) for uid in user_ids if uid is not None]
+    if not ids:
+        return {}
+    try:
+        cursor = users_col.find({"user_id": {"$in": ids}},
+                                {"user_id": 1, "role": 1, "username": 1, "first_name": 1})
+        docs = await cursor.to_list(length=len(ids) + 5)
+    except Exception as e:
+        print(f"⚠️ role lookup failed for {ids}: {e}")
+        return {}
+    return {doc.get("user_id"): (doc.get("role") or "user") for doc in docs or []}
+
+
+def role_guard_verdict(action: str, target_id: int, role, actor_id: int):
+    """Guard check for one target; ``None`` means the action may be written.
+
+    The single source of truth for WHO may be touched:
+      (a) config ADMINS are untouchable,
+      (b) nobody may target themselves (Super Admin included),
+      (c) a DB-role admin must be demoted before they can be banned,
+      (e) a banned user must be unbanned before they can be promoted.
+    Per-action no-ops (already banned, not an admin, ...) are reported with
+    their own reason instead of being written as a silent no-op. ``action=None``
+    (or ``actor_id=None``) evaluates only the guards that apply to every
+    action, which is what the dashboard's resolve step needs before the admin
+    has picked an action.
+    """
+    if target_id in ADMINS:
+        return VERDICT_SUPER_ADMIN
+    if target_id == actor_id:
+        return VERDICT_SELF
+    role = role or "user"
+    if action == "promote":
+        if role == "banned":
+            return VERDICT_UNBAN_FIRST
+        if role == "admin":
+            return VERDICT_ALREADY_ADMIN
+    elif action == "demote":
+        if role != "admin":
+            return VERDICT_NOT_ADMIN
+    elif action == "ban_user":
+        if role == "admin":
+            return VERDICT_DEMOTE_FIRST
+        if role == "banned":
+            return VERDICT_BANNED_NOOP
+    elif action == "unban_user":
+        if role != "banned":
+            return VERDICT_NOT_BANNED
+    return None
+
+
+async def resolve_targets(client, raw_text, actor_id=None, guard_action=None) -> list:
+    """Resolve a raw target list into per-target records — READ ONLY.
+
+    One batched `client.get_users([...])` resolves every id/@handle, one query
+    loads the current roles, and each record gets a guard ``verdict``:
+    ``None`` = actionable, otherwise the reason it will be skipped.
+
+    ``actor_id`` adds the "you may not target yourself" guard and
+    ``guard_action`` (``promote`` / ``demote`` / ``ban_user`` / ``unban_user``)
+    adds the per-action reason (already banned, demote first, unban first).
+    Without them only the action-independent guards (config Super Admin,
+    not found) are reported. Nothing is written here: /user renders these
+    records as the preview table and hands the actionable ones to
+    `apply_role_action`, which re-checks every guard before writing.
+    """
+    tokens = parse_target_tokens(raw_text)
+    if not tokens:
+        return []
+
+    found = await lookup_users_batched(client, tokens)
+    # `get_users` answers a list of ids AND @handles with a `types.List` that
+    # only exposes `id`, so the handle -> user mapping is rebuilt from the
+    # usernames of the users that did come back.
+    by_handle = {}
+    for user in found.values():
+        username = getattr(user, "username", None)
+        if username:
+            by_handle[str(username).lower().lstrip("@")] = user
+    # A completely empty answer next to numeric targets means the lookup
+    # itself failed (offline / RPC error), not that the accounts are gone:
+    # keep those ids actionable so a network hiccup cannot block the admin.
+    lookup_failed = not found and any(isinstance(t, int) for t in tokens)
+
+    records, resolved = [], set()
+    for token in tokens:
+        user = found.get(token) if isinstance(token, int) else by_handle.get(token[1:].lower())
+        if user is not None:
+            resolved.add(str(token))
+        records.append({
+            "input": str(token),
+            "id": user.id if user is not None else (token if isinstance(token, int) else None),
+            "username": getattr(user, "username", None),
+            "first_name": getattr(user, "first_name", None),
+            "role": None,
+            "verdict": None,
+        })
+
+    roles = await _load_user_roles([r["id"] for r in records if r["id"] is not None])
+    for rec in records:
+        if rec["id"] is None:
+            # An @handle that resolved to nobody.
+            rec["verdict"] = VERDICT_NOT_FOUND
+            continue
+        rec["role"] = roles.get(rec["id"], "user")
+        if guard_action or actor_id is not None:
+            rec["verdict"] = role_guard_verdict(
+                guard_action, rec["id"], rec["role"], actor_id)
+        if rec["verdict"]:
+            continue
+        if rec["input"] not in resolved and not lookup_failed:
+            # A numeric id Telegram knows but did not answer back — the account
+            # was deleted. The guards run first so a Super Admin target always
+            # reports the Super Admin reason, never "Not found".
+            rec["verdict"] = VERDICT_NOT_FOUND
+    return records
+
+
+def role_target_label(record) -> str:
+    """Short label for a resolved target: `@bob` when known, else the id."""
+    record = record or {}
+    username = record.get("username")
+    if username:
+        return f"@{username}"
+    target_id = record.get("id")
+    if target_id is not None:
+        return str(target_id)
+    return str(record.get("input") or "?")
+
+
+def format_role_target_lines(records) -> list:
+    """`label — verdict` lines: ✅ for actionable targets, the verdict for
+    every target that will be skipped (bad ids and skips are shown BEFORE any
+    write happens)."""
+    lines = []
+    for rec in records or []:
+        label = role_target_label(rec)
+        verdict = (rec or {}).get("verdict")
+        lines.append(f"✅ {label}" if not verdict else f"{label} — {verdict}")
+    return lines
+
+
+def format_role_skipped_lines(skipped, limit: int = 0) -> list:
+    """`label — verdict` lines for the ``(record, verdict)`` pairs that
+    `apply_role_action` returns as its `skipped` list.
+
+    Those reasons are decided at WRITE time, not at preview time, so they are
+    formatted here rather than through `format_role_target_lines` (which reads
+    the `verdict` key of a preview record). `limit` caps the list for a banner.
+    """
+    pairs = list(skipped or [])
+    if limit:
+        pairs = pairs[:limit]
+    return [f"{role_target_label(rec)} — {verdict}" for rec, verdict in pairs]
+
+
+def format_role_summary(summary: dict) -> str:
+    """One-line result summary: `✅ Banned 3 · ⚠️ 1 skipped`."""
+    summary = summary or {}
+    label = ACTION_LABELS.get(summary.get("action"), "Done")
+    applied = summary.get("applied") or []
+    skipped = summary.get("skipped") or []
+    text = f"✅ {label} {len(applied)}" if applied else f"⚠️ {label} 0"
+    if skipped:
+        text += f" · ⚠️ {len(skipped)} skipped"
+    return text
+
+
+async def apply_role_action(by: int, action: str, resolved_targets, via: str = "dashboard") -> dict:
+    """Write ``role`` for every actionable target. Returns {applied, skipped}.
+
+    Every guard is RE-CHECKED here instead of trusting the preview: a target
+    whose state changed between preview and confirm (or whose id was forged
+    into the callback data) is skipped and surfaces in the result banner
+    rather than being written. Log action names stay the historic ones
+    (promote / demote / ban_user / unban_user) so `/logs` keeps rendering
+    them; ``extra={"via": ...}`` records whether the change came from the
+    dashboard or a text alias.
+    """
+    if action not in ROLE_ACTIONS:
+        raise ValueError(f"Unknown role action: {action}")
+    role = ROLE_ACTIONS[action]
+    applied, skipped = [], []
+    targets = [t for t in (resolved_targets or []) if t]
+    if not targets:
+        return {"action": action, "applied": applied, "skipped": skipped}
+
+    # (d) Only a config Super Admin may promote/demote — checked once for the
+    # whole batch so a non-super admin gets a single clear reason.
+    if action in SUPER_ONLY_ACTIONS and by not in ADMINS:
+        return {"action": action, "applied": applied,
+                "skipped": [(t, VERDICT_SUPER_ONLY) for t in targets]}
+
+    roles = await _load_user_roles([t.get("id") for t in targets if t.get("id") is not None])
+    for rec in targets:
+        target_id = rec.get("id")
+        if target_id is None:
+            skipped.append((rec, VERDICT_NOT_FOUND))
+            continue
+        verdict = role_guard_verdict(action, target_id, roles.get(target_id), by)
+        if verdict:
+            skipped.append((rec, verdict))
+            continue
+        try:
+            await users_col.update_one({"user_id": target_id},
+                                       {"$set": {"role": role}}, upsert=True)
+        except Exception as e:
+            print(f"⚠️ {action} failed for {target_id}: {e}")
+            skipped.append((rec, VERDICT_WRITE_FAILED))
+            continue
+        await log_action(action, by=by, target=target_id, extra={"via": via})
+        applied.append(target_id)
+    return {"action": action, "applied": applied, "skipped": skipped}
 
 
 # ------------------------------------------------------------------ #

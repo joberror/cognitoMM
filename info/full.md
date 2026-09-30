@@ -94,11 +94,12 @@ ADMIN_HELP = """
 /stats_db                - Show database stats
 /clear_db                - Delete all entries
 
-🚫 **User Control**
-/ban_user <id>           - Ban a user
-/unban_user <id>         - Unban a user
-/promote <id>            - Promote to admin
-/demote <id>             - Demote from admin
+👥 **Users**
+/user                    - Unified user manager (filters, batch actions)
+/ban_user <id>           - Ban a user (hidden alias of /user)
+/unban_user <id>         - Unban a user (hidden alias)
+/promote <id>            - Promote to admin (hidden alias, Super Admin only)
+/demote <id>             - Demote from admin (hidden alias, Super Admin only)
 """
 
 @bot.on_message(filters.command("help"))

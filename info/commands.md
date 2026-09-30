@@ -54,8 +54,8 @@ router + this file together.
 | `/enrich [n]` | Backfill TMDb metadata (poster/genres/rating/IMDb) for entries missing it |
 | `/enrich_status` | Show how many indexed titles still lack TMDb metadata (enriched / pending / no-match) |
 | `/reset` | WIPE all indexed data (confirm) |
-| `/promote <user_id>` / `/demote <user_id>` | Grant/remove admin role |
-| `/ban_user <user_id>` / `/unban_user <user_id>` | Ban/unban a user |
+| `/user` | User manager: paginated list with All/Free/⭐/👑/🚫/Active/Recent filters and Ban / Unban / Demote / Promote buttons (prompt → preview → confirm) |
+| `/promote <id>` / `/demote <id>` / `/ban_user <id>` / `/unban_user <id>` | Hidden aliases for the same role actions, ids or @usernames (no preview) |
 
 ## 🔧 Config (`.env`)
 
