@@ -31,8 +31,8 @@
   },
   ".vscode/mcp.json": {
     "mtime": 1764895421.7770157,
-    "seen": 1790912608.5714798,
-    "ast_hash": "a09806872375ff48e0e237938092f393",
+    "seen": 1790819580.625058,
+    "ast_hash": "",
     "semantic_hash": ""
   },
   ".vscode/settings.json": {
@@ -78,10 +78,10 @@
     "semantic_hash": ""
   },
   "features/config.py": {
-    "mtime": 1790912501.2471364,
-    "seen": 1790912608.5715475,
-    "ast_hash": "c2baac57a4eb3a340a3fb1b263dce0ed",
-    "semantic_hash": ""
+    "mtime": 1790771420.2069736,
+    "seen": 1790819580.625068,
+    "ast_hash": "baaad64173cfe7db32157050556d14ff",
+    "semantic_hash": "baaad64173cfe7db32157050556d14ff"
   },
   "features/database.py": {
     "mtime": 1790737506.0237792,
@@ -132,15 +132,15 @@
     "semantic_hash": "799e8b9b491a0b7b7f4f9879cb23ffa0"
   },
   "features/premium_commands.py": {
-    "mtime": 1790912281.9851084,
-    "seen": 1790912608.5715787,
-    "ast_hash": "acdc4fad07238a4a7659e214c3a841e4",
+    "mtime": 1790910791.5971863,
+    "seen": 1790911091.057383,
+    "ast_hash": "b880d88f63abc4833a0f58294a4a933b",
     "semantic_hash": ""
   },
   "features/premium_management.py": {
-    "mtime": 1790912296.557108,
-    "seen": 1790912608.5715816,
-    "ast_hash": "0782d402f907ddc31f170ad59cf96234",
+    "mtime": 1790910936.9571686,
+    "seen": 1790911091.0573852,
+    "ast_hash": "e701aead28218e03cdd5e542b0694096",
     "semantic_hash": ""
   },
   "features/premium_payments.py": {
@@ -229,8 +229,8 @@
   },
   "pyproject.toml": {
     "mtime": 1790603512.4609084,
-    "seen": 1790912608.57163,
-    "ast_hash": "fd490b966f86415180cd3e4b4f13d010",
+    "seen": 1790819580.6251082,
+    "ast_hash": "",
     "semantic_hash": ""
   },
   "run.sh": {
@@ -618,9 +618,9 @@
     "semantic_hash": "a691d950f08176677e7f26ad0e908586"
   },
   "PREMIUM_SYSTEM.md": {
-    "mtime": 1790912316.037103,
-    "seen": 1790912608.5718386,
-    "ast_hash": "42eae928954fe2bfc8e62e0cd4250be5",
+    "mtime": 1790910956.657173,
+    "seen": 1790911091.0619483,
+    "ast_hash": "bf12afbd3ee6fdef7fdc7bddc264175b",
     "semantic_hash": ""
   },
   "QUICK_START_REQUESTS.md": {
@@ -756,9 +756,9 @@
     "semantic_hash": ""
   },
   "tests/test_premium_list.py": {
-    "mtime": 1790912366.8211026,
-    "seen": 1790912608.5717287,
-    "ast_hash": "a52fb4a3aee62b891a6204cfa4a6143a",
+    "mtime": 1790910791.6131864,
+    "seen": 1790911091.0600085,
+    "ast_hash": "ef1d35c3e93fb6aa93fe3de58a1db10b",
     "semantic_hash": ""
   },
   "graphify-out/memory/query_20261001_140421_338f7a6c_how_does_the_premium_feature_works.md": {
