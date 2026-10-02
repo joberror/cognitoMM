@@ -132,3 +132,6 @@ logs/
 *.session-wal
 auto_delete_test_report.txt
 file_deletions.json
+
+# Graphify
+graphify-out/
