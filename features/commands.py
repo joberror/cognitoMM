@@ -2586,24 +2586,10 @@ async def cmd_premium(client, message: Message):
     if not await is_admin(uid):
         return await message.reply_text("🚫 Admins only.")
 
-    # Create button interface
-    buttons = [
-        [InlineKeyboardButton("Add Users", callback_data="premium:add_users")],
-        [InlineKeyboardButton("Edit Users", callback_data="premium:edit_users")],
-        [InlineKeyboardButton("Remove Users", callback_data="premium:remove_users")],
-        [InlineKeyboardButton("Manage Features", callback_data="premium:manage_features")]
-    ]
-
-    keyboard = InlineKeyboardMarkup(buttons)
-
-    help_text = (
-        "**Premium Management System**\n\n"
-        "**Add Users:** Add users to premium with specified duration\n"
-        "**Edit Users:** Modify premium duration for existing users\n"
-        "**Remove Users:** Remove users from premium\n"
-        "**Manage Features:** Control which features are premium-only\n\n"
-        "Select an option below:"
-    )
+    # Create button interface (shared builder keeps this in sync with the
+    # premium:back callback and the user-list Back button)
+    from .premium_management import build_premium_menu
+    help_text, keyboard = build_premium_menu()
 
     await message.reply_text(help_text, reply_markup=keyboard)
 

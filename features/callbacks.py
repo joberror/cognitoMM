@@ -18,7 +18,8 @@ from .utils import construct_final_caption
 from .file_deletion import track_file_for_deletion
 from .search import send_search_results
 from .user_management import should_process_command_for_user, has_accepted_terms, is_admin, log_action
-from .premium_management import toggle_feature, get_all_premium_features
+from .premium_management import (toggle_feature, get_all_premium_features,
+                                 build_premium_user_list, build_premium_menu)
 
 # Upper bound on a single "Get All" / season-pack delivery (keeps one callback
 # from flooding Telegram with hundreds of sequential uploads).
@@ -1327,6 +1328,11 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 key = f"{callback_query.message.chat.id}_{user_id}"
                 user_input_events[key] = {'input_type': 'premium_remove_user_id', 'event': None, 'message': None}
 
+            elif action == "list_users":
+                await callback_query.answer()
+                text, keyboard = await build_premium_user_list(page=1, query=None)
+                await callback_query.message.edit_text(text, reply_markup=keyboard)
+
             elif action == "manage_features":
                 await callback_query.answer()
 
@@ -1396,26 +1402,68 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
             elif action == "back":
                 await callback_query.answer()
-                # Recreate the main premium menu
-                buttons = [
-                    [InlineKeyboardButton("Add Users", callback_data="premium:add_users")],
-                    [InlineKeyboardButton("Edit Users", callback_data="premium:edit_users")],
-                    [InlineKeyboardButton("Remove Users", callback_data="premium:remove_users")],
-                    [InlineKeyboardButton("Manage Features", callback_data="premium:manage_features")]
-                ]
+                # Recreate the main premium menu (shared builder with cmd_premium)
+                help_text, keyboard = build_premium_menu()
+                await callback_query.message.edit_text(help_text, reply_markup=keyboard)
 
-                keyboard = InlineKeyboardMarkup(buttons)
+        elif data.startswith("plist:"):
+            # Premium user list: pagination (target page + optional filter),
+            # search prompt, clear filter, per-row Edit/Remove (prefilled).
+            if not await is_admin(user_id):
+                await callback_query.answer("🚫 Admins only.", show_alert=True)
+                return
 
-                help_text = (
-                    "**Premium Management System**\n\n"
-                    "**Add Users:** Add users to premium with specified duration\n"
-                    "**Edit Users:** Modify premium duration for existing users\n"
-                    "**Remove Users:** Remove users from premium\n"
-                    "**Manage Features:** Control which features are premium-only\n\n"
-                    "Select an option below:"
+            parts = data.split(":")
+            kind = parts[1] if len(parts) > 1 else ""
+
+            if kind == "noop":
+                await callback_query.answer()
+
+            elif kind in ("prev", "next"):
+                try:
+                    page = int(parts[2])
+                except (IndexError, ValueError):
+                    await callback_query.answer("❌ Invalid page.", show_alert=True)
+                    return
+                list_query = parts[3] if len(parts) > 3 else None
+                text, keyboard = await build_premium_user_list(page=page, query=list_query)
+                await callback_query.answer()
+                await callback_query.message.edit_text(text, reply_markup=keyboard)
+
+            elif kind == "clear":
+                text, keyboard = await build_premium_user_list(page=1, query=None)
+                await callback_query.answer()
+                await callback_query.message.edit_text(text, reply_markup=keyboard)
+
+            elif kind == "search":
+                await callback_query.answer()
+                await callback_query.message.edit_text(
+                    "**Search Premium User**\n\n"
+                    "Send a User ID or @username to filter the list.\n\n"
+                    "You can type **CANCEL** to abort."
                 )
 
-                await callback_query.message.edit_text(help_text, reply_markup=keyboard)
+                from .config import user_input_events
+                key = f"{callback_query.message.chat.id}_{user_id}"
+                user_input_events[key] = {'input_type': 'premium_search_user_id', 'event': None, 'message': None}
+
+            elif kind in ("edit", "remove"):
+                try:
+                    target_user_id = int(parts[2])
+                except (IndexError, ValueError):
+                    await callback_query.answer("❌ Invalid user.", show_alert=True)
+                    return
+                await callback_query.answer()
+                from .premium_commands import (handle_edit_premium_user,
+                                               handle_remove_premium_user)
+                if kind == "edit":
+                    await handle_edit_premium_user(
+                        client, callback_query.message,
+                        actor_id=user_id, target_user_id=target_user_id)
+                else:
+                    await handle_remove_premium_user(
+                        client, callback_query.message,
+                        actor_id=user_id, target_user_id=target_user_id)
 
         elif data.startswith("stats_export:"):
             # Handle statistics export callbacks

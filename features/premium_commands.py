@@ -6,9 +6,10 @@ It processes user inputs during interactive premium management operations.
 """
 
 import asyncio
+from typing import Optional
 from pyrogram.types import Message
 from .user_management import is_admin
-from .premium_management import add_premium_user, edit_premium_user, remove_premium_user, get_premium_user, get_days_remaining, add_premium_feature
+from .premium_management import add_premium_user, edit_premium_user, remove_premium_user, get_premium_user, get_days_remaining, add_premium_feature, build_premium_user_list
 from .utils import wait_for_user_input
 
 
@@ -35,6 +36,22 @@ async def handle_premium_user_input(client, message: Message, input_type: str):
         await handle_remove_premium_user(client, message)
     elif input_type == "premium_add_feature_name":
         await handle_add_premium_feature(client, message)
+    elif input_type == "premium_search_user_id":
+        await handle_premium_list_search(message)
+
+
+async def handle_premium_list_search(message: Message):
+    """Filter the premium user list by a typed User ID or @username."""
+    text = (message.text or "").strip()
+
+    if not text or text.upper() == "CANCEL":
+        list_text, keyboard = await build_premium_user_list(page=1, query=None)
+        return await message.reply_text(list_text, reply_markup=keyboard)
+
+    # Strip "@" so "@bob" matches the stored "bob".
+    query = text[1:] if text.startswith("@") else text
+    list_text, keyboard = await build_premium_user_list(page=1, query=query)
+    await message.reply_text(list_text, reply_markup=keyboard)
 
 
 async def handle_add_premium_user(client, message: Message):
@@ -103,24 +120,33 @@ async def handle_add_premium_user(client, message: Message):
         await message.reply_text(f"❌ {result_message}")
 
 
-async def handle_edit_premium_user(client, message: Message):
-    """Handle editing a premium user"""
-    uid = message.from_user.id
-    
-    # Get user ID input
-    user_input = message.text.strip()
-    
-    if user_input.upper() == "CANCEL":
-        return await message.reply_text("❌ Operation cancelled.")
-    
-    # Try to parse user ID
-    try:
-        target_user_id = int(user_input)
-    except ValueError:
-        return await message.reply_text(
-            "❌ Invalid User ID. Please provide a numeric User ID.\n\n"
-            "Use /premium to start over."
-        )
+async def handle_edit_premium_user(client, message: Message,
+                                   actor_id: Optional[int] = None,
+                                   target_user_id: Optional[int] = None):
+    """Handle editing a premium user.
+
+    ``target_user_id`` pre-fills the user (premium list row buttons); without
+    it the caller is asked to send a User ID first (the ``premium_edit_user_id``
+    input flow). ``actor_id`` overrides who is treated as the acting admin,
+    since a callback-derived call receives the message, not a command.
+    """
+    uid = actor_id if actor_id is not None else message.from_user.id
+
+    if target_user_id is None:
+        # Get user ID input
+        user_input = message.text.strip()
+
+        if user_input.upper() == "CANCEL":
+            return await message.reply_text("❌ Operation cancelled.")
+
+        # Try to parse user ID
+        try:
+            target_user_id = int(user_input)
+        except ValueError:
+            return await message.reply_text(
+                "❌ Invalid User ID. Please provide a numeric User ID.\n\n"
+                "Use /premium to start over."
+            )
     
     # Check if user exists in premium
     premium_doc = await get_premium_user(target_user_id)
@@ -184,24 +210,33 @@ async def handle_edit_premium_user(client, message: Message):
         await message.reply_text(f"❌ {result_message}")
 
 
-async def handle_remove_premium_user(client, message: Message):
-    """Handle removing a premium user"""
-    uid = message.from_user.id
+async def handle_remove_premium_user(client, message: Message,
+                                     actor_id: Optional[int] = None,
+                                     target_user_id: Optional[int] = None):
+    """Handle removing a premium user.
 
-    # Get user ID input
-    user_input = message.text.strip()
+    ``target_user_id`` pre-fills the user (premium list row buttons); without
+    it the caller is asked to send a User ID first. ``actor_id`` overrides the
+    acting admin for callback-derived calls, where ``message.from_user`` is
+    the original command sender, not the button clicker.
+    """
+    uid = actor_id if actor_id is not None else message.from_user.id
 
-    if user_input.upper() == "CANCEL":
-        return await message.reply_text("❌ Operation cancelled.")
+    if target_user_id is None:
+        # Get user ID input
+        user_input = message.text.strip()
 
-    # Try to parse user ID
-    try:
-        target_user_id = int(user_input)
-    except ValueError:
-        return await message.reply_text(
-            "❌ Invalid User ID. Please provide a numeric User ID.\n\n"
-            "Use /premium to start over."
-        )
+        if user_input.upper() == "CANCEL":
+            return await message.reply_text("❌ Operation cancelled.")
+
+        # Try to parse user ID
+        try:
+            target_user_id = int(user_input)
+        except ValueError:
+            return await message.reply_text(
+                "❌ Invalid User ID. Please provide a numeric User ID.\n\n"
+                "Use /premium to start over."
+            )
 
     # Check if user exists in premium
     premium_doc = await get_premium_user(target_user_id)

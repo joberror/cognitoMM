@@ -9,12 +9,14 @@ and controlling premium features.
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Tuple
 import asyncio
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from .config import (ADMINS, FREE_DOWNLOAD_DAILY_LIMIT, PREMIUM_DOWNLOAD_DAILY_LIMIT,
                      PREMIUM_EXPIRY_WARN_DAYS,
                      FILE_DELETION_MINUTES, PREMIUM_FILE_DELETION_MINUTES,
                      BULK_FILE_DELETION_MINUTES, PREMIUM_BULK_FILE_DELETION_MINUTES,
                      FILE_DELETION_WARN_MINUTES)
-from .database import premium_users_col, premium_features_col, users_col
+from .database import (premium_users_col, premium_features_col, users_col,
+                       premium_payments_col)
 from .user_management import log_action
 
 
@@ -445,6 +447,274 @@ async def get_all_premium_users() -> List[Dict]:
         return await cursor.to_list(length=1000)
     except Exception:
         return []
+
+
+# ------------------------------------------------------------------ #
+# Premium user list (admin /premium -> View Users)                    #
+# ------------------------------------------------------------------ #
+# Live view of premium_users_col: every page reads fresh docs, so expiry
+# status is never stale. Sort is expiry-ascending (nearest deadline first).
+# Search + pagination are encoded in callback data: rows carry an index
+# prefix, and the query rides as an extra colon-separated part only when
+# set, so "plist:next:2" and "plist:next:2:bob" parse unambiguously.
+
+PREMIUM_LIST_PAGE_SIZE = 10
+_PREMIUM_LIST_MAX_USERS = 1000
+# NOTE: this cap counts UTF-8 BYTES, not chars. The query rides inside
+# callback_data (Telegram hard-caps it at 64 bytes; "plist:next:999:" worst
+# case is ~16 bytes, leaving 48 for the query).
+_PREMIUM_LIST_MAX_QUERY = 24
+
+
+def build_premium_menu():
+    """The /premium main menu as ``(text, keyboard)``.
+
+    Single source for cmd_premium, the ``premium:back`` callback and the
+    user-list Back button, so the menu never drifts between them.
+    """
+    buttons = [
+        [InlineKeyboardButton("Add Users", callback_data="premium:add_users")],
+        [InlineKeyboardButton("Edit Users", callback_data="premium:edit_users")],
+        [InlineKeyboardButton("Remove Users", callback_data="premium:remove_users")],
+        [InlineKeyboardButton("View Users", callback_data="premium:list_users")],
+        [InlineKeyboardButton("Manage Features", callback_data="premium:manage_features")]
+    ]
+    help_text = (
+        "**Premium Management System**\n\n"
+        "**Add Users:** Add users to premium with specified duration\n"
+        "**Edit Users:** Modify premium duration for existing users\n"
+        "**Remove Users:** Remove users from premium\n"
+        "**View Users:** Browse, search and manage all premium users\n"
+        "**Manage Features:** Control which features are premium-only\n\n"
+        "Select an option below:"
+    )
+    return help_text, InlineKeyboardMarkup(buttons)
+
+
+def _clean_list_query(query) -> Optional[str]:
+    """Normalize a list filter: strip, drop colons (callback separator), cap UTF-8 bytes.
+
+    The cap is on encoded bytes, not characters: the query rides inside
+    callback_data, which Telegram caps at 64 bytes total.
+    """
+    if query is None:
+        return None
+    q = str(query).strip().replace(":", "")
+    while q and len(q.encode("utf-8")) > _PREMIUM_LIST_MAX_QUERY:
+        q = q[:-1]
+    return q or None
+
+
+def _list_query_token(query: Optional[str]) -> str:
+    """Query encoded for callback data ('' = no filter)."""
+    return f":{query}" if query else ""
+
+
+def _premium_expiry(dt):
+    """Timezone-aware expiry or None."""
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _premium_list_status(doc: Dict, now: datetime) -> Tuple[str, int]:
+    """``(STATUS, days)`` for one premium doc: ACTIVE / EXPIRING / EXPIRED.
+
+    ``days`` is days left (active/expiring, floored) or days since lapse
+    (expired, ceiled). EXPIRING = inside the largest expiry-reminder window.
+    """
+    expiry = _premium_expiry(doc.get("expiry_date"))
+    if expiry is None:
+        # Consistent with is_premium_user: no expiry_date means no active premium.
+        return "EXPIRED", 0
+    delta = expiry - now
+    if delta.total_seconds() <= 0:
+        past = -delta
+        return "EXPIRED", max(1, int(past.days) + (1 if past.seconds else 0))
+    days_left = delta.days
+    warn_threshold = max(PREMIUM_EXPIRY_WARN_DAYS) if PREMIUM_EXPIRY_WARN_DAYS else 3
+    if days_left <= warn_threshold:
+        return "EXPIRING", days_left
+    return "ACTIVE", days_left
+
+
+async def build_premium_user_list(now: Optional[datetime] = None, page: int = 1,
+                                  query: Optional[str] = None):
+    """Build the admin premium-user list page.
+
+    Returns ``(text, keyboard)``: a code-block list of 10 users sorted by
+    nearest expiry, with Prev/Next (encoding the active filter), Search and
+    Back buttons, plus per-row Edit/Remove actions keyed on user id.
+    """
+    now = now or datetime.now(timezone.utc)
+    q = _clean_list_query(query)
+
+    try:
+        docs = await premium_users_col.find({}).to_list(length=_PREMIUM_LIST_MAX_USERS)
+    except Exception as e:
+        print(f"⚠️ premium user list query failed: {e}")
+        docs = []
+
+    rows = []
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        uid = doc.get("user_id")
+        if q:
+            if q.isdigit():
+                if str(uid) != q:
+                    continue
+            else:
+                name = str(doc.get("username") or "")
+                if q.lower() not in name.lower() and q != str(uid):
+                    continue
+        rows.append(doc)
+
+    rows.sort(key=lambda d: _premium_expiry(d.get("expiry_date"))
+              or datetime.max.replace(tzinfo=timezone.utc))
+
+    total = len(rows)
+    total_pages = max(1, (total + PREMIUM_LIST_PAGE_SIZE - 1) // PREMIUM_LIST_PAGE_SIZE)
+    page = max(1, min(int(page or 1), total_pages))
+    start_idx = (page - 1) * PREMIUM_LIST_PAGE_SIZE
+    page_rows = rows[start_idx:start_idx + PREMIUM_LIST_PAGE_SIZE]
+
+    if not total:
+        if q:
+            text = f'```\nNo premium users match "{q}"\n```'
+            buttons = [[InlineKeyboardButton("Clear Filter",
+                                             callback_data="plist:clear")]]
+        else:
+            text = "```\nNo premium users found.\n```"
+            buttons = []
+        buttons.append([InlineKeyboardButton("← Back", callback_data="premium:back")])
+        return text, InlineKeyboardMarkup(buttons)
+
+    active = expired = expiring = 0
+    for doc in rows:
+        status, _ = _premium_list_status(doc, now)
+        if status == "EXPIRED":
+            expired += 1
+        else:
+            active += 1
+            if status == "EXPIRING":
+                expiring += 1
+
+    today = _day_key(now)
+
+    # Batch enrichment: ONE query per side collection for the whole page.
+    # A per-row find_one here would be 2N round-trips on every page turn.
+    page_uids = [d.get("user_id") for d in page_rows]
+    usage = {}
+    try:
+        ucursor = users_col.find(
+            {"user_id": {"$in": page_uids}},
+            {"user_id": 1, "download_day": 1, "downloads_today": 1, "watchlist": 1})
+        for udoc in await ucursor.to_list(length=len(page_uids)):
+            if isinstance(udoc, dict) and udoc.get("user_id") is not None:
+                usage[udoc.get("user_id")] = udoc
+    except Exception:
+        usage = {}
+    sources = {}
+    try:
+        pcursor = premium_payments_col.find({"user_id": {"$in": page_uids}})
+        for pay in await pcursor.to_list(length=None):
+            if isinstance(pay, dict) and pay.get("user_id") is not None:
+                sources.setdefault(pay.get("user_id"), pay)
+    except Exception:
+        sources = {}
+
+    list_text = "```\n"
+    list_text += f"Premium Users - Page {page}/{total_pages}\n"
+    list_text += (f"Total: {total} | Active: {active} | "
+                  f"Expired: {expired} | Expiring: {expiring}\n")
+    if q:
+        list_text += f'Filter: "{q}"\n'
+    list_text += "=" * 44 + "\n\n"
+
+    buttons = []
+    action_row = []
+    for idx, doc in enumerate(page_rows, start=start_idx + 1):
+        uid = doc.get("user_id")
+        username = doc.get("username") or uid
+        status, days = _premium_list_status(doc, now)
+        if status == "EXPIRED":
+            state = f"EXPIRED ({days}d ago)"
+        else:
+            state = f"{status} {days}d left"
+
+        expiry = _premium_expiry(doc.get("expiry_date"))
+        added = _premium_expiry(doc.get("added_date"))
+
+        list_text += f"#{idx} {username} (ID: {uid}) {state}\n"
+        list_text += (f"   End: {expiry.strftime('%Y-%m-%d %H:%M UTC') if expiry else 'N/A'}"
+                      f" | Start: {added.strftime('%Y-%m-%d') if added else 'N/A'}"
+                      f" | By: {doc.get('added_by', 'N/A')}\n")
+        last_updated = _premium_expiry(doc.get("last_updated"))
+        if last_updated:
+            list_text += (f"   Upd: {last_updated.strftime('%Y-%m-%d')}"
+                          f" by {doc.get('last_updated_by', 'N/A')}\n")
+
+        # Usage today + watchlist + how premium was obtained, from the
+        # batched reads above; missing rows degrade to "-".
+        dl = wl = "-"
+        udoc = usage.get(uid)
+        if udoc:
+            if udoc.get("download_day") == today:
+                dl = udoc.get("downloads_today", 0)
+            wl = len(udoc.get("watchlist") or [])
+        pay = sources.get(uid)
+        if pay:
+            source = f"paid {pay.get('stars', '?')}XTR {pay.get('plan_key', '')}".strip()
+        else:
+            source = "grant"
+        list_text += f"   DL: {dl} | WL: {wl} | {source}\n\n"
+
+        action_row.append(InlineKeyboardButton(f"[{idx}] Edit",
+                                               callback_data=f"plist:edit:{uid}"))
+        action_row.append(InlineKeyboardButton(f"[{idx}] Remove",
+                                               callback_data=f"plist:remove:{uid}"))
+        if len(action_row) == 4:
+            buttons.append(action_row)
+            action_row = []
+    if action_row:
+        buttons.append(action_row)
+
+    nav_row = []
+    token = _list_query_token(q)
+    if page > 1:
+        nav_row.append(InlineKeyboardButton("← Prev",
+                                            callback_data=f"plist:prev:{page - 1}{token}"))
+    nav_row.append(InlineKeyboardButton(f"Page {page}/{total_pages}",
+                                        callback_data="plist:noop"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton("Next →",
+                                            callback_data=f"plist:next:{page + 1}{token}"))
+    buttons.append(nav_row)
+
+    tools_row = [InlineKeyboardButton("Search User", callback_data="plist:search")]
+    if q:
+        tools_row.append(InlineKeyboardButton("Clear Filter",
+                                              callback_data="plist:clear"))
+    buttons.append(tools_row)
+
+    # Existing /premium actions stay one tap away, like the row-level
+    # Edit/Remove buttons above (they reuse the premium: callbacks).
+    buttons.append([
+        InlineKeyboardButton("Add Users", callback_data="premium:add_users"),
+        InlineKeyboardButton("Edit Users", callback_data="premium:edit_users"),
+    ])
+    buttons.append([
+        InlineKeyboardButton("Remove Users", callback_data="premium:remove_users"),
+        InlineKeyboardButton("Features", callback_data="premium:manage_features"),
+    ])
+
+    buttons.append([InlineKeyboardButton("← Menu", callback_data="premium:back")])
+
+    list_text += "```"
+    return list_text, InlineKeyboardMarkup(buttons)
 
 
 async def cleanup_expired_premium():
