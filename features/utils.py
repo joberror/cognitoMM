@@ -236,64 +236,125 @@ def format_series_group(group_data):
     details = ".".join(details_parts) if details_parts else ""
     return title, details
 
+def _format_runtime(seconds):
+    """Render a duration in seconds as '2h 35m' / '45m' / '30s'."""
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return ""
+    if seconds <= 0:
+        return ""
+    hours, rem = divmod(seconds, 3600)
+    minutes = rem // 60
+    if hours:
+        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+    if minutes:
+        return f"{minutes}m"
+    return f"{seconds}s"
+
+
 def construct_final_caption(db_item, file_size_bytes=None, user_name="User"):
-    """Construct a standardized caption from a database item."""
+    """Construct a standardized HTML caption from a database item.
+
+    Movie details render inside a Telegram blockquote (the vertical-bar
+    quote style). Copyright/piracy wording deliberately stays OUTSIDE the
+    quote, below it. Returns HTML; callers must send with ParseMode.HTML.
+    """
     if not db_item:
         return None
 
-    # Extract Data
-    title = db_item.get('title', 'Unknown Title').upper()
-    
-    # Handle Series Title
-    type_ = db_item.get('type', 'Movie').lower()
-    if type_ in ['series', 'tv', 'show'] and db_item.get('season') and db_item.get('episode'):
-        season = int(db_item['season'])
-        episode = int(db_item['episode'])
-        title = f"`{title}` - S{season:02d}E{episode:02d}"
+    def esc(value):
+        return html.escape(str(value), quote=False)
 
-    # Copy-to-text format (monospace)
-    title_formatted = f"{title}"
+    def row(label, value):
+        return f"<b>{label}</b> · {value}"
 
-    quality = db_item.get('quality')
-    rip = db_item.get('rip')
-    audio = db_item.get('audio')
-    ext = db_item.get('extension', 'MKV').replace('.', '').upper()
-    
-    # Combine quality fields
-    quality_parts = []
-    if quality: quality_parts.append(quality)
-    if rip: quality_parts.append(rip)
-    if audio: quality_parts.append(audio)
-    quality_str = ", ".join(quality_parts)
+    title = (db_item.get('title') or 'Unknown Title').upper()
+    year = db_item.get('year')
+    type_ = str(db_item.get('type') or 'Movie').lower()
+    is_series = type_ in ('series', 'tv', 'show')
+
+    # ---- Header (outside the quote): 🎬 TITLE (2021) · S01E02 · ★8.1/10
+    header = f"{'📺' if is_series else '🎬'} <b>{esc(title)}</b>"
+    if year:
+        header += f" ({year})"
+    if is_series and db_item.get('season') is not None and db_item.get('episode') is not None:
+        header += f" · S{int(db_item['season']):02d}E{int(db_item['episode']):02d}"
+    rating = db_item.get('tmdb_rating')
+    if rating:
+        header += f" · ★{rating}/10"
+
+    # ---- Quoted detail rows; every line is skipped when its data is absent
+    rows = []
+
+    quality_bits = [v for v in (
+        db_item.get('resolution') or db_item.get('quality'),
+        db_item.get('rip'),
+        db_item.get('source'),
+        db_item.get('hdr_format'),
+    ) if v]
+    if quality_bits:
+        rows.append(row("Quality", esc(" · ".join(quality_bits))))
+
+    video_bits = [v for v in (db_item.get('video_codec'), db_item.get('bit_depth')) if v]
+    if video_bits:
+        rows.append(row("Video", esc(" · ".join(video_bits))))
+
+    audio_bits = [v for v in (db_item.get('audio'), db_item.get('audio_channels')) if v]
+    if audio_bits:
+        rows.append(row("Audio", esc(" · ".join(audio_bits))))
+
+    if db_item.get('language'):
+        rows.append(row("Language", esc(db_item['language'])))
+
+    genres = db_item.get('tmdb_genres')
+    if genres:
+        rows.append(row("Genre", esc(" · ".join(str(g) for g in genres))))
+
+    edition_bits = [v for v in (db_item.get('edition'),) if v]
+    for flag, name in (
+        ('is_extended', 'Extended'), ('is_directors_cut', "Director's Cut"),
+        ('is_unrated', 'Unrated'), ('is_remux', 'Remux'),
+        ('is_proper', 'Proper'), ('is_repack', 'Repack'), ('is_3d', '3D'),
+    ):
+        if db_item.get(flag):
+            edition_bits.append(name)
+    if edition_bits:
+        rows.append(row("Edition", esc(" · ".join(edition_bits))))
+
+    runtime = _format_runtime(db_item.get('duration'))
+    if runtime:
+        rows.append(row("Runtime", runtime))
 
     # Canonical size formatter; keep the caption clean when no size is known
-    size_str = format_file_size(file_size_bytes) if file_size_bytes else ""
+    if file_size_bytes:
+        rows.append(row("Size", format_file_size(file_size_bytes)))
 
-    # Disclaimer
-    disclaimer = "<i>©️ All rights belong to respective owners • Shared as found publicly</i>"
-    
-    # Date Format: 12/18/2025 1:20 AM
-    current_date = datetime.now().strftime("%m/%d/%Y %I:%M %p")
+    ext = str(db_item.get('extension') or '').replace('.', '').upper()
+    if ext:
+        rows.append(row("Format", ext))
 
-    # Build content lines
-    lines = []
-    lines.append(f"┏ 🏷 Name: {title_formatted}")
-    lines.append("┃ ")
-    
-    if quality_str:
-        lines.append(f"┠ ✨ Quality: {quality_str}")
-        
-    if size_str:
-        lines.append(f"┠ ⚙️ Size: {size_str}")
-        
-    lines.append(f"┠ 💠 Type: {ext}")
-    lines.append(f"┠ 👤 User: {user_name}")
-    lines.append("┃")
-    lines.append(f"┖ 📅 Date: {current_date}")
-    
-    lines.append("")
-    lines.append(f"{disclaimer}")
-    
+    imdb_id = db_item.get('imdb_id') or db_item.get('imdb')
+    if imdb_id:
+        rows.append(row("IMDb", f'<a href="https://www.imdb.com/title/{esc(imdb_id)}/">{esc(imdb_id)}</a>'))
+
+    rows.append(row("Requested by", esc(user_name)))
+    rows.append(row("Date", datetime.now().strftime("%d %b %Y, %I:%M %p")))
+
+    lines = [header, ""]
+    lines.append("<blockquote>" + "\n".join(rows) + "</blockquote>")
+
+    # ---- Synopsis below the quote (kept out to keep the spec block tight)
+    overview = db_item.get('tmdb_overview')
+    if overview:
+        overview = str(overview).strip()
+        if len(overview) > 180:
+            overview = overview[:177].rsplit(' ', 1)[0] + "…"
+        lines += ["", f"<i>{esc(overview)}</i>"]
+
+    # ---- Disclaimer: piracy/copyright wording stays OUTSIDE the quote
+    lines += ["", "<i>©️ All rights belong to respective owners • Shared as found publicly</i>"]
+
     return "\n".join(lines)
 
 def format_recent_output(categorized_results, total_files=None, total_movies=None, total_series=None, last_updated=None):

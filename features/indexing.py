@@ -290,8 +290,10 @@ async def index_message(msg):
 
         file_size = None
         filename = None
+        duration = 0
         if has_video:
             file_size = msg.video.file_size
+            duration = msg.video.duration or 0
             # videos may not have filename
         elif has_doc:
             file_size = msg.document.file_size
@@ -314,6 +316,7 @@ async def index_message(msg):
             "season": parsed.get("season"),
             "episode": parsed.get("episode"),
             "file_size": file_size,
+            "duration": duration,
             "upload_date": datetime.utcfromtimestamp(msg.date.timestamp()) if getattr(msg, "date", None) else datetime.now(timezone.utc),
             "channel_id": msg.chat.id,
             "channel_title": getattr(msg.chat, "title", None),

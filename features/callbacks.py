@@ -6,6 +6,7 @@ It handles file requests, pagination, bulk downloads, and other button interacti
 """
 
 from datetime import datetime, timezone
+import html
 import io
 from bson import ObjectId
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, LinkPreviewOptions
@@ -58,15 +59,17 @@ async def _deliver_bulk_files(client, callback_query, files, retention_minutes):
             elif msg.document:
                 file_size = msg.document.file_size
 
-            final_caption = construct_final_caption(db_item, file_size, user_name) or msg.caption or ""
+            final_caption = construct_final_caption(db_item, file_size, user_name) or html.escape(msg.caption or "", quote=False)
 
             sent_message = None
             if msg.video:
                 sent_message = await client.send_cached_media(
-                    chat_id=user_id, file_id=msg.video.file_id, caption=final_caption)
+                    chat_id=user_id, file_id=msg.video.file_id, caption=final_caption,
+                    parse_mode=ParseMode.HTML)
             elif msg.document:
                 sent_message = await client.send_cached_media(
-                    chat_id=user_id, file_id=msg.document.file_id, caption=final_caption)
+                    chat_id=user_id, file_id=msg.document.file_id, caption=final_caption,
+                    parse_mode=ParseMode.HTML)
             else:
                 raise Exception("Message does not contain video or document")
 
@@ -328,7 +331,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     
                 user_name = callback_query.from_user.first_name
                 
-                final_caption = construct_final_caption(db_item, file_size, user_name) or msg.caption or ""
+                final_caption = construct_final_caption(db_item, file_size, user_name) or html.escape(msg.caption or "", quote=False)
 
                 # Extract media and send using send_cached_media (no forward header)
                 sent_message = None
@@ -336,13 +339,15 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     sent_message = await client.send_cached_media(
                         chat_id=callback_query.from_user.id,
                         file_id=msg.video.file_id,
-                        caption=final_caption
+                        caption=final_caption,
+                        parse_mode=ParseMode.HTML
                     )
                 elif msg.document:
                     sent_message = await client.send_cached_media(
                         chat_id=callback_query.from_user.id,
                         file_id=msg.document.file_id,
-                        caption=final_caption
+                        caption=final_caption,
+                        parse_mode=ParseMode.HTML
                     )
                 else:
                     raise Exception("Message does not contain video or document")

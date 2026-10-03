@@ -63,7 +63,7 @@ class FakeClient:
             video=SimpleNamespace(file_id=f"file{message_id}", file_size=100),
             document=None, caption="cap")
 
-    async def send_cached_media(self, chat_id, file_id, caption=None):
+    async def send_cached_media(self, chat_id, file_id, caption=None, parse_mode=None):
         self.cached.append({"chat_id": chat_id, "file_id": file_id})
         return SimpleNamespace(id=next(self._ids))
 

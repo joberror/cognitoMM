@@ -118,6 +118,54 @@ def test_construct_final_caption_uses_canonical_formatter():
     assert "Size:" not in cap_no_size
 
 
+def test_caption_is_telegram_blockquote_with_disclaimer_outside():
+    """Movie details render inside a <blockquote>; the copyright/piracy
+    disclaimer and the header stay outside the quote."""
+    cap = utils.construct_final_caption(
+        {
+            "title": "Dune", "year": 2021, "type": "Movie",
+            "resolution": "2160p", "rip": "WEBRip", "audio": "TrueHD",
+            "audio_channels": "7.1CH", "video_codec": "x265/HEVC",
+            "hdr_format": "HDR10+", "extension": ".mkv", "duration": 9480,
+            "tmdb_rating": 7.8, "tmdb_genres": ["Action", "Sci-Fi"],
+            "tmdb_overview": "Paul Atreides must travel to the most dangerous planet.",
+            "imdb_id": "tt1151487",
+        },
+        file_size_bytes=4 * 1024**3,
+        user_name="Raju",
+    )
+    quote = cap.split("<blockquote>")[1].split("</blockquote>")[0]
+    before_quote = cap.split("<blockquote>")[0]
+    after_quote = cap.split("</blockquote>")[1]
+
+    # Header carries title/year/rating, outside the quote
+    assert "DUNE" in before_quote and "(2021)" in before_quote and "★7.8/10" in before_quote
+    # Detail rows live inside the quote
+    for token in ("2160p", "WEBRip", "HDR10+", "x265/HEVC", "TrueHD", "7.1CH",
+                  "Action", "2h 38m", "4.0GB", "MKV", "tt1151487", "Raju"):
+        assert token in quote, token
+    assert "imdb.com/title/tt1151487" in quote
+    # Piracy/copyright wording never enters the quote
+    assert "rights belong" not in quote
+    assert "rights belong" in after_quote
+    # Synopsis below the quote, not inside it
+    assert "Paul Atreides" in after_quote and "Paul Atreides" not in quote
+    # HTML-safe: a title with & < > cannot break markup
+    evil = utils.construct_final_caption({"title": "A & B <b>", "type": "Movie"})
+    assert "A &amp; B &lt;B&gt;" in evil and "<b>A & B" not in evil
+
+
+def test_caption_series_header():
+    """Series items show 📺 and SxxEyy in the header; movies show 🎬."""
+    cap = utils.construct_final_caption(
+        {"title": "Visions", "type": "Series", "season": 2, "episode": 9},
+        user_name="U",
+    )
+    head = cap.split("\n")[0]
+    assert "📺" in head and "S02E09" in head
+    assert "🎬" in utils.construct_final_caption({"title": "X", "type": "Movie"})
+
+
 def test_statistics_uses_canonical_formatter():
     """The dashboard renders sizes through the shared format_file_size."""
     out = statistics.format_stats_output({"db_estimated_size": 3 * 1024**2, "total_logs": 0})
@@ -531,6 +579,8 @@ if __name__ == "__main__":
         test_format_file_size_stat_removed_from_statistics,
         test_format_file_size_is_canonical,
         test_construct_final_caption_uses_canonical_formatter,
+        test_caption_is_telegram_blockquote_with_disclaimer_outside,
+        test_caption_series_header,
         test_statistics_uses_canonical_formatter,
         test_engine_sets_quality_from_resolution,
         test_engine_extracts_bit_depth_separately,
