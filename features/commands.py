@@ -14,7 +14,7 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, 
 from pyrogram.enums import ParseMode, ChatType
 
 # Import from our modules
-from .config import AUTO_INDEX_DEFAULT, temp_data, bulk_downloads, START_MESSAGE, SUPPORT_LINK
+from .config import AUTO_INDEX_DEFAULT, temp_data, bulk_downloads, START_MESSAGE, SUPPORT_LINK, HELP_GUIDE_URL, ADMIN_GUIDE_URL
 from .database import movies_col, users_col, channels_col, settings_col, logs_col
 from .utils import wait_for_user_input, cleanup_expired_bulk_downloads, resolve_chat_ref
 
@@ -179,91 +179,129 @@ async def handle_command(client, message: Message):
 # -------------------------
 # Command Implementations
 # -------------------------
-USER_HELP = """
-╔══════════════════════╗
-║   🎬 Movie Bot Help   ║
-╚══════════════════════╝
+# Interactive help menu. Each section is a short, scannable page rendered on
+# its own (HTML parse mode) instead of dumping every command in one wall of
+# text. The categories are the `help:<section>` callbacks; the full guide is a
+# URL button published by scripts/publish_telegraph.py (HELP_GUIDE_URL).
+HELP_HOME = (
+    "🎬 <b>MovieBot Help</b>\n\n"
+    "Pick a category below, or open the full guide.\n\n"
+    "💡 <code>/f</code> is the fastest search; <code>-e</code> matches the "
+    "title exactly."
+)
 
-╭─ 🔎 Search
-│ /f <title>             Quick search
-│ /search <title>        Smart search (exact + fuzzy)
-│ /search -e <title>     Exact title only
-│ Filters: /search Dune 2021 1080p movie
-│ Facets: lang:hindi subs:esub audio:atmos hdr
-╰─────────────────────
+HELP_SECTIONS = {
+    "search": (
+        "🔎 <b>Search</b>\n\n"
+        "<code>/search &lt;title&gt;</code> — smart search (exact + fuzzy)\n"
+        "<code>/f &lt;title&gt;</code> — quick search (same as /search)\n"
+        "<code>/search -e &lt;title&gt;</code> — exact title only\n\n"
+        "<b>Filters</b> — append to any search:\n"
+        "• year — <code>/search Dune 2021</code>\n"
+        "• quality — <code>480p 720p 1080p 2160p 4k</code>\n"
+        "• type — <code>movie</code> or <code>series</code>\n"
+        "• facets — <code>lang:hindi subs:esub audio:atmos hdr</code>\n\n"
+        "Combine them: <code>/search Dune 2021 1080p movie lang:hindi</code>"
+    ),
+    "discover": (
+        "📌 <b>Discover</b>\n\n"
+        "<code>/recent</code> — newly added titles\n"
+        "<code>/trending</code> — TMDb trending movies &amp; shows\n"
+        "<code>/random</code> — a random indexed title\n"
+        "<code>/genres</code> — browse by genre\n"
+        "<code>/genres &lt;name&gt;</code> — browse a genre (A–Z / Newest / "
+        "Top Rated)\n"
+        "<code>/request &lt;title&gt;</code> — request a missing title\n\n"
+        "📝 Requests: max 3 pending • 1 per day • upvote existing ones"
+    ),
+    "me": (
+        "👤 <b>Me</b>\n\n"
+        "<code>/my_history</code> — your recent searches\n"
+        "<code>/my_stat</code> — your usage + premium info\n\n"
+        "<code>/watch &lt;title&gt;</code> — watchlist; get a DM when indexed\n"
+        "<code>/watchlist</code> — your watched titles (with UPDATE)\n"
+        "<code>/unwatch &lt;title&gt;</code> — remove a watched title\n\n"
+        "📌 Watchlist: 5 free / 20 premium titles"
+    ),
+    "premium": (
+        "⭐ <b>Premium</b>\n\n"
+        "<code>/buy_premium</code> — buy with Telegram Stars\n\n"
+        "<b>What you get</b>\n"
+        "• Watchlist: 20 titles (free: 5)\n"
+        "• Longer file retention: 30/60 min (free: 5/15)\n"
+        "• Unlimited daily downloads (free: 10/day)\n"
+        "• Premium-only features when enabled by the admin"
+    ),
+    "admin": (
+        "👑 <b>Admin</b>\n\n"
+        "<b>📊 Stats</b>\n"
+        "<code>/stat</code> · <code>/quickstat</code>\n\n"
+        "<b>📢 Broadcast &amp; requests</b>\n"
+        "<code>/broadcast [message]</code> · <code>/request_list</code>\n\n"
+        "<b>⭐ Premium</b>\n"
+        "<code>/premium</code> — manage users + feature flags\n\n"
+        "<b>📡 Channels</b>\n"
+        "<code>/mc</code> — unified channel manager\n"
+        "<code>/add_channel &lt;id&gt;</code> · <code>/remove_channel &lt;id&gt;</code>\n"
+        "<code>/index_channel</code> · <code>/toggle_indexing</code>\n"
+        "<code>/reset_channel</code>\n\n"
+        "<b>👥 Users</b>\n"
+        "<code>/user</code> — filters + batch actions\n"
+        "<code>/promote</code> · <code>/demote</code> · "
+        "<code>/ban_user</code> · <code>/unban_user</code>\n\n"
+        "<b>🗄️ Database</b>\n"
+        "<code>/update_db</code> · <code>/manual_deletion &lt;t&gt;</code>\n"
+        "<code>/indexing_stats</code> · <code>/queue</code> · "
+        "<code>/reset_stats</code>\n"
+        "<code>/logs [n]</code> · <code>/enrich [n]</code> · "
+        "<code>/enrich_status</code>\n"
+        "<code>/reset</code> — WIPE all indexed data (confirm)\n\n"
+        "⚠️ Add the bot as admin in channels to index/monitor files"
+    ),
+}
 
-╭─ 📌 Discover
-│ /recent                Newly added
-│ /trending              Trending now
-│ /random                Surprise me
-│ /genres                Browse by genre
-│ /request               Request missing title
-╰─────────────────────
 
-╭─ 👤 Me
-│ /my_history            Your searches
-│ /my_stat               Usage + premium info
-│ /watch <title>         Watchlist (get notified)
-│ /watchlist             Your watched titles
-│ /buy_premium           ⭐ Get premium (Stars)
-│ /help                  This menu
-╰─────────────────────
+def _help_keyboard(is_admin_user: bool, section: str) -> InlineKeyboardMarkup:
+    """Build the inline keyboard for a help page (section pages get Back)."""
+    if section == "home":
+        rows = [
+            [InlineKeyboardButton("🔎 Search", callback_data="help:search"),
+             InlineKeyboardButton("📌 Discover", callback_data="help:discover")],
+            [InlineKeyboardButton("👤 Me", callback_data="help:me"),
+             InlineKeyboardButton("⭐ Premium", callback_data="help:premium")],
+        ]
+        if HELP_GUIDE_URL:
+            rows.append([InlineKeyboardButton("📖 Full Guide", url=HELP_GUIDE_URL)])
+        if is_admin_user:
+            rows.append([InlineKeyboardButton("👑 Admin", callback_data="help:admin")])
+    else:
+        rows = [[InlineKeyboardButton("← Back", callback_data="help:home")]]
+        if HELP_GUIDE_URL:
+            rows.append([InlineKeyboardButton("📖 Full Guide", url=HELP_GUIDE_URL)])
+        # The admin guide is admin-only: only ever offered on the admin page.
+        if section == "admin" and ADMIN_GUIDE_URL:
+            rows.append([InlineKeyboardButton("🛡️ Admin Guide", url=ADMIN_GUIDE_URL)])
+    return InlineKeyboardMarkup(rows)
 
-💡 Tips: /f = fastest • -e = perfect match
-📝 Requests: max 3 pending • 1 per day • upvote existing ones
-"""
 
-ADMIN_HELP = """
-═══════════════════════
-👑 Admin Zone
+async def build_help_page(user_id, section="home"):
+    """Return ``(text, keyboard)`` for a help page, gating the admin section."""
+    is_admin_user = await is_admin(user_id)
+    if section != "home" and section not in HELP_SECTIONS:
+        section = "home"
+    if section == "admin" and not is_admin_user:
+        section = "home"
+    text = HELP_HOME if section == "home" else HELP_SECTIONS[section]
+    return text, _help_keyboard(is_admin_user, section)
 
-╭─ 📊 Stats
-│ /stat                  Full dashboard
-│ /quickstat             Quick key numbers
-╰─────────────────────
 
-╭─ 📢 Broadcast & Requests
-│ /broadcast [message]   Message users
-│ /request_list          Manage requests
-╰─────────────────────
-
-╭─ ⭐ Premium
-│ /premium               Manage premium + features
-╰─────────────────────
-
-╭─ 📡 Channels
-│ /mc                    Unified channel manager
-│ /add_channel <id>      Add channel
-│ /remove_channel <id>   Remove channel
-│ /index_channel         Index (interactive)
-│ /toggle_indexing       Auto-index on/off
-│ /reset_channel         Clear channel index (confirm)
-╰─────────────────────
-
-╭─ 👥 Users
-│ /user                  Unified user manager (filters, batch actions)
-╰─────────────────────
-
-╭─ 🗄️ Database
-│ /update_db             Cleanup duplicates/orphans
-│ /manual_deletion <t>   Delete by title
-│ /indexing_stats        Diagnose indexing skips
-│ /queue                 Live queue + background ops
-│ /reset_stats           Reset counters
-│ /logs [n]              Recent audit log entries
-│ /enrich [n]            Backfill TMDb metadata
-│ /enrich_status         TMDb backfill progress
-│ /reset                 WIPE all indexed data (confirm)
-╰─────────────────────
-
-✨ Highlights
-• /mc unified management • /user unified user manager
-• interactive + cancellable indexing • batch actions with preview + confirm
-• Better errors + supports all video types • diagnostics for indexing
-• Safe resets + cleanup tools • premium feature access control
-
-⚠️ Add the bot as admin in channels to index/monitor files
-"""
+async def render_help_page(client, message, user_id, section="home", edit=False):
+    """Send or edit a help page for ``user_id``."""
+    text, keyboard = await build_help_page(user_id, section)
+    if edit:
+        await message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+    else:
+        await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
 async def cmd_start(client, message: Message):
     # Check if user is banned first
@@ -383,10 +421,7 @@ async def cmd_start(client, message: Message):
 
 async def cmd_help(client, message: Message, user_id=None):
     uid = user_id or message.from_user.id
-    text = USER_HELP
-    if await is_admin(uid):
-        text += "\n" + ADMIN_HELP
-    await message.reply_text(text)
+    await render_help_page(client, message, uid, "home")
 
 async def cmd_search(client, message: Message):
     uid = message.from_user.id

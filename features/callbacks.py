@@ -159,10 +159,15 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
             return
             
-        # Handle help callback
-        if data == "help":
-            from .commands import cmd_help
-            await cmd_help(client, callback_query.message, user_id=user_id)
+        # Handle help menu callbacks (Tutorial button + help:<section> pages).
+        # The plain "help" button rides on the welcome PHOTO message, so it
+        # sends a fresh message; "help:<section>" navigates by editing.
+        if data == "help" or data.startswith("help:"):
+            from .commands import render_help_page
+            section = data.split(":", 1)[1] if ":" in data else "home"
+            await render_help_page(
+                client, callback_query.message, user_id, section,
+                edit=data.startswith("help:"))
             await callback_query.answer()
             return
 

@@ -140,7 +140,7 @@ A handler in `commands.py` that starts `async def cmd_` is *usually* routed from
 | Command | Behaviour |
 |---|---|
 | `/start` | Terms gate → welcome photo + Support/Tutorial buttons. The only command exempt from the ban and terms checks. |
-| `/help` | `USER_HELP` menu; admins also get `ADMIN_HELP`. |
+| `/help` | Interactive help menu: category buttons (`help:search` / `help:discover` / `help:me` / `help:premium`, plus `help:admin` for admins) rendered by `cmd_help` / `render_help_page`. `📖 Full Guide` (`HELP_GUIDE_URL`) shows on every page; `🛡️ Admin Guide` (`ADMIN_GUIDE_URL`) shows only on the admin section. |
 | `/search <t>`, `/f <t>`, `/f -e <t>` | Smart search (exact + fuzzy) / exact only. Appendable filters: `year`, `quality` (`480p/720p/1080p/2160p/4k`), `type` (`movie/series`) and the library facets `lang:`, `subs:`, `audio:`, `hdr`/`hdr:dv`. See §8 *Search*. |
 | `/recent` | Last batch (10-min window around the newest `indexed_at`). Premium-gated when the `recent` feature flag is on (admins bypass). Plain HTML, one consolidated line per title (`N. <code>Title (year)</code> [qualities]` / `[S01E01-02]`) — tapping copies the full `Title (year)` string for `/search`. |
 | `/trending` | TMDb trending movies / shows / new releases with category buttons (`trending:` callback). Lines are NOT inside a code fence so IMDb/TMDb links stay clickable. Needs `TMDB_API`. |
@@ -181,7 +181,7 @@ A handler in `commands.py` that starts `async def cmd_` is *usually* routed from
 
 **Premium gating** is per-feature, not per-command: `is_feature_premium_only(name)` is checked inline (currently `recent`, `request`, `get_all`) and admins always pass. A feature flag is only meaningful once toggled in `/premium` → Manage Features; the defaults in `DEFAULT_PREMIUM_FEATURES` start enabled.
 
-**Help text** (`USER_HELP` / `ADMIN_HELP`) is defined in `commands.py` and rendered by `cmd_help`. It is a **hand-maintained duplicate** of the tables above — adding a command without updating the help block leaves it undiscoverable in the menu. `/start` (obvious) and `/unwatch` (documented in the `/watch` line) are the only routed commands absent from both blocks; `/manage_channel` appears only as its `/mc` alias. Everything else is in sync, and `ADMIN_HELP` covers all routed admin commands; the four role aliases (`/promote`, `/demote`, `/ban_user`, `/unban_user`) are hidden from the menu on purpose — `/user` is their dashboard.
+**Help menu** (`HELP_HOME` / `HELP_SECTIONS` / `build_help_page` / `render_help_page` in `commands.py`) is an interactive category menu rather than one wall of text. `cmd_help` renders `home`; the `help:<section>` callback (handled in `callbacks.py`) edits the message in place, each section page carrying a `← Back` button. The `help:admin` page is gated on `is_admin` (non-admins are bounced to home). A `📖 Full Guide` URL button (`HELP_GUIDE_URL`) appears on every page; the `🛡️ Admin Guide` button (`ADMIN_GUIDE_URL`) appears **only** on the admin section, so the admin guide link is never exposed to regular users (published by `scripts/publish_telegraph.py`). The section text is still a **hand-maintained duplicate** of the tables above — adding a command without updating `HELP_SECTIONS` leaves it undiscoverable in the menu. `/start` (obvious), `/unwatch` (documented in the `/watch` line) and `/manage_channel` (shown only as its `/mc` alias) are the routed commands not listed in the menu; the four role aliases (`/promote`, `/demote`, `/ban_user`, `/unban_user`) are intentionally hidden — `/user` is their dashboard. The two Telegraph articles (`make telegraph`) carry the full User and Admin references including those aliases.
 
 ---
 
@@ -192,7 +192,7 @@ Routing order (important — first match wins):
 | Callback prefix | Flow |
 |---|---|
 | `terms#` | `terms#accept` / `terms#decline` — sets `terms_accepted`, bypasses access control |
-| `help` | Renders help menu |
+| `help` / `help:{section}` | Help menu: `help` (Tutorial button) and `help:home` render the category keyboard; `help:search` / `help:discover` / `help:me` / `help:premium` / `help:admin` edit the message to that section. `help:admin` is gated on `is_admin`. Bypasses access control (like `terms#`) |
 | `buyplan:{key}` | Send a Telegram Stars invoice for a premium plan |
 | `choose:{sid}:{gi}:{season}:{res}:{page}` | `Pick [n]` — in-place filter of a `/search` message down to one title's copies. 6-part is current; the legacy 5-part form is still parsed. Series season page via `S◀`/`S▶` |
 | `watchpick:{token}:{idx}` | `/watch` disambiguation picker — store the chosen TMDb candidate, edit the message in place. `idx == "cancel"` aborts. State in `bulk_downloads` (`type: "watch_pick"`), ownership-checked |
@@ -214,7 +214,7 @@ Routing order (important — first match wins):
 | `stats_export:` | Send stats as JSON or CSV document |
 | `trending:` | Switch trending category (movies/shows/releases) |
 
-All callbacks (except `terms#` and `help`) require `should_process_command_for_user` + terms acceptance (admins exempt). Every prefix that carries state in `bulk_downloads` re-checks ownership against the clicker (`group_data.get("user_id") != user_id` → refuse), because callback data travels with a forwarded message.
+All callbacks (except `terms#` and `help`/`help:`) require `should_process_command_for_user` + terms acceptance (admins exempt). Every prefix that carries state in `bulk_downloads` re-checks ownership against the clicker (`group_data.get("user_id") != user_id` → refuse), because callback data travels with a forwarded message.
 
 ---
 
@@ -516,6 +516,8 @@ Download quota: check_download_quota on get_file/bulk (free cap vs premium lift;
 | `TMDB_API` | "" | TMDb key (trending/requests) |
 | `START_MESSAGE` | welcome text | /start caption |
 | `SUPPORT_LINK` | https://t.me/ | Support button |
+| `HELP_GUIDE_URL` | "" | Public Telegraph help article; adds a `📖 Full Guide` button to every /help page (set by `make telegraph`) |
+| `ADMIN_GUIDE_URL` | "" | Admin-only Telegraph guide; adds a `🛡️ Admin Guide` button on the /help admin section (set by `make telegraph`) |
 | `BROADCAST_RATE_LIMIT` | 25 | msgs/sec |
 | `BROADCAST_PROGRESS_INTERVAL` | 100 | progress edit cadence |
 | `BROADCAST_TEST_MODE` | False | use test users |
@@ -636,3 +638,7 @@ Two runtime resilience mechanisms, both started in `bot.py`'s `main()`:
 Also: `set_client()` casts `LOG_CHANNEL` to `int` (a malformed non-numeric value is kept raw + warned — it must never crash startup), and `run.sh` no longer wipes `*.session` files on every start (`CLEAN_SESSIONS=1` to force a wipe) — deleting the session cache is what caused the recurring PEER_ID_INVALID after every restart.
 
 Pinned by `tests/test_keepalive.py` (URL derivation, mocked-aiohttp ping loop, `start_keep_alive()` gating — 12 tests) and `tests/test_logger_peer_warmup.py` (int cast incl. malformed value, `warm_up_peer`, PEER_ID_INVALID self-heal — 9 tests). Both standalone + pytest-compatible.
+
+### 12.3 Telegraph help guides (`scripts/publish_telegraph.py`)
+
+Two public help articles at Telegra.ph are generated and updated by `scripts/publish_telegraph.py` (`make telegraph`): a **user** guide (public) and an **admin** guide (admin-only). Content for each lives in `_user_sections()` / `_admin_sections()` as Telegra.ph **Node JSON**. The script reads `TELEGRAPH_ACCESS_TOKEN` from `.env`, creates each page on first run (`createPage`) and edits the SAME page on every later run (`editPage` by the path stored in the committed `telegraph_page.json`, keyed by role), so both public URLs are stable across updates. `--role user|admin` publishes one page; `--dry-run` renders + size-checks (64 KB cap) without an API call; `--print` dumps the Node JSON. The resulting URLs are written to `HELP_GUIDE_URL` (user, shown on every /help page) and `ADMIN_GUIDE_URL` (admin, shown only on the admin help section) in `.env` / `.env.example`. Pinned by `tests/test_help_guide.py` (menu gating/rendering, per-role content separation, content validity/size).

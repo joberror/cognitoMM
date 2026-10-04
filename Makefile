@@ -21,7 +21,7 @@
 PYTHON := $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python; fi)
 PIP    := $(shell if [ -x .venv/bin/pip ]; then echo .venv/bin/pip; else echo pip; fi)
 
-.PHONY: check lint test deps verify install-hooks bump bump-patch bump-major
+.PHONY: check lint test deps verify install-hooks bump bump-patch bump-major telegraph
 
 check:
 	$(PYTHON) scripts/check_reexports.py
@@ -52,3 +52,8 @@ bump-patch:
 
 bump-major:
 	$(PYTHON) scripts/bump_version.py --major
+
+# Publish / update the public Telegraph help guide (TELEGRAPH_ACCESS_TOKEN in
+# .env). First run creates the page; later runs edit the same URL.
+telegraph:
+	$(PYTHON) scripts/publish_telegraph.py

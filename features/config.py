@@ -27,7 +27,7 @@ BOT_START_TIME = datetime.now(timezone.utc)
 # `scripts/bump_version.py --set X.Y.Z`. The pre-commit hook fails commits
 # that add a new feature without bumping this constant. The webapp `/`
 # endpoint exposes it (overridable via the BOT_VERSION env var).
-BOT_VERSION = "1.18.1"
+BOT_VERSION = "1.18.2"
 
 # -------------------------
 # CONFIG / ENV
@@ -48,6 +48,11 @@ AUTO_INDEX_DEFAULT = os.getenv("AUTO_INDEXING", "True").lower() in ("1", "true",
 TMDB_API = os.getenv("TMDB_API", "")               # TMDb API key for request feature
 START_MESSAGE = os.getenv("START_MESSAGE", os.getenv("START_MESSAGEE", "Welcome to the bot! Use buttons below to navigate."))
 SUPPORT_LINK = os.getenv("SUPPORT_LINK", "https://t.me/")
+# Public Telegraph help guides (published/updated by scripts/publish_telegraph.py).
+# HELP_GUIDE_URL shows on every /help page; ADMIN_GUIDE_URL adds an admin-only
+# "Admin Guide" button on the admin help section.
+HELP_GUIDE_URL = os.getenv("HELP_GUIDE_URL", "").strip()
+ADMIN_GUIDE_URL = os.getenv("ADMIN_GUIDE_URL", "").strip()
 
 # -------------------------
 # Premium monetization (Telegram Stars)
