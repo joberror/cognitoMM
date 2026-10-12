@@ -143,7 +143,7 @@ class MovieFilenameParser:
         r'\bWEB[\s\.\-_]?Rip\b': 'WEBRip',
         r'\bWEBRip\b': 'WEBRip',
         # *** KEY FIX: also match "webrip" with underscores like "webrip_avi" ***
-        r'\bwebrip\b': 'WEBRip',
+        r'(?<![A-Za-z0-9])webrip(?![A-Za-z0-9])': 'WEBRip',
         r'\bWEB\b(?![\s\.\-_]?(?:DL|Rip))': 'WEB',
         r'\bHDRip\b': 'HDRip',
         r'\bHDTV\b': 'HDTV',
