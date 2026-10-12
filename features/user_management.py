@@ -8,6 +8,7 @@ banning/unbanning users, and verifying terms acceptance.
 
 import re
 import time
+import aiofiles
 from datetime import datetime, timezone
 from pyrogram.types import Message
 from pyrogram.enums import ChatType
@@ -17,6 +18,7 @@ from .config import ADMINS, WATCHLIST_FREE_LIMIT, WATCHLIST_PREMIUM_LIMIT, \
 from .database import users_col, logs_col, channels_col
 from .tmdb_integration import normalize_content_type
 
+_terms_text = None
 
 async def get_user_doc(user_id: int):
     """Get user document from database"""
@@ -45,9 +47,13 @@ async def has_accepted_terms(user_id: int):
 
 async def load_terms_and_privacy():
     """Load terms and privacy policy from markdown file"""
+    global _terms_text
+    if _terms_text is not None:
+        return _terms_text
     try:
-        with open('TERMS_AND_PRIVACY.md', 'r', encoding='utf-8') as f:
-            content = f.read()
+        async with aiofiles.open('TERMS_AND_PRIVACY.md', 'r', encoding='utf-8') as f:
+            content = await f.read()
+        _terms_text = content
         return content
     except Exception as e:
         print(f"❌ Failed to load terms and privacy: {e}")
