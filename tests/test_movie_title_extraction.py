@@ -82,15 +82,15 @@ def print_test_result(test_num: int, test_case: TestCase):
     print(f"{'='*80}")
     print(f"Filename: {test_case.filename}")
     print(f"Reason:   {test_case.reason}")
-    print(f"\nExpected:")
+    print("\nExpected:")
     print(f"  Title: '{test_case.expected_title}'")
     print(f"  Year:  {test_case.expected_year}")
-    print(f"\nActual:")
+    print("\nActual:")
     print(f"  Title: '{test_case.actual_title}'")
     print(f"  Year:  {test_case.actual_year}")
     
     if test_case.errors:
-        print(f"\nErrors:")
+        print("\nErrors:")
         for error in test_case.errors:
             print(f"  - {error}")
 
