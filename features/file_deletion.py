@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import uuid
+import aiofiles
 from datetime import datetime, timezone, timedelta
 
 from .config import file_deletions, file_deletions_lock
@@ -221,8 +222,8 @@ async def save_file_deletions_to_disk(verbose=False):
                 }
 
         # Write to file
-        with open('file_deletions.json', 'w') as f:
-            json.dump(serializable_data, f)
+        async with aiofiles.open('file_deletions.json', 'w') as f:
+            await f.write(json.dumps(serializable_data))
 
         # Only log if verbose mode is enabled
         if verbose:
@@ -239,8 +240,9 @@ async def load_file_deletions_from_disk():
             print("📂 No existing file deletions data found")
             return
         
-        with open('file_deletions.json', 'r') as f:
-            data = json.load(f)
+        async with aiofiles.open('file_deletions.json', 'r') as f:
+            content = await f.read()
+            data = json.loads(content)
         
         # Load data into memory with proper datetime objects
         async with file_deletions_lock:
