@@ -9,6 +9,7 @@ and controlling premium features.
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Tuple
 import asyncio
+from pymongo import UpdateOne
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from .config import (ADMINS, FREE_DOWNLOAD_DAILY_LIMIT, PREMIUM_DOWNLOAD_DAILY_LIMIT,
                      PREMIUM_EXPIRY_WARN_DAYS,
@@ -919,6 +920,7 @@ async def warn_expiring_premium(warn_days=None, now: datetime = None) -> int:
         return 0
 
     sent = 0
+    bulk_updates = []
     for doc in docs:
         if not isinstance(doc, dict):
             continue
@@ -941,12 +943,17 @@ async def warn_expiring_premium(warn_days=None, now: datetime = None) -> int:
                 # to expiry): mark them so they never fire later.
                 for larger in thresholds[idx + 1:]:
                     updates[f"warned_{larger}d"] = True
-                try:
-                    await premium_users_col.update_one(
-                        {"user_id": doc.get("user_id")}, {"$set": updates})
-                except Exception as e:
-                    print(f"⚠️ expiry flag update failed: {e}")
+                bulk_updates.append(
+                    UpdateOne({"user_id": doc.get("user_id")}, {"$set": updates})
+                )
                 break
+
+    if bulk_updates:
+        try:
+            await premium_users_col.bulk_write(bulk_updates, ordered=False)
+        except Exception as e:
+            print(f"⚠️ bulk expiry flag update failed: {e}")
+
     return sent
 
 

@@ -266,12 +266,12 @@ def print_test_result(result: TestResult):
             print(f"    Actual:   {failure['actual']}")
     
     # Show full metadata comparison
-    print(f"\n📊 Full Metadata Comparison:")
-    print(f"\n  Expected:")
+    print("\n📊 Full Metadata Comparison:")
+    print("\n  Expected:")
     for key, value in result.expected.items():
         print(f"    {key}: {value}")
     
-    print(f"\n  Actual:")
+    print("\n  Actual:")
     for key in result.expected.keys():
         actual_value = result.actual.get(key)
         match = "✓" if actual_value == result.expected[key] else "✗"
@@ -363,16 +363,16 @@ def main():
     total = len(test_results)
     
     print(f"\n{'='*80}")
-    print(f"📊 TEST SUMMARY")
+    print("📊 TEST SUMMARY")
     print(f"{'='*80}")
     print(f"\n✅ Passed: {passed}/{total}")
     print(f"❌ Failed: {total - passed}/{total}")
     
     if passed == total:
-        print(f"\n🎉 All tests passed! Enhanced metadata extraction is working correctly.")
+        print("\n🎉 All tests passed! Enhanced metadata extraction is working correctly.")
         return 0
     else:
-        print(f"\n⚠️  Some tests failed. Review the failures above.")
+        print("\n⚠️  Some tests failed. Review the failures above.")
         return 1
 
 

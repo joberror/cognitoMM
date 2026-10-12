@@ -90,6 +90,15 @@ class FakePremiumUsersCol:
                 return SimpleNamespace(matched_count=1, modified_count=1)
         return SimpleNamespace(matched_count=0, modified_count=0)
 
+    async def bulk_write(self, ops, ordered=True):
+        for op in ops:
+            # We assume ops are pymongo.UpdateOne for our mock
+            if hasattr(op, '_filter') and hasattr(op, '_doc'):
+                await self.update_one(op._filter, op._doc)
+            elif hasattr(op, 'filter') and hasattr(op, 'update'):
+                await self.update_one(op.filter, op.update)
+        return SimpleNamespace(bulk_api_result={})
+
 
 class FakePaymentsCol:
     def __init__(self):
