@@ -118,6 +118,54 @@ def test_construct_final_caption_uses_canonical_formatter():
     assert "Size:" not in cap_no_size
 
 
+def test_caption_is_telegram_blockquote_with_disclaimer_outside():
+    """Movie details render inside a <blockquote>; the copyright/piracy
+    disclaimer and the header stay outside the quote."""
+    cap = utils.construct_final_caption(
+        {
+            "title": "Dune", "year": 2021, "type": "Movie",
+            "resolution": "2160p", "rip": "WEBRip", "audio": "TrueHD",
+            "audio_channels": "7.1CH", "video_codec": "x265/HEVC",
+            "hdr_format": "HDR10+", "extension": ".mkv", "duration": 9480,
+            "tmdb_rating": 7.8, "tmdb_genres": ["Action", "Sci-Fi"],
+            "tmdb_overview": "Paul Atreides must travel to the most dangerous planet.",
+            "imdb_id": "tt1151487",
+        },
+        file_size_bytes=4 * 1024**3,
+        user_name="Raju",
+    )
+    quote = cap.split("<blockquote>")[1].split("</blockquote>")[0]
+    before_quote = cap.split("<blockquote>")[0]
+    after_quote = cap.split("</blockquote>")[1]
+
+    # Header carries title/year/rating, outside the quote
+    assert "DUNE" in before_quote and "(2021)" in before_quote and "★7.8/10" in before_quote
+    # Detail rows live inside the quote
+    for token in ("2160p", "WEBRip", "HDR10+", "x265/HEVC", "TrueHD", "7.1CH",
+                  "Action", "2h 38m", "4.0GB", "MKV", "tt1151487", "Raju"):
+        assert token in quote, token
+    assert "imdb.com/title/tt1151487" in quote
+    # Piracy/copyright wording never enters the quote
+    assert "rights belong" not in quote
+    assert "rights belong" in after_quote
+    # Synopsis below the quote, not inside it
+    assert "Paul Atreides" in after_quote and "Paul Atreides" not in quote
+    # HTML-safe: a title with & < > cannot break markup
+    evil = utils.construct_final_caption({"title": "A & B <b>", "type": "Movie"})
+    assert "A &amp; B &lt;B&gt;" in evil and "<b>A & B" not in evil
+
+
+def test_caption_series_header():
+    """Series items show 📺 and SxxEyy in the header; movies show 🎬."""
+    cap = utils.construct_final_caption(
+        {"title": "Visions", "type": "Series", "season": 2, "episode": 9},
+        user_name="U",
+    )
+    head = cap.split("\n")[0]
+    assert "📺" in head and "S02E09" in head
+    assert "🎬" in utils.construct_final_caption({"title": "X", "type": "Movie"})
+
+
 def test_statistics_uses_canonical_formatter():
     """The dashboard renders sizes through the shared format_file_size."""
     out = statistics.format_stats_output({"db_estimated_size": 3 * 1024**2, "total_logs": 0})
@@ -419,7 +467,8 @@ def test_group_recent_content_consolidates_qualities():
     assert len(grouped["movies"]) == 1
     assert grouped["movies"][0]["title"] == "Inception"
     assert grouped["movies"][0]["count"] == 2
-    assert grouped["movies"][0]["details"] == "2010 (1080P & 4K)"
+    # Bracket-ready /search-style details (dot-joined, lowercased qualities).
+    assert grouped["movies"][0]["details"] == "2010.1080p & 4k"
 
 
 def test_format_series_group_episode_ranges():
@@ -429,22 +478,49 @@ def test_format_series_group_episode_ranges():
         "seasons_episodes": [(1, 1), (1, 2), (2, 1)],
     })
     assert title == "Breaking Bad"
-    assert details == "2008 S01(E01-02), S02(E01)"
+    # Compact bracket-ready ranges: S01E01-02, S02E01 (no parens).
+    assert details == "2008.S01E01-02, S02E01"
 
 
 def test_format_recent_output_renders_sections():
-    """format_recent_output renders movies/series sections and context lines."""
+    """format_recent_output renders plain HTML with click-to-copy search strings."""
     grouped = {
-        "movies": [{"title": "Inception", "details": "2010 (1080P)", "count": 1}],
-        "series": [{"title": "Breaking Bad", "details": "2008 S01(E01-02)", "count": 2}],
+        "movies": [{"title": "Inception", "details": "2010.1080p", "year": 2010, "count": 1}],
+        "series": [{"title": "Breaking Bad", "details": "2008.S01E01-02", "year": 2008, "count": 2}],
     }
     out = utils.format_recent_output(grouped, total_files=3, total_movies=1,
                                      total_series=1, last_updated="2026-01-01 00:00:00 UTC")
-    assert "<b>LAST BATCH UPDATE</b>" in out
+    # Plain HTML (no code block), click-to-copy 'Title (year)' targets, sections kept.
+    assert "```" not in out
+    assert out.startswith("<b>LAST BATCH UPDATE</b>")
     assert "Updated: 2026-01-01 00:00:00 UTC" in out
     assert "Files: 3 (Movies: 1 | Series: 1)" in out
     assert "<b>MOVIES</b>" in out and "<b>SERIES</b>" in out
-    assert "Inception" in out and "Breaking Bad" in out
+    # Copy target is the full 'Title (year)'; year is dropped from the bracket.
+    assert "1. <code>Inception (2010)</code> [1080p]" in out
+    assert "1. <code>Breaking Bad (2008)</code> [S01E01-02]" in out
+    assert out.rstrip().endswith("<i>Tap any title to copy</i>")
+
+
+def test_format_recent_output_escapes_titles():
+    """Copy targets with HTML special chars are escaped so parse_mode=HTML never breaks."""
+    grouped = {
+        "movies": [{"title": "Rock & Roll <Live> \"2026\"", "details": "", "year": 2026, "count": 1}],
+        "series": [],
+    }
+    out = utils.format_recent_output(grouped, total_files=1, total_movies=1, total_series=0)
+    assert "<code>Rock &amp; Roll &lt;Live&gt; &quot;2026&quot; (2026)</code>" in out
+    assert "<code>Rock & Roll" not in out  # raw & must not leak into HTML
+
+
+def test_format_recent_output_missing_year_falls_back_to_title():
+    """Without a year the copy target is just the title and details stay intact."""
+    grouped = {
+        "movies": [{"title": "No Year", "details": "1080p", "year": None, "count": 1}],
+        "series": [],
+    }
+    out = utils.format_recent_output(grouped, total_files=1, total_movies=1, total_series=0)
+    assert "1. <code>No Year</code> [1080p]" in out
 
 
 # -------------------------
@@ -503,6 +579,8 @@ if __name__ == "__main__":
         test_format_file_size_stat_removed_from_statistics,
         test_format_file_size_is_canonical,
         test_construct_final_caption_uses_canonical_formatter,
+        test_caption_is_telegram_blockquote_with_disclaimer_outside,
+        test_caption_series_header,
         test_statistics_uses_canonical_formatter,
         test_engine_sets_quality_from_resolution,
         test_engine_extracts_bit_depth_separately,

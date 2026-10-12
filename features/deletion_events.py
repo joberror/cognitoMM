@@ -41,7 +41,7 @@ Diagnostic Tags:
 - [REALTIME-DELETE-DEBUG] for detailed update inspection (enable for troubleshooting).
 """
 
-from typing import Any, Iterable
+from typing import Any
 
 from .database import movies_col, channels_col
 from .user_management import log_action
@@ -55,7 +55,6 @@ from .user_management import log_action
 # Telegram's raw update payload, which is authoritative - so ACCESS_ERRORS
 # cannot fire here today. It is imported so any future fetch-based verification
 # added to this module inherits the same guarantee.
-from .indexing import ACCESS_ERRORS
 
 # Enable debug mode to see all raw updates (WARNING: Very verbose!)
 DEBUG_RAW_UPDATES = False

@@ -28,13 +28,15 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from features.statistics import format_stats_output, format_quick_stats_output, export_stats_csv
+from features.config import BOT_VERSION
 
 # ---------------------------
 # Fixtures
 # ---------------------------
 
 BASE_STATS = {
-    "bot_info": {"bot_name": "Test Bot", "bot_username": "testbot", "bot_id": 1},
+    "bot_info": {"bot_name": "Test Bot", "bot_username": "testbot", "bot_id": 1,
+                 "bot_version": BOT_VERSION},
     "indexing_stats": {
         "total_attempts": 5,
         "successful_inserts": 4,
@@ -181,6 +183,16 @@ def test_csv_export_with_and_without_prune_data():
     # Without prune data: no Prune rows at all (empty dict OR absent key)
     assert "Prune," not in csv_without, "prune rows should be hidden before first run"
     assert "Prune," not in csv_absent, "prune rows should be hidden when key is absent"
+
+
+def test_dashboard_renders_bot_version():
+    out = format_stats_output(BASE_STATS)
+    assert f"<b>Version:</b> <code>{BOT_VERSION}</code>" in out, "Version line missing from /stat"
+
+
+def test_csv_export_includes_bot_version():
+    csv_text = asyncio.run(export_stats_csv(dict(BASE_STATS)))
+    assert f"Bot,Bot Version,{BOT_VERSION}" in csv_text, "Bot Version row missing from CSV"
 
 
 def main():

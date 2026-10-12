@@ -7,15 +7,12 @@ It sets up the Pyroblack client, registers handlers, and manages the bot lifecyc
 
 import sys
 import asyncio
-import threading
-from datetime import datetime, timezone
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.handlers import MessageHandler, InlineQueryHandler, CallbackQueryHandler
-from pyrogram.enums import ChatType
+from pyrogram.handlers import (MessageHandler, InlineQueryHandler,
+                               CallbackQueryHandler, PreCheckoutQueryHandler)
 
 # Import from our modules
-from .config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL, client
+from .config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL, BOT_VERSION
 from .logger import logger
 from .database import ensure_indexes
 from .commands import handle_command
@@ -26,6 +23,11 @@ from .search import inline_handler
 from .deletion_events import handle_raw_update  # Real-time deletion heuristic handler
 from .webapp import start_webapp, set_stats_provider
 from .statistics import collect_comprehensive_stats, cache_bot_info
+from .keepalive import start_keep_alive
+from .database_scan import start_db_rescan_monitor
+from .premium_payments import handle_pre_checkout, handle_successful_payment
+from .premium_management import start_premium_expiry_monitor
+from .reliability import retry_on_flood
 
 # -------------------------
 # CUSTOM BOT CLASS WITH iter_messages
@@ -61,7 +63,13 @@ class CognitoBot(Client):
             new_diff = min(200, limit - current)
             if new_diff <= 0:
                 return
-            messages = await self.get_messages(chat_id, list(range(current, current+new_diff+1)))
+            # FloodWait-aware fetch: a long backfill pauses on Telegram's
+            # reported wait (with backoff+jitter) instead of crashing the scan.
+            messages = await retry_on_flood(
+                lambda: self.get_messages(
+                    chat_id, list(range(current, current + new_diff + 1))),
+                max_retries=3,
+            )
             for message in messages:
                 yield message
                 current += 1
@@ -132,6 +140,12 @@ async def main():
 
             # Initialize Logger
             logger.set_client(app, LOG_CHANNEL)
+            # Resolve the log peer NOW so the first flush (3s later) doesn't
+            # fail with PEER_ID_INVALID. On a fresh session (HF rebuild or a
+            # wiped .session file) the access hash for the log target is not
+            # cached yet; get_chat() fetches and caches it.
+            if LOG_CHANNEL:
+                await logger.warm_up_peer()
             logger.start_capturing()
             logger.log("🤖 Bot Session Started")
             if LOG_CHANNEL:
@@ -144,6 +158,10 @@ async def main():
             app.add_handler(MessageHandler(on_message))
             app.add_handler(InlineQueryHandler(inline_handler))
             app.add_handler(CallbackQueryHandler(callback_handler))
+            # Telegram Stars premium payments
+            app.add_handler(PreCheckoutQueryHandler(handle_pre_checkout))
+            app.add_handler(MessageHandler(handle_successful_payment,
+                                           filters.successful_payment))
 
             # Register RawUpdateHandler for real-time deletions (if available)
             try:
@@ -166,7 +184,18 @@ async def main():
             # Start orphan prune monitor (primary channel-deletion cleanup)
             asyncio.create_task(start_orphan_prune_monitor())
 
-            print("✅ MovieBot is running!")
+            # Scheduled /update_db: periodically rescan channels for new content
+            asyncio.create_task(start_db_rescan_monitor())
+
+            # Premium expiry reminders (DM 3d / 1d before lapse)
+            asyncio.create_task(start_premium_expiry_monitor())
+
+            # Self-keep-alive: ping the public URL so managed hosts (HF
+            # Spaces) never put the container to sleep. No-op when no public
+            # URL is configured (local dev, VPS, Docker).
+            start_keep_alive()
+
+            print(f"✅ MovieBot is running! (v{BOT_VERSION})")
             print("🛑 Press Ctrl+C to stop")
 
             # Keep the program running

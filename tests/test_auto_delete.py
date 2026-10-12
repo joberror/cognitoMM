@@ -20,7 +20,6 @@ import sys
 import os
 import asyncio
 import time
-import uuid
 from datetime import datetime, timezone, timedelta
 from unittest.mock import Mock, AsyncMock, patch
 import logging
@@ -41,6 +40,7 @@ for path in (ROOT_DIR, os.path.dirname(os.path.abspath(__file__))):
 import features.config
 import features.file_deletion as file_deletion_module
 import features.callbacks as callbacks_module
+import features.premium_management as premium_management_module
 from features.config import file_deletions, bulk_downloads
 from features.file_deletion import (
     track_file_for_deletion,
@@ -415,14 +415,15 @@ def test_integration_points():
     logger.info("Running Test 6: Integration Points")
     
     try:
-        from pyrogram.types import CallbackQuery, Message
-        
         with _fresh_lock_patch(), \
              patch.object(callbacks_module, 'users_col', AsyncMock()), \
              patch.object(callbacks_module, 'movies_col', AsyncMock()) as movies_mock, \
              patch.object(callbacks_module, 'track_file_for_deletion', AsyncMock()) as mock_track, \
              patch.object(callbacks_module, 'should_process_command_for_user', AsyncMock(return_value=True)), \
-             patch.object(callbacks_module, 'has_accepted_terms', AsyncMock(return_value=True)):
+             patch.object(callbacks_module, 'has_accepted_terms', AsyncMock(return_value=True)), \
+             patch.object(premium_management_module, 'check_download_quota', AsyncMock(return_value=(True, 10, 10, None))), \
+             patch.object(premium_management_module, 'record_download', AsyncMock(return_value=1)), \
+             patch.object(premium_management_module, 'get_retention_minutes', AsyncMock(return_value=5)):
             
             movies_mock.find_one.return_value = None  # no custom DB caption
             
@@ -449,11 +450,12 @@ def test_integration_points():
                 # need to patch features.callbacks.client)
                 await callback_handler(client_mock, callback_query)
                 
-                # Verify file tracking was called
-                mock_track.assert_called_once_with(
-                    user_id=12345,
-                    message_id=999999
-                )
+                # Verify file tracking was called (with tier-based retention)
+                mock_track.assert_called_once()
+                kwargs = mock_track.call_args.kwargs
+                assert kwargs.get("user_id") == 12345, kwargs
+                assert kwargs.get("message_id") == 999999, kwargs
+                assert kwargs.get("duration_minutes") == 5, kwargs
                 
                 results.add_pass("Single file download integration")
                 
@@ -485,8 +487,10 @@ def test_integration_points():
                 
                 # Verify file tracking was called for each file
                 assert mock_track.call_count == 2, "Should track both files in bulk download"
-                mock_track.assert_any_call(user_id=12345, message_id=888888)
-                mock_track.assert_any_call(user_id=12345, message_id=888889)
+                tracked_ids = {c.kwargs.get("message_id") for c in mock_track.call_args_list}
+                assert tracked_ids == {888888, 888889}, tracked_ids
+                for c in mock_track.call_args_list:
+                    assert c.kwargs.get("duration_minutes") == 5, c.kwargs
                 
                 results.add_pass("Bulk download integration")
             

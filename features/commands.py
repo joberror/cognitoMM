@@ -5,44 +5,47 @@ This module contains all command handlers for the Telegram Movie Bot.
 It handles user commands, admin commands, and all related functionality.
 """
 
-import os
 import re
 import asyncio
 import uuid
-import logging
+import html
 from datetime import datetime, timezone, timedelta
-from fuzzywuzzy import fuzz
-from pyrogram import Client, filters
-from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, LinkPreviewOptions
 from pyrogram.enums import ParseMode, ChatType
 
 # Import from our modules
-from .config import API_ID, API_HASH, BOT_TOKEN, BOT_ID, MONGO_URI, MONGO_DB, ADMINS, LOG_CHANNEL, FUZZY_THRESHOLD, AUTO_INDEX_DEFAULT, temp_data, user_input_events, bulk_downloads, START_MESSAGE, SUPPORT_LINK
-from .database import mongo, db, movies_col, users_col, channels_col, settings_col, logs_col, requests_col, user_request_limits_col, premium_users_col, premium_features_col, ensure_indexes
-from .utils import get_readable_time, wait_for_user_input, set_user_input, cleanup_expired_bulk_downloads, resolve_chat_ref
+from .config import AUTO_INDEX_DEFAULT, temp_data, bulk_downloads, START_MESSAGE, SUPPORT_LINK, HELP_GUIDE_URL, ADMIN_GUIDE_URL
+from .database import movies_col, users_col, channels_col, settings_col, logs_col
+from .utils import wait_for_user_input, cleanup_expired_bulk_downloads, resolve_chat_ref
 
-from .user_management import get_user_doc, is_admin, is_banned, has_accepted_terms, load_terms_and_privacy, log_action, check_banned, check_terms_acceptance, should_process_command, require_not_banned
-from .file_deletion import track_file_for_deletion
+from .user_management import is_admin, has_accepted_terms, load_terms_and_privacy, log_action, check_banned, check_terms_acceptance, should_process_command, apply_role_action, format_role_summary, format_role_skipped_lines, resolve_targets
 from .config import indexing_lock, message_queue
-from .statistics_store import indexing_stats
-from .indexing import start_indexing_process, save_file_to_db, process_message_queue
-from .search import send_search_results
-from .utils import format_file_size, group_recent_content, format_recent_output
-from .request_management import check_rate_limits, update_user_limits, check_duplicate_request, validate_imdb_link, get_queue_position, MAX_PENDING_REQUESTS_PER_USER
-from .tmdb_integration import search_tmdb, format_tmdb_result, get_random_background_image
-from .premium_management import is_premium_user, get_premium_user, add_premium_user, edit_premium_user, remove_premium_user, get_days_remaining, is_feature_premium_only, toggle_feature, add_premium_feature, get_all_premium_features, get_all_premium_users
+from .statistics_store import indexing_stats, prune_stats
+from .search import (
+    MAX_SEASON_BUTTONS,
+    SEARCH_HINT,
+    group_seasons,
+    is_series,
+    perform_search,
+    pick_callback,
+    send_search_results,
+)
+from .utils import format_search_info, format_latest_info, group_recent_content, format_recent_output, latest_copy
+from .tmdb_integration import get_random_background_image, enrich_title
+from .premium_management import is_premium_user, is_feature_premium_only
 from .broadcast import cmd_broadcast
 from .statistics import (
     collect_comprehensive_stats,
     collect_quick_stats,
     format_stats_output,
     format_quick_stats_output,
-    export_stats_json,
-    export_stats_csv,
     collect_user_stats,
     format_user_stats_output
 )
 from .database_scan import scan_message_range
+from .request_commands import cmd_request, cmd_request_list
+from .user_commands import cmd_user
+from .watchlist import cmd_watch, cmd_unwatch, cmd_watchlist
 
 # -------------------------
 # Command Handler
@@ -123,6 +126,8 @@ async def handle_command(client, message: Message):
         await cmd_ban_user(client, message)
     elif command == 'unban_user':
         await cmd_unban_user(client, message)
+    elif command == 'user':
+        await cmd_user(client, message)
     elif command == 'reset':
         await cmd_reset(client, message)
     elif command == 'reset_channel':
@@ -133,6 +138,8 @@ async def handle_command(client, message: Message):
         await cmd_trending(client, message)
     elif command == 'indexing_stats':
         await cmd_indexing_stats(client, message)
+    elif command == 'queue':
+        await cmd_queue(client, message)
     elif command == 'reset_stats':
         await cmd_reset_stats(client, message)
     elif command == 'update_db':
@@ -141,12 +148,30 @@ async def handle_command(client, message: Message):
         await cmd_manual_deletion(client, message)
     elif command == 'premium':
         await cmd_premium(client, message)
+    elif command == 'buy_premium':
+        await cmd_buy_premium(client, message)
     elif command == 'broadcast':
         await cmd_broadcast(client, message)
     elif command == 'stat':
         await cmd_stat(client, message)
     elif command == 'quickstat':
         await cmd_quickstat(client, message)
+    elif command == 'random':
+        await cmd_random(client, message)
+    elif command == 'genres':
+        await cmd_genres(client, message)
+    elif command == 'watch':
+        await cmd_watch(client, message)
+    elif command == 'unwatch':
+        await cmd_unwatch(client, message)
+    elif command == 'watchlist':
+        await cmd_watchlist(client, message)
+    elif command == 'logs':
+        await cmd_logs(client, message)
+    elif command == 'enrich':
+        await cmd_enrich(client, message)
+    elif command == 'enrich_status':
+        await cmd_enrich_status(client, message)
     else:
         # Unknown command
         await message.reply_text("❓ Unknown command. Use /help to see available commands.")
@@ -154,82 +179,129 @@ async def handle_command(client, message: Message):
 # -------------------------
 # Command Implementations
 # -------------------------
-USER_HELP = """
-╔══════════════════════╗
-║   🎬 Movie Bot Help   ║
-╚══════════════════════╝
+# Interactive help menu. Each section is a short, scannable page rendered on
+# its own (HTML parse mode) instead of dumping every command in one wall of
+# text. The categories are the `help:<section>` callbacks; the full guide is a
+# URL button published by scripts/publish_telegraph.py (HELP_GUIDE_URL).
+HELP_HOME = (
+    "🎬 <b>MovieBot Help</b>\n\n"
+    "Pick a category below, or open the full guide.\n\n"
+    "💡 <code>/f</code> is the fastest search; <code>-e</code> matches the "
+    "title exactly."
+)
 
-╭─ 🔎 Search
-│ /f <title>             Quick search
-│ /search <title>        Smart search (exact + fuzzy)
-│ /search -e <title>     Exact title only
-╰─────────────────────
+HELP_SECTIONS = {
+    "search": (
+        "🔎 <b>Search</b>\n\n"
+        "<code>/search &lt;title&gt;</code> — smart search (exact + fuzzy)\n"
+        "<code>/f &lt;title&gt;</code> — quick search (same as /search)\n"
+        "<code>/search -e &lt;title&gt;</code> — exact title only\n\n"
+        "<b>Filters</b> — append to any search:\n"
+        "• year — <code>/search Dune 2021</code>\n"
+        "• quality — <code>480p 720p 1080p 2160p 4k</code>\n"
+        "• type — <code>movie</code> or <code>series</code>\n"
+        "• facets — <code>lang:hindi subs:esub audio:atmos hdr</code>\n\n"
+        "Combine them: <code>/search Dune 2021 1080p movie lang:hindi</code>"
+    ),
+    "discover": (
+        "📌 <b>Discover</b>\n\n"
+        "<code>/recent</code> — newly added titles\n"
+        "<code>/trending</code> — TMDb trending movies &amp; shows\n"
+        "<code>/random</code> — a random indexed title\n"
+        "<code>/genres</code> — browse by genre\n"
+        "<code>/genres &lt;name&gt;</code> — browse a genre (A–Z / Newest / "
+        "Top Rated)\n"
+        "<code>/request &lt;title&gt;</code> — request a missing title\n\n"
+        "📝 Requests: max 3 pending • 1 per day • upvote existing ones"
+    ),
+    "me": (
+        "👤 <b>Me</b>\n\n"
+        "<code>/my_history</code> — your recent searches\n"
+        "<code>/my_stat</code> — your usage + premium info\n\n"
+        "<code>/watch &lt;title&gt;</code> — watchlist; get a DM when indexed\n"
+        "<code>/watchlist</code> — your watched titles (with UPDATE)\n"
+        "<code>/unwatch &lt;title&gt;</code> — remove a watched title\n\n"
+        "📌 Watchlist: 5 free / 20 premium titles"
+    ),
+    "premium": (
+        "⭐ <b>Premium</b>\n\n"
+        "<code>/buy_premium</code> — buy with Telegram Stars\n\n"
+        "<b>What you get</b>\n"
+        "• Watchlist: 20 titles (free: 5)\n"
+        "• Longer file retention: 30/60 min (free: 5/15)\n"
+        "• Unlimited daily downloads (free: 10/day)\n"
+        "• Premium-only features when enabled by the admin"
+    ),
+    "admin": (
+        "👑 <b>Admin</b>\n\n"
+        "<b>📊 Stats</b>\n"
+        "<code>/stat</code> · <code>/quickstat</code>\n\n"
+        "<b>📢 Broadcast &amp; requests</b>\n"
+        "<code>/broadcast [message]</code> · <code>/request_list</code>\n\n"
+        "<b>⭐ Premium</b>\n"
+        "<code>/premium</code> — manage users + feature flags\n\n"
+        "<b>📡 Channels</b>\n"
+        "<code>/mc</code> — unified channel manager\n"
+        "<code>/add_channel &lt;id&gt;</code> · <code>/remove_channel &lt;id&gt;</code>\n"
+        "<code>/index_channel</code> · <code>/toggle_indexing</code>\n"
+        "<code>/reset_channel</code>\n\n"
+        "<b>👥 Users</b>\n"
+        "<code>/user</code> — filters + batch actions\n"
+        "<code>/promote</code> · <code>/demote</code> · "
+        "<code>/ban_user</code> · <code>/unban_user</code>\n\n"
+        "<b>🗄️ Database</b>\n"
+        "<code>/update_db</code> · <code>/manual_deletion &lt;t&gt;</code>\n"
+        "<code>/indexing_stats</code> · <code>/queue</code> · "
+        "<code>/reset_stats</code>\n"
+        "<code>/logs [n]</code> · <code>/enrich [n]</code> · "
+        "<code>/enrich_status</code>\n"
+        "<code>/reset</code> — WIPE all indexed data (confirm)\n\n"
+        "⚠️ Add the bot as admin in channels to index/monitor files"
+    ),
+}
 
-╭─ 📌 Discover
-│ /recent                Newly added
-│ /trending              Trending now
-│ /request               Request missing title
-╰─────────────────────
 
-╭─ 👤 Me
-│ /my_history            Your searches
-│ /my_stat               Usage + premium info
-│ /help                  This menu
-╰─────────────────────
+def _help_keyboard(is_admin_user: bool, section: str) -> InlineKeyboardMarkup:
+    """Build the inline keyboard for a help page (section pages get Back)."""
+    if section == "home":
+        rows = [
+            [InlineKeyboardButton("🔎 Search", callback_data="help:search"),
+             InlineKeyboardButton("📌 Discover", callback_data="help:discover")],
+            [InlineKeyboardButton("👤 Me", callback_data="help:me"),
+             InlineKeyboardButton("⭐ Premium", callback_data="help:premium")],
+        ]
+        if HELP_GUIDE_URL:
+            rows.append([InlineKeyboardButton("📖 Full Guide", url=HELP_GUIDE_URL)])
+        if is_admin_user:
+            rows.append([InlineKeyboardButton("👑 Admin", callback_data="help:admin")])
+    else:
+        rows = [[InlineKeyboardButton("← Back", callback_data="help:home")]]
+        if HELP_GUIDE_URL:
+            rows.append([InlineKeyboardButton("📖 Full Guide", url=HELP_GUIDE_URL)])
+        # The admin guide is admin-only: only ever offered on the admin page.
+        if section == "admin" and ADMIN_GUIDE_URL:
+            rows.append([InlineKeyboardButton("🛡️ Admin Guide", url=ADMIN_GUIDE_URL)])
+    return InlineKeyboardMarkup(rows)
 
-💡 Tips: /f = fastest • -e = perfect match
-📝 Requests: max 3 pending • 1 per day
-"""
 
-ADMIN_HELP = """
-═══════════════════════
-👑 Admin Zone
+async def build_help_page(user_id, section="home"):
+    """Return ``(text, keyboard)`` for a help page, gating the admin section."""
+    is_admin_user = await is_admin(user_id)
+    if section != "home" and section not in HELP_SECTIONS:
+        section = "home"
+    if section == "admin" and not is_admin_user:
+        section = "home"
+    text = HELP_HOME if section == "home" else HELP_SECTIONS[section]
+    return text, _help_keyboard(is_admin_user, section)
 
-╭─ 📊 Stats
-│ /stat                  Full dashboard
-│ /quickstat             Quick key numbers
-╰─────────────────────
 
-╭─ 📢 Broadcast & Requests
-│ /broadcast [message]   Message users
-│ /request_list          Manage requests
-╰─────────────────────
-
-╭─ ⭐ Premium
-│ /premium               Manage premium + features
-╰─────────────────────
-
-╭─ 📡 Channels
-│ /mc                    Unified channel manager
-│ /add_channel <id>      Add channel
-│ /remove_channel <id>   Remove channel
-│ /index_channel         Index (interactive)
-│ /toggle_indexing       Auto-index on/off
-│ /reset_channel         Clear channel index (confirm)
-╰─────────────────────
-
-╭─ 👥 Users
-│ /promote <user_id>     Make admin
-│ /demote <user_id>      Remove admin
-│ /ban_user <user_id>    Ban
-│ /unban_user <user_id>  Unban
-╰─────────────────────
-
-╭─ 🗄️ Database
-│ /update_db             Cleanup duplicates/orphans
-│ /manual_deletion <t>   Delete by title
-│ /indexing_stats        Diagnose indexing skips
-│ /reset_stats           Reset counters
-│ /reset                 WIPE all indexed data (confirm)
-╰─────────────────────
-
-✨ Highlights
-• /mc unified management • interactive + cancellable indexing
-• Better errors + supports all video types • diagnostics for indexing
-• Safe resets + cleanup tools • premium feature access control
-
-⚠️ Add the bot as admin in channels to index/monitor files
-"""
+async def render_help_page(client, message, user_id, section="home", edit=False):
+    """Send or edit a help page for ``user_id``."""
+    text, keyboard = await build_help_page(user_id, section)
+    if edit:
+        await message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+    else:
+        await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
 async def cmd_start(client, message: Message):
     # Check if user is banned first
@@ -237,7 +309,6 @@ async def cmd_start(client, message: Message):
         return
 
     uid = message.from_user.id
-    user_name = message.from_user.first_name or "User"
 
     # Update last seen
     await users_col.update_one(
@@ -311,7 +382,7 @@ async def cmd_start(client, message: Message):
         await message.reply_text(
             terms_content,
             reply_markup=keyboard,
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
             parse_mode=ParseMode.MARKDOWN
         )
     else:
@@ -320,7 +391,7 @@ async def cmd_start(client, message: Message):
         first_part = terms_content[:max_length]
         await message.reply_text(
             first_part,
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
             parse_mode=ParseMode.MARKDOWN
         )
 
@@ -330,7 +401,7 @@ async def cmd_start(client, message: Message):
             chunk = remaining[:max_length]
             await message.reply_text(
                 chunk,
-                disable_web_page_preview=True,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
                 parse_mode=ParseMode.MARKDOWN
             )
             remaining = remaining[max_length:]
@@ -344,77 +415,65 @@ async def cmd_start(client, message: Message):
         await message.reply_text(
             remaining,
             reply_markup=keyboard,
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
             parse_mode=ParseMode.MARKDOWN
         )
 
 async def cmd_help(client, message: Message, user_id=None):
     uid = user_id or message.from_user.id
-    text = USER_HELP
-    if await is_admin(uid):
-        text += "\n" + ADMIN_HELP
-    await message.reply_text(text)
+    await render_help_page(client, message, uid, "home")
 
 async def cmd_search(client, message: Message):
     uid = message.from_user.id
     parts = message.text.split()
     if len(parts) < 2:
-        return await message.reply_text("Usage: /search <title>")
+        return await message.reply_text(
+            "Usage: /search <title> [year] [quality] [movie|series] [lang:/subs:/audio:/hdr:]\n"
+            "Examples:\n"
+            "/search Dune\n"
+            "/search Dune 2021\n"
+            "/search Dune 2021 1080p\n"
+            "/search Breaking Bad series\n"
+            "/search RRR lang:hindi\n"
+            "/search Dune hdr\n"
+            "/search -e <title>  (exact title only)"
+        )
 
     # Check for exact search flag
     exact_search = False
     if parts[1] == "-e" and len(parts) >= 3:
         exact_search = True
-        query = " ".join(parts[2:]).strip()
+        raw_query = " ".join(parts[2:]).strip()
     else:
-        query = " ".join(parts[1:]).strip()
+        raw_query = " ".join(parts[1:]).strip()
 
-    # record search history
-    await users_col.update_one({"user_id": uid}, {"$push": {"search_history": {"q": query, "ts": datetime.now(timezone.utc)}}}, upsert=True)
+    # record search history (raw input so /my_history re-search reproduces it)
+    await users_col.update_one({"user_id": uid}, {"$push": {"search_history": {"q": raw_query, "ts": datetime.now(timezone.utc)}}}, upsert=True)
 
-    if exact_search:
-        # Exact search mode - only look for exact title matches
-        exact_pattern = f"^{re.escape(query)}$"
-        exact = await movies_col.find({"title": {"$regex": exact_pattern, "$options": "i"}}).to_list(length=None)
+    # The search engine (exact + fuzzy matching, exact/fuzzy classification)
+    # lives in search.py - keep a single canonical implementation. Trailing
+    # "<year> <quality> <type>" tokens are parsed there; the raw query is
+    # kept for the header/history while the parsed title drives matching.
+    search = await perform_search(raw_query, exact_search=exact_search)
+    all_results = search["results"]
 
-        if not exact:
+    if not all_results:
+        if exact_search:
             # No exact matches found - suggest normal search
             await message.reply_text(
-                f"⚠️ No exact matches found for \"{query}\"\n\n"
-                f"💡 **Try normal search:** /search {query}\n"
+                f"⚠️ No exact matches found for \"{raw_query}\"\n\n"
+                f"💡 **Try normal search:** /search {raw_query}\n"
                 f"🔍 Normal search finds partial and similar titles"
             )
-            return
-
-        all_results = exact
-    else:
-        # Normal search - exact + fuzzy
-        # Search for exact matches (no limit - show all results)
-        exact = await movies_col.find({"title": {"$regex": query, "$options": "i"}}).to_list(length=None)
-
-        # Search for fuzzy matches if we have less exact matches
-        all_results = list(exact)
-        if len(exact) < 50:  # Only do fuzzy search if we don't have many exact matches
-            candidates = []
-            cursor = movies_col.find({}, {"title": 1, "year": 1, "quality": 1, "channel_title": 1, "message_id": 1, "channel_id": 1, "type": 1, "season": 1, "episode": 1, "rip": 1}).limit(500)
-            async for r in cursor:
-                # Skip if already in exact matches
-                if any(ex.get("_id") == r.get("_id") for ex in exact):
-                    continue
-                title = r.get("title", "")
-                score = fuzz.partial_ratio(query.lower(), title.lower())
-                if score >= FUZZY_THRESHOLD:
-                    candidates.append((score, r))
-
-            candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
-            all_results.extend([c[1] for c in candidates])
-
-        if not all_results:
-            return await message.reply_text("⚠️ No results found for your search.")
+        else:
+            await message.reply_text("⚠️ No results found for your search.")
+        return
 
     # Create flashy, neat search results
     # Pass client explicitly to avoid relative import issues inside search module
-    await send_search_results(client, message, all_results, query)
+    await send_search_results(client, message, all_results, raw_query,
+                              exact_ids=search["exact_ids"],
+                              filters=search.get("filters"))
 
 
 
@@ -439,8 +498,8 @@ async def cmd_my_history(client, message: Message):
     first_search = history[0]['ts']
     last_search = history[-1]['ts']
 
-    # Build compact header with statistics
-    text = "<b>SEARCH HISTORY</b>\n"
+    # Plain HTML with tap-to-copy queries (bracket = search time), grouped by date
+    text = "<b>SEARCH HISTORY</b>\n\n"
     text += f"Total: {total_searches} | Unique: {unique_queries}\n"
     text += f"Period: {first_search.strftime('%b %d, %Y')} - {last_search.strftime('%b %d, %Y')}\n\n"
 
@@ -452,33 +511,24 @@ async def cmd_my_history(client, message: Message):
         date_key = h['ts'].strftime('%d %b, %Y')
         grouped[date_key].append(h)
 
-    # Display grouped searches
+    counter = 0
     for date_key, searches in grouped.items():
         text += f"<b>{date_key}</b>\n"
-
         for h in searches:
-            query = h['q']
-            timestamp = h['ts']
-
-            # Format time only
-            time_str = timestamp.strftime('%I:%M%p')
-
-            # Create clickable commands
-            normal_cmd = f"/f {query}"
-            exact_cmd = f"/f -e {query}"
-
-            # Add entry with time and commands
-            text += f"  {time_str} | <code>{normal_cmd}</code> | <code>{exact_cmd}</code>\n"
-
+            counter += 1
+            query = html.escape(h['q'])
+            time_str = h['ts'].strftime('%I:%M%p')
+            text += f"{counter}. <code>{query}</code> [{time_str}]\n"
         text += "\n"
 
-    text += f"<i>Click any command to copy and search</i>"
+    text += "<i>Tap any query to copy</i>\n"
+    text += "🔁 Re-search with /f title"
 
-    # Send message with HTML formatting (no buttons)
+    # Send as plain HTML so queries render as tap-to-copy <code> spans
     await message.reply_text(
         text,
         parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
+        link_preview_options=LinkPreviewOptions(is_disabled=True)
     )
 
 
@@ -600,11 +650,12 @@ async def cmd_recent(client, message: Message):
         grouped_results = group_recent_content(raw_results)
         formatted_output = format_recent_output(grouped_results, total_files, total_movies, total_series, last_updated)
 
-        # Send response with HTML parse mode
+        # Send response as plain HTML so titles render as tap-to-copy <code>
+        # spans (reverted from the /search-style code block).
         await message.reply_text(
             formatted_output,
             parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True
+            link_preview_options=LinkPreviewOptions(is_disabled=True)
         )
 
         # Log successful usage
@@ -665,7 +716,7 @@ async def cmd_trending(client, message: Message):
         await status_msg.edit_text(
             output,
             reply_markup=InlineKeyboardMarkup(buttons),
-            disable_web_page_preview=True
+            link_preview_options=LinkPreviewOptions(is_disabled=True)
         )
 
     except Exception as e:
@@ -674,6 +725,535 @@ async def cmd_trending(client, message: Message):
             "**Trending**\n\n"
             "Unable to fetch trending data. Please try again later."
         )
+
+
+async def cmd_random(client, message: Message):
+    """Handle /random - pick a random indexed title (poster when available)"""
+    import random
+
+    if await check_banned(message):
+        return
+
+    try:
+        total = await movies_col.count_documents({})
+        if not total:
+            return await message.reply_text(
+                "📭 <b>No Content Found</b>\n\nNo movies or series are indexed yet.",
+                parse_mode=ParseMode.HTML,
+            )
+        skip = random.randrange(total)
+        doc = await movies_col.find_one({}, skip=skip)
+        if not doc:
+            return await message.reply_text("📭 No content found.")
+
+        title = doc.get("title", "Unknown")
+        movie_type = doc.get("type", "Movie")
+        poster = doc.get("tmdb_poster")
+
+        meta = {}
+        if doc.get("tmdb_rating"):
+            meta["rating"] = doc.get("tmdb_rating")
+        if doc.get("tmdb_genres"):
+            meta["genres"] = doc.get("tmdb_genres")
+        if doc.get("imdb_id"):
+            meta["imdb_id"] = doc.get("imdb_id")
+        from .tmdb_integration import format_enrichment_line
+        suffix = format_enrichment_line(meta or None)
+
+        # /search-style bracket info (same dot-joined formatter as the listings)
+        caption = (
+            f"🎲 <b>Random Pick</b>\n\n"
+            f"🎬 <b>{title}</b> [{format_search_info(doc)}] · {movie_type}\n"
+        )
+        if suffix:
+            caption += f"\n{suffix}"
+
+        buttons = None
+        if doc.get("channel_id") and doc.get("message_id"):
+            buttons = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "📥 Get File",
+                    callback_data=f"get_file:{doc['channel_id']}:{doc['message_id']}",
+                )
+            ]])
+
+        if poster:
+            try:
+                await message.reply_photo(poster, caption=caption, reply_markup=buttons)
+                return
+            except Exception as e:
+                print(f"⚠️ /random poster send failed ({poster}): {e}")
+        await message.reply_text(
+            caption,
+            reply_markup=buttons,
+            parse_mode=ParseMode.HTML,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+    except Exception as e:
+        print(f"Error in random command: {e}")
+        await message.reply_text("❌ Unable to pick a random title. Please try again later.")
+
+
+async def cmd_genres(client, message: Message):
+    """Handle /genres - browse indexed titles by TMDb genre.
+
+    /genres            -> list genres with counts
+    /genres <name>     -> browse titles in that genre
+    """
+    if await check_banned(message):
+        return
+
+    parts = message.text.split(maxsplit=1)
+    genre_query = parts[1].strip() if len(parts) > 1 else ""
+
+    try:
+        if not genre_query:
+            pipeline = [
+                {"$unwind": "$tmdb_genres"},
+                {"$group": {"_id": "$tmdb_genres", "count": {"$sum": 1}}},
+                {"$sort": {"count": -1}},
+            ]
+            counts = await movies_col.aggregate(pipeline).to_list(length=100)
+            if not counts:
+                return await message.reply_text(
+                    "🎭 <b>No genre data yet</b>\n\n"
+                    "Run <code>/enrich</code> (admin) to backfill TMDb genres for indexed titles.",
+                    parse_mode=ParseMode.HTML,
+                )
+            lines = [f"{i}. {c['_id']} — {c['count']}" for i, c in enumerate(counts, 1)]
+            text = "🎭 <b>Genres</b>\n\n" + "\n".join(lines)
+            text += "\n\nSend <code>/genres &lt;name&gt;</code> to browse a genre."
+            return await message.reply_text(text, parse_mode=ParseMode.HTML)
+
+        # Browse a genre (case-insensitive match on stored genre names). The
+        # listing is paginated over DISTINCT titles (GENRE_PAGE_SIZE per page)
+        # with Prev/Next nav so large genres are fully browsable.
+        total = await _genre_title_count(genre_query)
+        if total == 0:
+            return await message.reply_text(f"🎭 No indexed titles found in genre <b>{genre_query}</b>.", parse_mode=ParseMode.HTML)
+
+        # File totals (movie/series split) for the header, computed once and
+        # stored with the browse state like the title count.
+        files_split = await _genre_files_split(genre_query)
+        await send_genre_page(client, message, genre_query, page=1, total=total,
+                              files_split=files_split)
+        return
+    except Exception as e:
+        print(f"Error in genres command: {e}")
+        await message.reply_text("❌ Unable to browse genres. Please try again later.")
+
+
+GENRE_PAGE_SIZE = 12
+
+
+def _genre_title_pipeline(genre, sort, skip, limit):
+    """Aggregation pipeline: copies -> distinct titles within a genre.
+
+    Each result doc carries the per-title DB aggregates (``files`` count,
+    distinct ``seasons``, distinct ``episodes`` as {s, e} pairs) plus the
+    pushed ``copies`` so the best-quality copy can back the Get button.
+    Sorts: ``az`` title asc, ``new`` max indexed_at desc, ``rate`` max
+    tmdb_rating desc.
+    """
+    filt = {"tmdb_genres": {"$regex": f"^{re.escape(genre)}$", "$options": "i"}}
+    group = {
+        "_id": "$title",
+        "title": {"$first": "$title"},
+        "year": {"$first": "$year"},
+        "type": {"$first": "$type"},
+        "files": {"$sum": 1},
+        "seasons": {"$addToSet": "$season"},
+        "episodes": {"$addToSet": {"s": "$season", "e": "$episode"}},
+        "max_indexed_at": {"$max": "$indexed_at"},
+        "max_rating": {"$max": "$tmdb_rating"},
+        "copies": {"$push": {"title": "$title", "channel_id": "$channel_id", "message_id": "$message_id",
+                               "quality": "$quality", "rip": "$rip", "year": "$year",
+                               "file_size": "$file_size", "season": "$season",
+                               "episode": "$episode", "tmdb_rating": "$tmdb_rating",
+                               "type": "$type", "indexed_at": "$indexed_at"}},
+    }
+    pipeline = [{"$match": filt}, {"$group": group}]
+    if sort == "new":
+        pipeline.append({"$sort": {"max_indexed_at": -1, "_id": -1}})
+    elif sort == "rate":
+        pipeline.append({"$sort": {"max_rating": -1, "_id": 1}})
+    else:
+        pipeline.append({"$sort": {"_id": 1}})
+    pipeline.append({"$skip": skip})
+    pipeline.append({"$limit": limit})
+    return pipeline
+
+
+async def _genre_title_count(genre):
+    """Distinct title count within a genre (what the browse header shows)."""
+    pipeline = [
+        {"$match": {"tmdb_genres": {"$regex": f"^{re.escape(genre)}$", "$options": "i"}}},
+        {"$group": {"_id": "$title"}},
+        {"$count": "n"},
+    ]
+    try:
+        docs = await movies_col.aggregate(pipeline).to_list(length=1)
+    except Exception as e:
+        print(f"⚠️ genre title-count aggregation failed: {e}")
+        return 0
+    return docs[0]["n"] if docs else 0
+
+
+async def _genre_files_split(genre):
+    """Total files in a genre split by Movie/Series (the browse header).
+
+    Returns ``{"total": N, "movie": X, "series": Y}`` or ``None`` on failure.
+    Series types are series/tv/show; anything else (including missing type)
+    counts as Movie - same rule as /search's Files Found split.
+    """
+    pipeline = [
+        {"$match": {"tmdb_genres": {"$regex": f"^{re.escape(genre)}$", "$options": "i"}}},
+        {"$group": {"_id": "$type", "files": {"$sum": 1}}},
+    ]
+    try:
+        docs = await movies_col.aggregate(pipeline).to_list(length=None)
+    except Exception as e:
+        print(f"⚠️ genre files-split aggregation failed: {e}")
+        return None
+    movie = series = 0
+    for d in docs:
+        t = str(d.get("_id") or "Movie")
+        if t.lower() in ("series", "tv", "show"):
+            series += int(d.get("files") or 0)
+        else:
+            movie += int(d.get("files") or 0)
+    return {"total": movie + series, "movie": movie, "series": series}
+
+
+async def _genre_real_counts(genre, entries):
+    """Real TMDb season/episode totals per distinct series title (cached 6h).
+
+    Returns ``{title: meta}`` where meta carries ``seasons``/``episodes`` for
+    series. Titles without TMDb data are simply absent from the map.
+    """
+    metas = await asyncio.gather(*[
+        enrich_title(t.get("title"), t.get("year"), t.get("type") or "Movie")
+        for t in entries
+    ], return_exceptions=True)
+    return {t.get("title"): meta for t, meta in zip(entries, metas)
+            if isinstance(meta, dict)}
+
+
+def _format_genre_details(title_doc, meta):
+    """Series aggregate segment for the deduped genre listing line.
+
+    ``2 seasons [5] · 3 eps [35]`` where the bracket values are the real TMDb
+    totals (DB counts outside the brackets); ``""`` for movies. DB counts use
+    distinct seasons and distinct (season, episode) pairs so duplicate-quality
+    copies don't inflate them. The file count lives in the ``> N files >``
+    part of the line (matching /search), not here.
+    """
+    is_series = (title_doc.get("type") or "Movie").lower() in ("series", "tv", "show")
+    seasons = {s for s in (title_doc.get("seasons") or []) if s is not None}
+    eps = {(p.get("s"), p.get("e")) for p in (title_doc.get("episodes") or [])
+           if p.get("s") is not None and p.get("e") is not None}
+
+    parts = []
+    if is_series and seasons:
+        s_part = f"{len(seasons)} season{'s' if len(seasons) != 1 else ''}"
+        if meta and meta.get("seasons"):
+            s_part += f" [{meta['seasons']}]"
+        parts.append(s_part)
+        e_part = f"{len(eps)} eps"
+        if meta and meta.get("episodes"):
+            e_part += f" [{meta['episodes']}]"
+        parts.append(e_part)
+    return " · ".join(parts)
+
+
+async def send_genre_page(client, message, genre, page, total=None, files_split=None, genre_id=None, edit=False, sort="az", season_pages=None):
+    """Render one page of /genres <name> results.
+
+    Shared by the initial /genres <name> send and the genre_page: pagination
+    callback so the browse view stays consistent. Pagination state (genre,
+    total, owner, sort, page, entries, season_pages) lives in bulk_downloads
+    under a short id and expires via cleanup_expired_bulk_downloads like
+    search/request-list state.
+
+    Args:
+        genre_id: when None, a new pagination state entry is created (first
+            render); callbacks pass the stored id so Prev/Next keep working.
+        files_split: ``{"total", "movie", "series"}`` for the header's
+            ``Files Found: N (Movie - X | Series - Y)`` line (None omits it).
+        edit: True re-renders in place (callback path), False replies fresh.
+        sort: ``az`` (title asc), ``new`` (indexed_at desc, newest first) or
+            ``rate`` (tmdb_rating desc, top rated first).
+        season_pages: maps a page-local group index -> the group's season
+            shortcut page (0-based) so long-running series page their
+            Pick[n][Sxx] buttons via S◀/S▶ (mirrors /search).
+    """
+    if sort not in ("new", "rate"):
+        sort = "az"
+    if total is None:
+        total = await _genre_title_count(genre)
+    total_pages = max(1, (total + GENRE_PAGE_SIZE - 1) // GENRE_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+
+    # One aggregation per page: distinct titles with their DB aggregates.
+    entries = await movies_col.aggregate(
+        _genre_title_pipeline(genre, sort, (page - 1) * GENRE_PAGE_SIZE, GENRE_PAGE_SIZE)
+    ).to_list(length=GENRE_PAGE_SIZE)
+
+    # Real TMDb totals per distinct title (cached 6h via enrich_title) - the
+    # bracket values in the series aggregate segment.
+    meta_by_title = await _genre_real_counts(genre, entries)
+
+    # Persist pagination state BEFORE building buttons (the Pick buttons embed
+    # the genre id). Created on the first render; refreshed on every render so
+    # the Back-from-pick button restores the exact page the user was on.
+    if genre_id is None:
+        await cleanup_expired_bulk_downloads(bulk_downloads)
+        genre_id = str(uuid.uuid4())[:8]
+        bulk_downloads[genre_id] = {
+            "type": "genre_list",
+            "genre": genre,
+            "total": total,
+            "files_split": files_split,
+            "sort": sort,
+            "created_at": datetime.now(timezone.utc),
+            "user_id": message.from_user.id,
+        }
+    state = bulk_downloads.get(genre_id)
+    if state:
+        state["page"] = page
+        state["entries"] = entries
+        state["season_pages"] = season_pages or state.get("season_pages") or {}
+        if files_split is not None:
+            state["files_split"] = files_split
+
+    # Deduped listing in the /search per-title + latest-file layout: one line
+    # per title ``N. Title > N files > [aggregates] > Latest: <latest-info>``
+    # with the ⭐ TMDb rating at the end. Series keep their DB-vs-real
+    # season/episode aggregates inline. Every title gets a ``Pick [n]`` button
+    # (in-place filter view, like /search - series with several seasons also
+    # get Pick[n][Sxx] shortcuts) and a ``Get [n]`` button targeting the LATEST
+    # copy (same rule as /search's Get [n]).
+    lines = []
+    pick_buttons = []
+    get_buttons = []
+    for idx, t in enumerate(entries, 1):
+        n = (page - 1) * GENRE_PAGE_SIZE + idx
+        local_idx = idx - 1
+        copies = t.get("copies") or []
+        files = int(t.get("files") or 0)
+        file_word = "file" if files == 1 else "files"
+        line = f"{n}. {t.get('title', 'Unknown')} > {files} {file_word}"
+        details = _format_genre_details(t, meta_by_title.get(t.get("title")))
+        if details:
+            line += f" > {details}"
+        latest = latest_copy(copies)
+        line += f" > Latest: {format_latest_info(latest)}"
+        meta = meta_by_title.get(t.get("title"))
+        if meta and meta.get("rating"):
+            line += f" ⭐{meta['rating']}"
+        lines.append(line)
+
+        # Pick button (opens the in-place filter view for this title) plus
+        # Pick[n][Sxx] season shortcuts for multi-season series. Long-running
+        # series page through their shortcuts (S◀/S▶, one group at a time) via
+        # 6-part genre_page data - the callback advances the group's season
+        # page and this render rebuilds with the next slice of Sxx buttons
+        # (mirrors /search's results-level season paging).
+        if is_series(copies):
+            seasons = group_seasons(copies)
+            if len(seasons) > 1:
+                sp = (season_pages or {}).get(local_idx, 0)
+                max_sp = max(0, (len(seasons) + MAX_SEASON_BUTTONS - 1)
+                             // MAX_SEASON_BUTTONS - 1)
+                sp = max(0, min(sp, max_sp))
+                start = sp * MAX_SEASON_BUTTONS
+                for s in seasons[start:start + MAX_SEASON_BUTTONS]:
+                    pick_buttons.append(InlineKeyboardButton(
+                        f"Pick[{n}][S{s:02d}]",
+                        callback_data=pick_callback(genre_id, local_idx, season=s,
+                                                    prefix="genre_pick")))
+                if len(seasons) > MAX_SEASON_BUTTONS:
+                    if sp > 0:
+                        pick_buttons.append(InlineKeyboardButton(
+                            "S◀",
+                            callback_data=f"genre_page:{genre_id}:{page}:{sort}:{local_idx}:{sp - 1}"))
+                    if start + MAX_SEASON_BUTTONS < len(seasons):
+                        pick_buttons.append(InlineKeyboardButton(
+                            "S▶",
+                            callback_data=f"genre_page:{genre_id}:{page}:{sort}:{local_idx}:{sp + 1}"))
+        pick_buttons.append(InlineKeyboardButton(
+            f"Pick [{n}]",
+            callback_data=pick_callback(genre_id, local_idx, prefix="genre_pick")))
+
+        # Get button: the latest copy (same rule as /search's Get [n]).
+        if latest and latest.get("channel_id") and latest.get("message_id"):
+            get_buttons.append(InlineKeyboardButton(
+                f"Get [{n}]", callback_data=f"get_file:{latest['channel_id']}:{latest['message_id']}"))
+
+    text = "```\n"
+    text += f"Genre: \"{genre}\"\n"
+    text += f"Titles Found: {total} | Page {page}/{total_pages}\n"
+    if files_split:
+        text += (f"Files Found: {files_split.get('total')} "
+                 f"(Movie - {files_split.get('movie')} | Series - {files_split.get('series')})\n")
+    # Same Pick/Get hint as /search (shared SEARCH_HINT constant).
+    text += f"\n{SEARCH_HINT}\n\n" + "\n".join(lines)
+    text += "\n```"
+    rows = ([pick_buttons[i:i + 4] for i in range(0, len(pick_buttons), 4)]
+            + [get_buttons[i:i + 4] for i in range(0, len(get_buttons), 4)])
+    reply_markup = InlineKeyboardMarkup(rows) if rows else None
+    # Sort toggle row (active option marked with a checkmark).
+    sort_row = [
+        InlineKeyboardButton(
+            "🔤 A–Z" + (" ✓" if sort == "az" else ""),
+            callback_data=f"genre_page:{genre_id}:{page}:az"),
+        InlineKeyboardButton(
+            "🆕 Newest" + (" ✓" if sort == "new" else ""),
+            callback_data=f"genre_page:{genre_id}:{page}:new"),
+        InlineKeyboardButton(
+            "⭐ Top Rated" + (" ✓" if sort == "rate" else ""),
+            callback_data=f"genre_page:{genre_id}:{page}:rate"),
+    ]
+
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("← Prev", callback_data=f"genre_page:{genre_id}:{page-1}:{sort}"))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton("Next →", callback_data=f"genre_page:{genre_id}:{page+1}:{sort}"))
+    if nav:
+        rows = reply_markup.inline_keyboard if reply_markup else []
+        reply_markup = InlineKeyboardMarkup(rows + [sort_row, nav])
+    else:
+        rows = reply_markup.inline_keyboard if reply_markup else []
+        reply_markup = InlineKeyboardMarkup(rows + [sort_row])
+
+    if edit:
+        await message.edit_text(
+            text,
+            reply_markup=reply_markup,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+    else:
+        await message.reply_text(
+            text,
+            reply_markup=reply_markup,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+    return genre_id
+
+
+async def cmd_logs(client, message: Message):
+    """Admin: view the most recent audit-log entries from the database."""
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+
+    parts = message.text.split()
+    limit = 10
+    if len(parts) > 1 and parts[1].isdigit():
+        limit = min(int(parts[1]), 50)
+
+    try:
+        docs = await logs_col.find({}).sort("ts", -1).limit(limit).to_list(length=limit)
+        if not docs:
+            return await message.reply_text("📋 No log entries yet.")
+
+        lines = []
+        for d in docs:
+            ts = d.get("ts")
+            ts_str = ts.strftime("%m-%d %H:%M") if hasattr(ts, "strftime") else str(ts)[:16]
+            by = d.get("by")
+            target = d.get("target")
+            extra = d.get("extra") or {}
+            detail = ", ".join(f"{k}: {v}" for k, v in list(extra.items())[:3])
+            line = f"<code>{ts_str}</code> <b>{d.get('action')}</b>"
+            if by:
+                line += f" by {by}"
+            if target:
+                line += f" → {target}"
+            if detail:
+                line += f" | {detail}"
+            lines.append(line)
+
+        text = f"📋 <b>Recent Logs</b> (last {len(docs)})\n\n" + "\n".join(lines)
+        await message.reply_text(text, parse_mode=ParseMode.HTML, link_preview_options=LinkPreviewOptions(is_disabled=True))
+    except Exception as e:
+        print(f"Error in logs command: {e}")
+        await message.reply_text("❌ Unable to fetch logs.")
+
+
+async def cmd_enrich(client, message: Message):
+    """Admin: backfill TMDb metadata (poster/genres/rating/imdb) for indexed entries."""
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+
+    from .tmdb_integration import enrich_title, TMDB_ENRICH_INDEX
+    if not TMDB_ENRICH_INDEX:
+        return await message.reply_text("ℹ️ TMDb enrichment is disabled (set TMDB_ENRICH_INDEX=true in .env).")
+
+    parts = message.text.split()
+    limit = 30
+    if len(parts) > 1 and parts[1].isdigit():
+        limit = min(int(parts[1]), 200)
+
+    status = await message.reply_text("🔍 Enriching entries with TMDb metadata...")
+    try:
+        docs = await movies_col.find(
+            {"tmdb_genres": {"$exists": False}},
+            {"title": 1, "year": 1, "type": 1, "_id": 1, "imdb": 1},
+        ).limit(limit).to_list(length=limit)
+
+        enriched = 0
+        for doc in docs:
+            meta = await enrich_title(doc.get("title"), doc.get("year"), doc.get("type", "Movie"))
+            if meta:
+                set_fields = {
+                    "tmdb_poster": meta.get("poster_url"),
+                    "tmdb_rating": meta.get("rating"),
+                    "tmdb_genres": meta.get("genres"),
+                    "tmdb_overview": meta.get("overview"),
+                    "imdb_id": meta.get("imdb_id") or doc.get("imdb"),
+                }
+                await movies_col.update_one({"_id": doc["_id"]}, {"$set": set_fields})
+                enriched += 1
+            await asyncio.sleep(0.2)  # gentle pace toward TMDb rate limits
+
+        await status.edit_text(f"✅ Enriched <b>{enriched}/{len(docs)}</b> entries with TMDb metadata.", parse_mode=ParseMode.HTML)
+    except Exception as e:
+        print(f"Error in enrich command: {e}")
+        await status.edit_text("❌ Enrichment failed. Please try again later.")
+
+
+async def cmd_enrich_status(client, message: Message):
+    """Admin: show how many indexed titles still lack TMDb metadata."""
+    uid = message.from_user.id
+    if not await is_admin(uid):
+        return await message.reply_text("🚫 Admins only.")
+
+    try:
+        total = await movies_col.count_documents({})
+        pending = await movies_col.count_documents({"tmdb_genres": {"$exists": False}})
+        no_match = await movies_col.count_documents({"tmdb_genres": []})
+        enriched = total - pending - no_match
+
+        done_pct = (enriched / total * 100) if total else 100.0
+        filled = int(done_pct / 5)
+        bar = "█" * filled + "░" * (20 - filled)
+
+        text = (
+            "📊 <b>TMDb Enrichment Status</b>\n\n"
+            f"🎬 Total indexed: <b>{total}</b>\n"
+            f"✅ Enriched: <b>{enriched}</b> ({done_pct:.1f}%)\n"
+            f"⏳ Pending: <b>{pending}</b>\n"
+            f"🚫 No TMDb match: <b>{no_match}</b>\n\n"
+            f"<code>{bar}</code>\n\n"
+            f"💡 Run <code>/enrich</code> or <code>scripts/backfill_enrichment.py</code> to backfill pending titles."
+        )
+        await message.reply_text(text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        print(f"Error in enrich_status command: {e}")
+        await message.reply_text("❌ Unable to fetch enrichment status.")
 
 
 # -------------------------
@@ -739,10 +1319,11 @@ async def cmd_index_channel(client, message: Message):
                     chat_id = int(("-100" + chat_id))
             except:
                 return await message.reply_text('❌ Invalid message link!')
-        elif response.forward_from_chat and response.forward_from_chat.type == ChatType.CHANNEL:
-            # Handle forwarded message
-            last_msg_id = response.forward_from_message_id
-            chat_id = response.forward_from_chat.username or response.forward_from_chat.id
+        elif getattr(response, "forward_origin", None) and getattr(response.forward_origin, "chat", None) and response.forward_origin.chat.type == ChatType.CHANNEL:
+            # Handle forwarded message (forward_origin replaces the deprecated
+            # forward_from_chat / forward_from_message_id properties)
+            last_msg_id = response.forward_origin.message_id
+            chat_id = response.forward_origin.chat.username or response.forward_origin.chat.id
         else:
             return await message.reply_text('❌ This is not a forwarded message or valid link.')
 
@@ -891,65 +1472,48 @@ async def cmd_toggle_indexing(client, message: Message):
     await message.reply_text(f"Auto-indexing set to {new}")
     await log_action("toggle_indexing", by=uid, extra={"new": new})
 
-async def cmd_promote(client, message: Message):
+async def _run_role_alias(client, message: Message, action: str, usage: str):
+    """Shared body of the hidden /promote /demote /ban_user /unban_user aliases.
+
+    They are the same operation as the /user dashboard, minus the preview
+    step: identical gates (private chat only, comma-separated ids AND
+    @usernames, all the guards) and an immediate result summary. The single
+    write path is `apply_role_action`, so a forged/targeted alias can never
+    bypass a guard.
+    """
     uid = message.from_user.id
     if not await is_admin(uid):
         return await message.reply_text("🚫 Admins only.")
+    if message.chat.type != ChatType.PRIVATE:
+        return await message.reply_text("🔒 Use this command in a private chat with me.")
     parts = message.text.split()
     if len(parts) < 2:
-        return await message.reply_text("Usage: /promote <user_id>")
-    try:
-        target = int(parts[1])
-        await users_col.update_one({"user_id": target}, {"$set": {"role": "admin"}}, upsert=True)
-        await message.reply_text(f"✅ {target} promoted to admin.")
-        await log_action("promote", by=uid, target=target)
-    except Exception:
-        await message.reply_text("Invalid user id.")
+        return await message.reply_text(usage)
+    records = await resolve_targets(client, " ".join(parts[1:]), actor_id=uid,
+                                    guard_action=action)
+    if not records:
+        return await message.reply_text("❌ No numeric id or @username recognised.")
+    summary = await apply_role_action(uid, action, records, via="alias")
+    lines = [format_role_summary(summary)]
+    lines += format_role_skipped_lines(summary["skipped"])
+    lines.append("💡 Tip: /user opens the same action with a preview.")
+    await message.reply_text("\n".join(lines))
+
+async def cmd_promote(client, message: Message):
+    return await _run_role_alias(client, message, "promote",
+                                 "Usage: /promote <user_id|@username> [, ...]")
 
 async def cmd_demote(client, message: Message):
-    uid = message.from_user.id
-    if not await is_admin(uid):
-        return await message.reply_text("🚫 Admins only.")
-    parts = message.text.split()
-    if len(parts) < 2:
-        return await message.reply_text("Usage: /demote <user_id>")
-    try:
-        target = int(parts[1])
-        await users_col.update_one({"user_id": target}, {"$set": {"role": "user"}}, upsert=True)
-        await message.reply_text(f"✅ {target} demoted to user.")
-        await log_action("demote", by=uid, target=target)
-    except Exception:
-        await message.reply_text("Invalid user id.")
+    return await _run_role_alias(client, message, "demote",
+                                 "Usage: /demote <user_id|@username> [, ...]")
 
 async def cmd_ban_user(client, message: Message):
-    uid = message.from_user.id
-    if not await is_admin(uid):
-        return await message.reply_text("🚫 Admins only.")
-    parts = message.text.split()
-    if len(parts) < 2:
-        return await message.reply_text("Usage: /ban_user <user_id>")
-    try:
-        target = int(parts[1])
-        await users_col.update_one({"user_id": target}, {"$set": {"role": "banned"}}, upsert=True)
-        await message.reply_text(f"🚫 {target} has been banned.")
-        await log_action("ban_user", by=uid, target=target)
-    except Exception:
-        await message.reply_text("Invalid user id.")
+    return await _run_role_alias(client, message, "ban_user",
+                                 "Usage: /ban_user <user_id|@username> [, ...]")
 
 async def cmd_unban_user(client, message: Message):
-    uid = message.from_user.id
-    if not await is_admin(uid):
-        return await message.reply_text("🚫 Admins only.")
-    parts = message.text.split()
-    if len(parts) < 2:
-        return await message.reply_text("Usage: /unban_user <user_id>")
-    try:
-        target = int(parts[1])
-        await users_col.update_one({"user_id": target}, {"$set": {"role": "user"}}, upsert=True)
-        await message.reply_text(f"✅ {target} has been unbanned.")
-        await log_action("unban_user", by=uid, target=target)
-    except Exception:
-        await message.reply_text("Invalid user id.")
+    return await _run_role_alias(client, message, "unban_user",
+                                 "Usage: /unban_user <user_id|@username> [, ...]")
 
 async def cmd_reset(client, message: Message):
     """Reset command - clears all indexed data with confirmation"""
@@ -1108,22 +1672,22 @@ async def cmd_reset_channel(client, message: Message):
             # Count documents to be deleted
             docs_to_delete = await movies_col.count_documents({"channel_id": channel_id})
 
-            confirmation_text = f"🗑️ **Channel Reset Confirmation**\n\n"
+            confirmation_text = "🗑️ **Channel Reset Confirmation**\n\n"
             confirmation_text += f"📺 **Channel:** {channel_title}\n"
             confirmation_text += f"🆔 **ID:** `{channel_id}`\n"
             confirmation_text += f"📊 **Files to delete:** {docs_to_delete} movie entries\n\n"
-            confirmation_text += f"⚠️ **This will permanently delete ALL indexed movie data from this channel!**\n\n"
-            confirmation_text += f"**What will be deleted:**\n"
+            confirmation_text += "⚠️ **This will permanently delete ALL indexed movie data from this channel!**\n\n"
+            confirmation_text += "**What will be deleted:**\n"
             confirmation_text += f"• All movie entries from {channel_title}\n"
-            confirmation_text += f"• All metadata associated with this channel\n"
-            confirmation_text += f"• Search results will be affected\n\n"
-            confirmation_text += f"**What will remain:**\n"
-            confirmation_text += f"• Channel configuration\n"
-            confirmation_text += f"• Data from other channels\n"
-            confirmation_text += f"• User accounts and settings\n\n"
-            confirmation_text += f"**To confirm, type:** `CONFIRM`\n"
-            confirmation_text += f"**To cancel, type:** `CANCEL`\n\n"
-            confirmation_text += f"⏰ **This prompt will timeout in 30 seconds.**"
+            confirmation_text += "• All metadata associated with this channel\n"
+            confirmation_text += "• Search results will be affected\n\n"
+            confirmation_text += "**What will remain:**\n"
+            confirmation_text += "• Channel configuration\n"
+            confirmation_text += "• Data from other channels\n"
+            confirmation_text += "• User accounts and settings\n\n"
+            confirmation_text += "**To confirm, type:** `CONFIRM`\n"
+            confirmation_text += "**To cancel, type:** `CANCEL`\n\n"
+            confirmation_text += "⏰ **This prompt will timeout in 30 seconds.**"
 
             confirmation_msg = await message.reply_text(confirmation_text)
 
@@ -1202,9 +1766,9 @@ async def cmd_reset_channel(client, message: Message):
         except asyncio.TimeoutError:
             # Selection timeout
             await selection_msg.edit_text(
-                f"⏰ **Channel Selection Timeout**\n\n"
-                f"🛡️ The reset operation was cancelled due to timeout.\n"
-                f"🔄 You can try again later with /reset_channel."
+                "⏰ **Channel Selection Timeout**\n\n"
+                "🛡️ The reset operation was cancelled due to timeout.\n"
+                "🔄 You can try again later with /reset_channel."
             )
 
     except Exception as e:
@@ -1225,8 +1789,8 @@ async def cmd_indexing_stats(client, message: Message):
         return
 
     # Create comprehensive statistics report
-    stats_text = f"```\n"
-    stats_text += f"📊 **INDEXING DIAGNOSTIC STATISTICS**\n\n"
+    stats_text = "```\n"
+    stats_text += "📊 **INDEXING DIAGNOSTIC STATISTICS**\n\n"
 
     # Basic statistics
     stats_text += f"🔢 Total indexing attempts: {indexing_stats['total_attempts']}\n"
@@ -1240,42 +1804,138 @@ async def cmd_indexing_stats(client, message: Message):
         success_rate = (indexing_stats['successful_inserts'] / indexing_stats['total_attempts']) * 100
         stats_text += f"📈 Success rate: {success_rate:.1f}%\n\n"
     else:
-        stats_text += f"📈 Success rate: N/A (no attempts)\n\n"
+        stats_text += "📈 Success rate: N/A (no attempts)\n\n"
 
     # Error analysis
     if indexing_stats['duplicate_errors'] > 0:
         stats_text += f"⚠️ **RACE CONDITION DETECTED**: {indexing_stats['duplicate_errors']} duplicate key errors\n"
-        stats_text += f"💡 This indicates concurrent indexing attempts on the same message\n\n"
+        stats_text += "💡 This indicates concurrent indexing attempts on the same message\n\n"
 
     if indexing_stats['other_errors'] > 0:
         stats_text += f"⚠️ **OTHER ERRORS**: {indexing_stats['other_errors']} database/processing errors\n"
-        stats_text += f"💡 Check logs for specific error details\n\n"
+        stats_text += "💡 Check logs for specific error details\n\n"
 
     # Concurrency analysis
     if indexing_stats['concurrent_peak'] > 1:
         stats_text += f"🔄 **CONCURRENCY ISSUES**: Peak of {indexing_stats['concurrent_peak']} simultaneous operations\n"
-        stats_text += f"💡 Auto-indexing lacks proper synchronization\n"
-        stats_text += f"🔧 Recommendation: Implement message queuing for better handling\n\n"
+        stats_text += "💡 Auto-indexing lacks proper synchronization\n"
+        stats_text += "🔧 Recommendation: Implement message queuing for better handling\n\n"
     else:
-        stats_text += f"✅ **CONCURRENCY**: No significant concurrent activity detected\n\n"
+        stats_text += "✅ **CONCURRENCY**: No significant concurrent activity detected\n\n"
 
     # Queue status
     stats_text += f"📦 **QUEUE STATUS**: {len(message_queue)} messages pending\n\n"
 
     # Recommendations
-    stats_text += f"🛠️ **TROUBLESHOOTING RECOMMENDATIONS**:\n\n"
-    stats_text += f"1. Use /indexing_stats to monitor real-time statistics\n"
-    stats_text += f"2. Check [DIAGNOSTIC] logs in console for race conditions\n"
-    stats_text += f"3. Monitor 'Duplicate key error' messages for concurrent indexing\n"
-    stats_text += f"4. Consider implementing message queue for high-volume channels\n\n"
+    stats_text += "🛠️ **TROUBLESHOOTING RECOMMENDATIONS**:\n\n"
+    stats_text += "1. Use /indexing_stats to monitor real-time statistics\n"
+    stats_text += "2. Check [DIAGNOSTIC] logs in console for race conditions\n"
+    stats_text += "3. Monitor 'Duplicate key error' messages for concurrent indexing\n"
+    stats_text += "4. Consider implementing message queue for high-volume channels\n\n"
 
-    stats_text += f"🔄 **RESET STATISTICS**: Use /reset_stats to clear counters\n"
-    stats_text += f"```"
+    stats_text += "🔄 **RESET STATISTICS**: Use /reset_stats to clear counters\n"
+    stats_text += "```"
 
-    await message.reply_text(stats_text, disable_web_page_preview=True)
+    await message.reply_text(stats_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
     # Log statistics viewing
     await log_action("indexing_stats_viewed", by=message.from_user.id, extra=indexing_stats)
+
+async def cmd_queue(client, message: Message):
+    """Admin: live ops snapshot - index queue, processor, prune + rescan state.
+
+    Surfaces the runtime health that /indexing_stats (cumulative counters)
+    doesn't: current queue depth vs the deque cap (overflow silently drops
+    the oldest message), whether the queue processor task is alive, the last
+    orphan-prune run, and per-channel rescan cursors.
+    """
+    from . import config as _config
+
+    if not await is_admin(message.from_user.id):
+        return await message.reply_text("🚫 Admins only.")
+
+    # Queue depth vs cap (collections.deque silently discards from the left
+    # once full - flag it before messages start disappearing).
+    try:
+        depth = len(message_queue)
+        cap = message_queue.maxlen or 0
+    except Exception:
+        depth, cap = 0, 0
+    fill = f"{depth}/{cap}" if cap else str(depth)
+    warn = ""
+    if cap and depth >= cap * 0.8:
+        warn = ("\n⚠️ QUEUE NEAR CAPACITY - oldest messages will be dropped "
+                "once full (burst traffic).")
+
+    # Processor liveness. NOTE: read via the config module - indexing.py
+    # rebinds the global on (re)start, so a from-import would go stale.
+    task = _config.queue_processor_task
+    if task is None:
+        proc = "not started (starts on first auto-indexed message)"
+    else:
+        try:
+            if task.done():
+                try:
+                    err = task.exception()
+                except Exception:
+                    err = None
+                proc = f"STOPPED{f' - {err}' if err else ''} (restarts on next message)"
+            elif task.cancelled():
+                proc = "CANCELLED (restarts on next message)"
+            else:
+                proc = "running"
+        except Exception:
+            proc = "unknown"
+
+    lines = [
+        "```",
+        "QUEUE & BACKGROUND OPS",
+        "",
+        f"Index queue: {fill} pending{warn}",
+        f"Processor: {proc}",
+        f"Indexing: {indexing_stats.get('total_attempts', 0)} attempts · "
+        f"{indexing_stats.get('successful_inserts', 0)} ok · "
+        f"{indexing_stats.get('duplicate_errors', 0)} dup · "
+        f"{indexing_stats.get('other_errors', 0)} err",
+        f"Orphan prune: {prune_stats.get('runs', 0)} runs · "
+        f"last {prune_stats.get('last_run') or 'never'} · "
+        f"verified {prune_stats.get('last_verified', 0)} · "
+        f"deleted {prune_stats.get('last_deleted', 0)}"
+        + (" · PAUSED on FloodWait" if prune_stats.get("last_paused") else "")
+        + (f" · ERROR {prune_stats.get('last_error')}" if prune_stats.get("last_error") else ""),
+    ]
+
+    # Auto-indexing flag + per-channel rescan cursors (best-effort; the bot
+    # stays useful even when the DB hiccups).
+    try:
+        s = await settings_col.find_one({"k": "auto_indexing"})
+        auto = s["v"] if s and "v" in s else AUTO_INDEX_DEFAULT
+        lines.append(f"Auto-indexing: {'ON' if auto else 'OFF'}")
+    except Exception as e:
+        lines.append(f"Auto-indexing: unknown ({e})")
+    try:
+        cursors = await settings_col.find(
+            {"k": {"$regex": "^scan_cursor:"}}).to_list(length=100)
+        channels = await channels_col.find({}).to_list(length=100)
+        titles = {c.get("channel_id"): c.get("channel_title", "?") for c in channels}
+        if cursors:
+            lines.append("Rescan cursors:")
+            for cur in sorted(cursors, key=lambda c: str(c.get("k"))):
+                try:
+                    ch_id = int(str(cur.get("k", "")).split(":", 1)[1])
+                except (ValueError, IndexError):
+                    continue
+                lines.append(f"  {titles.get(ch_id, ch_id)}: msg {cur.get('v')}")
+        else:
+            lines.append("Rescan cursors: none yet (first rescan pending)")
+    except Exception as e:
+        lines.append(f"Rescan cursors: unavailable ({e})")
+
+    lines.append("```")
+    await message.reply_text("\n".join(lines),
+                             link_preview_options=LinkPreviewOptions(is_disabled=True))
+    await log_action("queue_viewed", by=message.from_user.id,
+                     extra={"depth": depth, "processor": proc})
 
 async def cmd_reset_stats(client, message: Message):
     """Reset indexing statistics counters"""
@@ -1613,8 +2273,8 @@ async def cmd_update_db(client, message: Message):
                 )
 
                 print(f"\n{'='*60}")
-                print(f"[UPDATE_DB] ✅ Database update completed!")
-                print(f"[UPDATE_DB] Summary:")
+                print("[UPDATE_DB] ✅ Database update completed!")
+                print("[UPDATE_DB] Summary:")
                 print(f"  - Scanned: {scanned} messages")
                 print(f"  - Orphans removed: {orphans_removed}")
                 print(f"  - New files indexed: {new_indexed}")
@@ -1767,7 +2427,7 @@ async def cmd_manual_deletion(client, message: Message):
 
             results_text += f"{idx}. {title} | Ch: {channel_id} | Msg: {message_id} | {date_str}\n"
 
-        results_text += f"\nSelect entries to delete using the buttons below."
+        results_text += "\nSelect entries to delete using the buttons below."
 
         # Create inline keyboard with selection buttons
         # Show up to 10 results per page for now (simplified version)
@@ -1790,7 +2450,7 @@ async def cmd_manual_deletion(client, message: Message):
         ])
 
         if len(results) > 20:
-            results_text += f"\n\nNote: Showing first 20 results. Use more specific search for fewer results."
+            results_text += "\n\nNote: Showing first 20 results. Use more specific search for fewer results."
 
         await search_msg.edit_text(
             results_text,
@@ -1817,480 +2477,6 @@ async def cmd_manual_deletion(client, message: Message):
         )
 
         print(f"❌ Manual deletion error for user {uid}: {e}")
-
-
-async def cmd_request(client, message: Message):
-    """Handle /request command for movie/series requests"""
-    uid = message.from_user.id
-    username = message.from_user.username or message.from_user.first_name or str(uid)
-
-    try:
-        # Check if user is admin (admins bypass rate limits for testing)
-        user_is_admin = await is_admin(uid)
-
-        # Check if feature is premium-only
-        if await is_feature_premium_only("request"):
-            # Check if user is premium or admin
-            if not user_is_admin and not await is_premium_user(uid):
-                return await message.reply_text(
-                    "⭐ **Premium Feature**\n\n"
-                    "The /request command is a premium-only feature.\n\n"
-                    "Contact an admin to get premium access."
-                )
-
-        # Check rate limits (skip for admins)
-        if not user_is_admin:
-            can_request, error_msg = await check_rate_limits(uid)
-            if not can_request:
-                await message.reply_text(error_msg)
-                return
-
-        # Start interactive request flow with warning
-        await message.reply_text(
-            "📝 **Movie/Series Request**\n\n"
-            "⚠️ **IMPORTANT WARNING:**\n"
-            "Before requesting, please search the database using /search to ensure the content is not already available.\n"
-            "Requesting content that already exists may result in a ban from the bot.\n\n"
-            "Let's gather the information for your request.\n"
-            "You can type **CANCEL** at any step to abort.\n\n"
-            "**Step 1/3:** What type of content are you requesting?\n"
-            "Reply with: **Movie** or **Series**"
-        )
-
-        # Wait for content type
-        try:
-            type_msg = await wait_for_user_input(message.chat.id, uid, timeout=120)
-        except asyncio.TimeoutError:
-            await message.reply_text("⏰ Request timeout. Please start over with /request")
-            return
-
-        if not type_msg or not type_msg.text:
-            await message.reply_text("❌ Invalid input. Please start over with /request")
-            return
-
-        content_type_input = type_msg.text.strip().upper()
-
-        if content_type_input == "CANCEL":
-            await message.reply_text("❌ Request cancelled.")
-            return
-
-        if content_type_input not in ["MOVIE", "SERIES"]:
-            await message.reply_text("❌ Invalid type. Please use 'Movie' or 'Series'. Start over with /request")
-            return
-
-        content_type = "Movie" if content_type_input == "MOVIE" else "Series"
-
-        # Step 2: Get title
-        await message.reply_text(
-            f"✅ Type: **{content_type}**\n\n"
-            f"**Step 2/3:** What is the title/name?\n"
-            f"Reply with the {content_type.lower()} title."
-        )
-
-        try:
-            title_msg = await wait_for_user_input(message.chat.id, uid, timeout=120)
-        except asyncio.TimeoutError:
-            await message.reply_text("⏰ Request timeout. Please start over with /request")
-            return
-
-        if not title_msg or not title_msg.text:
-            await message.reply_text("❌ Invalid input. Please start over with /request")
-            return
-
-        title = title_msg.text.strip()
-
-        if title.upper() == "CANCEL":
-            await message.reply_text("❌ Request cancelled.")
-            return
-
-        if len(title) < 2:
-            await message.reply_text("❌ Title too short. Please start over with /request")
-            return
-
-        # Step 3: Get year
-        await message.reply_text(
-            f"✅ Title: **{title}**\n\n"
-            f"**Step 3/3:** What is the release year?\n"
-            f"Reply with a 4-digit year (e.g., 2024)."
-        )
-
-        try:
-            year_msg = await wait_for_user_input(message.chat.id, uid, timeout=120)
-        except asyncio.TimeoutError:
-            await message.reply_text("⏰ Request timeout. Please start over with /request")
-            return
-
-        if not year_msg or not year_msg.text:
-            await message.reply_text("❌ Invalid input. Please start over with /request")
-            return
-
-        year_input = year_msg.text.strip()
-
-        if year_input.upper() == "CANCEL":
-            await message.reply_text("❌ Request cancelled.")
-            return
-
-        # Validate year
-        if not year_input.isdigit() or len(year_input) != 4:
-            await message.reply_text("❌ Invalid year format. Please use a 4-digit year. Start over with /request")
-            return
-
-        year = year_input
-        current_year = datetime.now(timezone.utc).year
-        if int(year) < 1900 or int(year) > current_year + 2:
-            await message.reply_text(f"❌ Year must be between 1900 and {current_year + 2}. Start over with /request")
-            return
-
-        # Search TMDb for matches
-        search_msg = await message.reply_text(
-            f"🔍 Searching TMDb for **{title}** ({year})...\n"
-            f"Please wait..."
-        )
-
-        tmdb_results = await search_tmdb(title, year, content_type)
-
-        imdb_link = None
-
-        if tmdb_results:
-            # Display results
-            results_text = f"✅ Found {len(tmdb_results)} result(s) on TMDb:\n\n"
-
-            for idx, result in enumerate(tmdb_results, 1):
-                result_title = result.get("title", "Unknown")
-                result_year = result.get("year", "N/A")
-                result_imdb = result.get("imdb_id", "N/A")
-
-                # Format: 1. Title (Year) - IMDB: tt1234567
-                results_text += f"{idx}. {result_title} ({result_year})"
-                if result_imdb and result_imdb != "N/A":
-                    results_text += f" - IMDB: {result_imdb}"
-                results_text += "\n"
-
-            results_text += (
-                f"\n**Select a result** by replying with the number (1-{len(tmdb_results)})\n"
-                f"Or type **SKIP** to continue without IMDB link\n"
-                f"Or type **CANCEL** to abort"
-            )
-
-            await search_msg.edit_text(results_text)
-
-            # Wait for selection
-            try:
-                selection_msg = await wait_for_user_input(message.chat.id, uid, timeout=120)
-            except asyncio.TimeoutError:
-                await message.reply_text("⏰ Request timeout. Please start over with /request")
-                return
-
-            if not selection_msg or not selection_msg.text:
-                await message.reply_text("❌ Invalid input. Please start over with /request")
-                return
-
-            selection_input = selection_msg.text.strip().upper()
-
-            if selection_input == "CANCEL":
-                await message.reply_text("❌ Request cancelled.")
-                return
-
-            if selection_input != "SKIP":
-                # Validate selection
-                if not selection_input.isdigit():
-                    await message.reply_text("❌ Invalid selection. Please start over with /request")
-                    return
-
-                selection_idx = int(selection_input) - 1
-
-                if selection_idx < 0 or selection_idx >= len(tmdb_results):
-                    await message.reply_text(f"❌ Invalid selection. Please choose 1-{len(tmdb_results)}. Start over with /request")
-                    return
-
-                # Get IMDB link from selected result
-                selected_result = tmdb_results[selection_idx]
-                imdb_id = selected_result.get("imdb_id")
-
-                if imdb_id:
-                    imdb_link = f"https://www.imdb.com/title/{imdb_id}/"
-                    await message.reply_text(f"✅ Selected: {selected_result.get('title')} ({selected_result.get('year')})")
-                else:
-                    await message.reply_text("⚠️ IMDB ID not available for this selection. Proceeding without IMDB link.")
-        else:
-            # No TMDb results found, allow manual entry or skip
-            await search_msg.edit_text(
-                f"❌ No results found on TMDb for **{title}** ({year}).\n\n"
-                f"You can continue without an IMDB link.\n"
-                f"Type **CONTINUE** to proceed or **CANCEL** to abort."
-            )
-
-            try:
-                continue_msg = await wait_for_user_input(message.chat.id, uid, timeout=60)
-            except asyncio.TimeoutError:
-                await message.reply_text("⏰ Request timeout. Please start over with /request")
-                return
-
-            if not continue_msg or not continue_msg.text:
-                await message.reply_text("❌ Invalid input. Please start over with /request")
-                return
-
-            if continue_msg.text.strip().upper() == "CANCEL":
-                await message.reply_text("❌ Request cancelled.")
-                return
-
-            if continue_msg.text.strip().upper() != "CONTINUE":
-                await message.reply_text("❌ Invalid input. Please start over with /request")
-                return
-
-        # Check for duplicate requests
-        is_duplicate, similar_req = await check_duplicate_request(title, year, uid)
-        if is_duplicate:
-            await message.reply_text(
-                f"⚠️ **Similar Request Found**\n\n"
-                f"You already have a similar pending request:\n"
-                f"**Title:** {similar_req.get('title')}\n"
-                f"**Year:** {similar_req.get('year')}\n"
-                f"**Type:** {similar_req.get('content_type')}\n\n"
-                f"Do you want to proceed anyway?\n"
-                f"Reply with **YES** to proceed or **NO** to cancel."
-            )
-
-            try:
-                confirm_msg = await wait_for_user_input(message.chat.id, uid, timeout=60)
-            except asyncio.TimeoutError:
-                await message.reply_text("⏰ Request timeout. Request cancelled.")
-                return
-
-            if not confirm_msg or not confirm_msg.text or confirm_msg.text.strip().upper() != "YES":
-                await message.reply_text("❌ Request cancelled.")
-                return
-
-        # Create request document
-        now = datetime.now(timezone.utc)
-        request_doc = {
-            "user_id": uid,
-            "username": username,
-            "content_type": content_type,
-            "title": title,
-            "year": year,
-            "imdb_link": imdb_link,
-            "request_date": now,
-            "status": "pending"
-        }
-
-        # Insert into database
-        result = await requests_col.insert_one(request_doc)
-
-        # Update user limits (skip for admins)
-        if not user_is_admin:
-            await update_user_limits(uid)
-
-        # Get queue position
-        queue_position = await get_queue_position(uid)
-
-        # Get remaining quota
-        pending_count = await requests_col.count_documents({
-            "user_id": uid,
-            "status": "pending"
-        })
-
-        # Send confirmation
-        confirmation_text = (
-            f"✅ **Request Submitted Successfully!**\n\n"
-            f"**Type:** {content_type}\n"
-            f"**Title:** {title}\n"
-            f"**Year:** {year}\n"
-        )
-
-        if imdb_link:
-            confirmation_text += f"**IMDB:** {imdb_link}\n"
-
-        confirmation_text += f"\n📊 **Queue Position:** #{queue_position}\n"
-
-        if user_is_admin:
-            confirmation_text += f"📝 **Your Pending Requests:** {pending_count} (Admin - No Limits)\n\n"
-        else:
-            confirmation_text += f"📝 **Your Pending Requests:** {pending_count}/{MAX_PENDING_REQUESTS_PER_USER}\n\n"
-
-        confirmation_text += "You will be notified when your request is fulfilled."
-
-        await message.reply_text(confirmation_text)
-
-        # Log the request
-        await log_action("request_submitted", by=uid, extra={
-            "title": title,
-            "year": year,
-            "content_type": content_type,
-            "queue_position": queue_position
-        })
-
-    except Exception as e:
-        await log_action("request_error", by=uid, extra={"error": str(e)})
-        await message.reply_text(
-            f"❌ **Error**\n\n"
-            f"An error occurred while processing your request.\n"
-            f"Please try again later."
-        )
-        print(f"❌ Request error for user {uid}: {e}")
-
-
-async def cmd_request_list(client, message: Message):
-    """Handle /request_list command for admins to view and manage requests"""
-    uid = message.from_user.id
-
-    # Check if user is admin
-    if not await is_admin(uid):
-        await message.reply_text("🚫 Admins only.")
-        return
-
-    try:
-        # Get all pending requests sorted by request date
-        pending_requests = await requests_col.find(
-            {"status": "pending"}
-        ).sort("request_date", 1).to_list(length=1000)
-
-        if not pending_requests:
-            await message.reply_text(
-                "📝 **Request List**\n\n"
-                "No pending requests at the moment."
-            )
-            return
-
-        # Pagination settings
-        REQUESTS_PER_PAGE = 9
-        total_requests = len(pending_requests)
-        total_pages = (total_requests + REQUESTS_PER_PAGE - 1) // REQUESTS_PER_PAGE
-
-        # Store request list data for pagination
-        request_list_id = str(uuid.uuid4())[:8]
-        bulk_downloads[request_list_id] = {
-            'requests': pending_requests,
-            'created_at': datetime.now(timezone.utc),
-            'user_id': uid,
-            'type': 'request_list'
-        }
-
-        # Send first page
-        await send_request_list_page(client, message, pending_requests, request_list_id, page=1)
-
-        # Log the action
-        await log_action("request_list_viewed", by=uid, extra={
-            "total_requests": total_requests
-        })
-
-    except Exception as e:
-        await log_action("request_list_error", by=uid, extra={"error": str(e)})
-        await message.reply_text(
-            f"❌ **Error**\n\n"
-            f"An error occurred while fetching the request list.\n"
-            f"Please try again later."
-        )
-        print(f"❌ Request list error for admin {uid}: {e}")
-
-
-async def send_request_list_page(client, message, all_requests, request_list_id, page=1, edit=False):
-    """Send a paginated request list
-
-    Args:
-        client: The bot client
-        message: The message object to reply to or edit
-        all_requests: List of all requests
-        request_list_id: Unique ID for this request list session
-        page: Page number to display
-        edit: Whether to edit the message (True) or send new message (False)
-    """
-    REQUESTS_PER_PAGE = 9
-    total_requests = len(all_requests)
-    total_pages = (total_requests + REQUESTS_PER_PAGE - 1) // REQUESTS_PER_PAGE
-
-    # Ensure page is within valid range
-    page = max(1, min(page, total_pages))
-
-    # Calculate start and end indices for current page
-    start_idx = (page - 1) * REQUESTS_PER_PAGE
-    end_idx = min(start_idx + REQUESTS_PER_PAGE, total_requests)
-    page_requests = all_requests[start_idx:end_idx]
-
-    # Build request list text
-    list_text = "```\n"
-    list_text += f"Request List - Page {page}/{total_pages}\n"
-    list_text += f"Total Pending: {total_requests}\n"
-    list_text += "=" * 50 + "\n\n"
-
-    for idx, req in enumerate(page_requests, start=start_idx + 1):
-        req_type = "[M]" if req.get("content_type") == "Movie" else "[S]"
-        title = req.get("title", "Unknown")
-        year = req.get("year", "N/A")
-        username = req.get("username", "Unknown")
-        user_id = req.get("user_id", "N/A")
-        req_date = req.get("request_date")
-        date_str = req_date.strftime("%Y-%m-%d %H:%M") if req_date else "N/A"
-
-        list_text += f"#{idx} {req_type} {title} ({year})\n"
-        list_text += f"    User: {username} (ID: {user_id})\n"
-        list_text += f"    Date: {date_str}\n"
-
-        if req.get("imdb_link"):
-            list_text += f"    IMDB: {req.get('imdb_link')}\n"
-
-        list_text += "\n"
-
-    list_text += "```"
-
-    # Create buttons
-    buttons = []
-
-    # Individual Mark Done buttons (3 per row)
-    current_row = []
-    for idx, req in enumerate(page_requests, start=start_idx + 1):
-        req_id = str(req.get("_id"))
-        current_row.append(
-            InlineKeyboardButton(
-                f"Done [{idx}]",
-                callback_data=f"req_done:{req_id}"
-            )
-        )
-
-        if len(current_row) == 3 or idx == end_idx:
-            buttons.append(current_row)
-            current_row = []
-
-    # Navigation row
-    nav_row = []
-
-    # Previous button
-    if page > 1:
-        nav_row.append(
-            InlineKeyboardButton(
-                "← Prev",
-                callback_data=f"req_page:{request_list_id}:{page-1}"
-            )
-        )
-
-    # Mark All Done button
-    nav_row.append(
-        InlineKeyboardButton(
-            "Mark All Done",
-            callback_data=f"req_all_done:{request_list_id}"
-        )
-    )
-
-    # Next button
-    if page < total_pages:
-        nav_row.append(
-            InlineKeyboardButton(
-                "Next →",
-                callback_data=f"req_page:{request_list_id}:{page+1}"
-            )
-        )
-
-    if nav_row:
-        buttons.append(nav_row)
-
-    # Create keyboard
-    keyboard = InlineKeyboardMarkup(buttons) if buttons else None
-
-    # Send or edit message based on the edit parameter
-    if edit:
-        await message.edit_text(list_text, reply_markup=keyboard)
-    else:
-        await message.reply_text(list_text, reply_markup=keyboard)
 
 
 # -------------------------
@@ -2353,7 +2539,7 @@ async def cmd_stat(client, message: Message):
         keyboard = InlineKeyboardMarkup(buttons)
         
         # Send statistics
-        await loading_msg.edit_text(output, reply_markup=keyboard, disable_web_page_preview=True, parse_mode=ParseMode.HTML)
+        await loading_msg.edit_text(output, reply_markup=keyboard, link_preview_options=LinkPreviewOptions(is_disabled=True), parse_mode=ParseMode.HTML)
         
         # Log action
         await log_action("stat_command", by=uid, extra={
@@ -2406,7 +2592,7 @@ async def cmd_quickstat(client, message: Message):
         # Format and send quick stats
         output = format_quick_stats_output(stats)
         
-        await loading_msg.edit_text(output, disable_web_page_preview=True)
+        await loading_msg.edit_text(output, link_preview_options=LinkPreviewOptions(is_disabled=True))
         
         # Log action
         await log_action("quickstat_command", by=uid, extra={
@@ -2435,23 +2621,45 @@ async def cmd_premium(client, message: Message):
     if not await is_admin(uid):
         return await message.reply_text("🚫 Admins only.")
 
-    # Create button interface
-    buttons = [
-        [InlineKeyboardButton("Add Users", callback_data="premium:add_users")],
-        [InlineKeyboardButton("Edit Users", callback_data="premium:edit_users")],
-        [InlineKeyboardButton("Remove Users", callback_data="premium:remove_users")],
-        [InlineKeyboardButton("Manage Features", callback_data="premium:manage_features")]
-    ]
-
-    keyboard = InlineKeyboardMarkup(buttons)
-
-    help_text = (
-        "**Premium Management System**\n\n"
-        "**Add Users:** Add users to premium with specified duration\n"
-        "**Edit Users:** Modify premium duration for existing users\n"
-        "**Remove Users:** Remove users from premium\n"
-        "**Manage Features:** Control which features are premium-only\n\n"
-        "Select an option below:"
-    )
+    # Create button interface (shared builder keeps this in sync with the
+    # premium:back callback and the user-list Back button)
+    from .premium_management import build_premium_menu
+    help_text, keyboard = build_premium_menu()
 
     await message.reply_text(help_text, reply_markup=keyboard)
+
+
+async def cmd_buy_premium(client, message: Message):
+    """User-facing premium purchase menu (Telegram Stars)."""
+    from .premium_payments import build_plans_keyboard, format_plans_text
+    from .config import PREMIUM_STARS_ENABLED
+    from .premium_management import get_download_quota_status
+
+    uid = message.from_user.id
+
+    if not PREMIUM_STARS_ENABLED:
+        return await message.reply_text(
+            "⭐ **Premium**\n\n"
+            "Purchases are temporarily unavailable. Please contact an admin "
+            "to get premium access."
+        )
+
+    keyboard = build_plans_keyboard()
+    if keyboard is None:
+        return await message.reply_text(
+            "⭐ Premium plans are not configured yet. Please try again later.")
+
+    text = format_plans_text()
+    try:
+        status = await get_download_quota_status(uid)
+        if status.get("premium"):
+            used = status.get("used", 0)
+            text += f"\n\n✅ You're already premium · {used} downloads today"
+        else:
+            remaining = status.get("remaining")
+            if remaining is not None:
+                text += f"\n\n📥 Free tier: {remaining} downloads left today"
+    except Exception as e:
+        print(f"⚠️ buy_premium status failed: {e}")
+
+    await message.reply_text(text, reply_markup=keyboard)

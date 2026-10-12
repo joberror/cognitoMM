@@ -194,3 +194,51 @@ Admins always have access to all features regardless of premium status.
 - Feature toggles take effect immediately
 - No icons are used in any output messages
 
+## Premium User List (`/premium` -> View Users)
+
+Admins can browse all premium users from the `/premium` menu. The list is a
+live view of the `premium_users` collection - each page re-reads the database,
+so expiry status is never stale.
+
+### What each row shows
+
+- Username and User ID
+- Status: `ACTIVE`, `EXPIRING` (within the expiry-reminder window, i.e. the
+  `PREMIUM_EXPIRY_WARN_DAYS` threshold) or `EXPIRED`, with days remaining (or
+  days since lapse for expired users). An expiring user counts under both
+  `Active` and `Expiring` in the header.
+- Start date (when premium was granted) and the granting admin
+- End date (expiry) in UTC
+- Last update date and the admin who applied it (when recorded)
+- Downloads used today and watchlist entry count
+- How premium was obtained: `paid <stars>XTR <plan>` for Stars purchases or
+  `grant` for admin-granted access
+
+A summary header reports total, active, expired and expiring counts.
+
+### Controls
+
+- **Pagination:** 10 users per page, sorted by nearest expiry first. Prev /
+  Next buttons show the target page and keep any active filter.
+- **Search User:** send a User ID or `@username`; the list filters to that
+  user. Numeric queries match the ID exactly; text queries match the username
+  (case-insensitive substring). A `Clear Filter` button restores the full list.
+  Note: username matching only covers records that stored a username (grants
+  through the admin flow and Stars payments do); older records can still be
+  found by User ID.
+- **Row actions:** every row gets `[n] Edit` and `[n] Remove` buttons that open
+  the existing edit/remove flows with the user ID already filled in.
+- **Menu actions on the list:** Add Users / Edit Users / Remove Users /
+  Features buttons stay attached to the list view, and `← Menu` returns to
+  the main `/premium` menu.
+
+The list re-reads `premium_users` on every page turn (a live view, never a
+stale snapshot); per-page enrichment uses one batched query each against the
+users and payments collections.
+
+Rows render inside a code block (monospace) to match the rest of the admin
+lists. Implementation: `build_premium_user_list()` and
+`build_premium_menu()` in `features/premium_management.py`, the `premium:list_users`
+and `plist:*` callbacks in `features/callbacks.py`, and the search input flow
+(`premium_search_user_id`) in `features/premium_commands.py`.
+

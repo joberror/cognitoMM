@@ -3,7 +3,6 @@
 Test edge cases and problematic scenarios for movie title extraction
 """
 
-import re
 import sys
 import os
 
@@ -51,11 +50,11 @@ for filename, expected_title, expected_year in edge_cases:
     print(f"   Got:      title='{result['title']}', year={result['year']}")
     
     if not title_ok or not year_ok:
-        print(f"   ⚠️  ISSUE: ", end="")
+        print("   ⚠️  ISSUE: ", end="")
         if not title_ok:
-            print(f"Title mismatch! ", end="")
+            print("Title mismatch! ", end="")
         if not year_ok:
-            print(f"Year mismatch!", end="")
+            print("Year mismatch!", end="")
         print()
     print()
 

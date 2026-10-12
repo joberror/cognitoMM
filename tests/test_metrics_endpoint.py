@@ -111,6 +111,8 @@ async def test_collect_bot_info_uses_cached_identity():
     assert info["bot_id"] == 123
     assert info["bot_name"] == "Test Bot"
     assert info["bot_dc_id"] == 2
+    # Bot version is sourced from the canonical BOT_VERSION constant
+    assert info["bot_version"] == statistics.BOT_VERSION
 
 
 async def test_collect_bot_info_partial_cache_coalesces_to_unknown():

@@ -9,15 +9,11 @@ and storing file information in the database.
 import os
 import re
 import asyncio
-import sys
 import threading
 import time
-import uuid
 from datetime import datetime, timezone
-from collections import deque
 
 from pyrogram import enums
-from pyrogram.types import Message
 from pyrogram.errors import (
     ChannelBanned,
     ChannelInvalid,
@@ -28,7 +24,7 @@ from pyrogram.errors import (
     UserBannedInChannel,
 )
 
-from .config import AUTO_INDEX_DEFAULT, INDEX_EXTENSIONS, indexing_lock, active_indexing_threads, message_queue, queue_processor_task, temp_data
+from .config import AUTO_INDEX_DEFAULT, INDEX_EXTENSIONS, indexing_lock, message_queue, queue_processor_task, temp_data
 from .database import movies_col, channels_col, settings_col
 from .metadata_parser import parse_metadata
 from .utils import get_readable_time
@@ -294,8 +290,10 @@ async def index_message(msg):
 
         file_size = None
         filename = None
+        duration = 0
         if has_video:
             file_size = msg.video.file_size
+            duration = msg.video.duration or 0
             # videos may not have filename
         elif has_doc:
             file_size = msg.document.file_size
@@ -318,6 +316,7 @@ async def index_message(msg):
             "season": parsed.get("season"),
             "episode": parsed.get("episode"),
             "file_size": file_size,
+            "duration": duration,
             "upload_date": datetime.utcfromtimestamp(msg.date.timestamp()) if getattr(msg, "date", None) else datetime.now(timezone.utc),
             "channel_id": msg.chat.id,
             "channel_title": getattr(msg.chat, "title", None),
@@ -340,9 +339,44 @@ async def index_message(msg):
             await movies_col.insert_one(entry)
             print(f"[DIAGNOSTIC] {timestamp} - Successfully inserted message {msg.id} into database")
             indexing_stats['successful_inserts'] += 1
-            from .user_management import log_action
+            from .user_management import log_action, notify_watchlist
             await log_action("indexed_message", extra={"title": entry["title"], "channel_id": entry["channel_id"], "message_id": entry["message_id"]})
             print(f"[INDEXED] {entry['title']} from {entry['channel_title']}")
+
+            # Post-index side effects (both fire-and-forget tolerant):
+            # 1. Enrich the entry with TMDb metadata (poster/genres/rating) -
+            #    cached per title so per-episode series indexing is cheap. The
+            #    TMDb ID is persisted as the canonical identity for watchlist
+            #    + request matching (remake/transliteration-proof).
+            # 2. Notify users watching this title (watchlist).
+            # 3. Auto-fulfill pending requests for this title (requests).
+            try:
+                from .tmdb_integration import TMDB_ENRICH_INDEX, enrich_title
+                if TMDB_ENRICH_INDEX:
+                    meta = await enrich_title(entry.get("title"), entry.get("year"), entry.get("type", "Movie"))
+                    if meta:
+                        set_fields = {
+                            "tmdb_poster": meta.get("poster_url"),
+                            "tmdb_rating": meta.get("rating"),
+                            "tmdb_genres": meta.get("genres"),
+                            "tmdb_overview": meta.get("overview"),
+                            "imdb_id": meta.get("imdb_id") or entry.get("imdb"),
+                            "tmdb_id": meta.get("tmdb_id"),
+                        }
+                        await movies_col.update_one({"_id": entry["_id"]}, {"$set": set_fields})
+                        if meta.get("tmdb_id") is not None:
+                            entry["tmdb_id"] = meta.get("tmdb_id")
+            except Exception as enrich_err:
+                print(f"⚠️ TMDb enrichment failed for {entry.get('title')}: {enrich_err}")
+            try:
+                await notify_watchlist(entry)
+            except Exception as notify_err:
+                print(f"⚠️ Watchlist notify failed for {entry.get('title')}: {notify_err}")
+            try:
+                from .request_management import fulfill_matching_requests
+                await fulfill_matching_requests(entry)
+            except Exception as fulfill_err:
+                print(f"⚠️ Request auto-fulfill failed for {entry.get('title')}: {fulfill_err}")
         except Exception as db_error:
             print(f"[DIAGNOSTIC] {timestamp} - Database insertion failed for message {msg.id}: {str(db_error)}")
             # Check if it's a duplicate key error
@@ -472,8 +506,6 @@ async def on_message(client, message):
     auto_index = s["v"] if s and "v" in s else AUTO_INDEX_DEFAULT
 
     if auto_index:
-        import threading
-        current_thread = threading.current_thread().ident
         timestamp = datetime.now(timezone.utc).isoformat()
         
         # Add message to queue for sequential processing

@@ -1,7 +1,7 @@
 import asyncio
 import sys
 import unittest
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import AsyncMock
 import io
 
 # Modify path to include parent dir

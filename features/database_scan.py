@@ -7,12 +7,14 @@ logic can be unit-tested in isolation without the interactive command flow
 (see tests/test_scan_message_range.py).
 """
 
+import asyncio
 from datetime import datetime, timezone
 
 from pyrogram.errors import FloodWait
 
 from .database import movies_col
 from .indexing import ACCESS_ERRORS, index_message
+from .reliability import retry_on_flood
 
 
 async def scan_message_range(
@@ -23,6 +25,8 @@ async def scan_message_range(
     movies_col_ref=None,
     index_message_ref=None,
     progress_cb=None,
+    flood_retries=0,
+    retry_sleep=None,
 ):
     """
     Scan message ids ``start_id``..``end_id`` on a channel and reconcile the
@@ -48,12 +52,18 @@ async def scan_message_range(
     progress_pct, eta_str, bar, orphan/new/already/skipped/error counters) so
     the caller can render progress.
 
+    ``flood_retries`` (default 0) retries a FloodWait-throttled fetch that
+    many times using reliability.retry_on_flood before pausing the scan;
+    ``retry_sleep`` injects the sleeper (tests pass a no-op).
+
     Returns:
         dict: {scanned, orphans_removed, new_indexed, already_indexed,
                skipped_no_media, errors, paused}
     """
-    movies_col_ref = movies_col_ref or movies_col
-    index_message_ref = index_message_ref or index_message
+    if movies_col_ref is None:
+        movies_col_ref = movies_col
+    if index_message_ref is None:
+        index_message_ref = index_message
 
     scanned = 0
     orphans_removed = 0
@@ -78,6 +88,10 @@ async def scan_message_range(
     # Step 4b: Iterate through messages in the range
     last_update = 0
     scan_start_time = datetime.now(timezone.utc).timestamp()
+
+    fetch_kwargs = {"max_retries": max(0, int(flood_retries))}
+    if retry_sleep is not None:
+        fetch_kwargs["sleep"] = retry_sleep
 
     for msg_id in range(start_id, end_id + 1):
         scanned += 1
@@ -130,8 +144,9 @@ async def scan_message_range(
                       f"Orphans: {orphans_removed} | New: {new_indexed} | ETA: {eta_str}")
 
         try:
-            # Fetch the message from channel
-            msg = await client.get_messages(channel_id, msg_id)
+            # Fetch the message from channel (FloodWait-aware when retries set)
+            msg = await retry_on_flood(
+                lambda: client.get_messages(channel_id, msg_id), **fetch_kwargs)
 
             if not msg or getattr(msg, "empty", False):
                 # Message doesn't exist - check if we have it indexed
@@ -226,3 +241,118 @@ async def scan_message_range(
         "errors": errors,
         "paused": paused,
     }
+
+
+# ------------------------------------------------------------------ #
+#  Scheduled incremental rescan (background /update_db)                #
+# ------------------------------------------------------------------ #
+
+async def get_channel_scan_cursor(channel_id: int, settings_col_ref=None):
+    """Last scanned message id + 1 baseline for a channel (stored in settings_col).
+
+    Returns an int or None when no baseline exists yet.
+    """
+    from .database import settings_col
+    if settings_col_ref is None:
+        settings_col_ref = settings_col
+    try:
+        doc = await settings_col_ref.find_one({"k": f"scan_cursor:{channel_id}"})
+    except Exception:
+        return None
+    return doc.get("v") if doc and "v" in doc else None
+
+
+async def set_channel_scan_cursor(channel_id: int, value: int, settings_col_ref=None):
+    """Persist the scan cursor for a channel (idempotent upsert)."""
+    from .database import settings_col
+    if settings_col_ref is None:
+        settings_col_ref = settings_col
+    try:
+        await settings_col_ref.update_one(
+            {"k": f"scan_cursor:{channel_id}"},
+            {"$set": {"v": value}},
+            upsert=True,
+        )
+    except Exception as e:
+        print(f"⚠️ set_channel_scan_cursor failed for {channel_id}: {e}")
+
+
+async def incremental_rescan(client, channel_doc: dict, settings_col_ref=None, scan_ref=None):
+    """
+    Scan a channel's new messages since the last stored cursor (the scheduled
+    counterpart of /update_db - same scan_message_range core).
+
+    - No baseline yet -> scan a bounded recent window (last 1000 messages)
+      so the first run never sweeps the whole channel.
+    - Cursor at the latest message -> no-op.
+    - After the scan the cursor is advanced to the latest message id, so each
+      run only reconciles new content + catches orphans incrementally.
+
+    Returns a summary dict, or None when the channel can't be read.
+    """
+    from .database import settings_col
+    if settings_col_ref is None:
+        settings_col_ref = settings_col
+    scan_ref = scan_ref or scan_message_range
+
+    channel_id = channel_doc.get("channel_id")
+    channel_title = channel_doc.get("channel_title", channel_id)
+
+    # get_chat_history returns an ASYNC GENERATOR (like iter_messages) - never
+    # `await` it directly. Iterate and take the first (newest) message id.
+    try:
+        latest_id = None
+        async for msg in client.get_chat_history(channel_id, limit=1):
+            latest_id = msg.id
+            break
+    except Exception as e:
+        print(f"⚠️ [RESCAN] Cannot read history for {channel_title}: {e}")
+        return None
+    if latest_id is None:
+        print(f"⚠️ [RESCAN] Empty history for {channel_title}")
+        return None
+
+    cursor = await get_channel_scan_cursor(channel_id, settings_col_ref)
+    if cursor is None:
+        start_id = max(1, latest_id - 1000)
+    else:
+        start_id = cursor + 1
+
+    if start_id > latest_id:
+        return {"channel_id": channel_id, "scanned": 0, "status": "up-to-date"}
+
+    result = await scan_ref(client, channel_id, start_id, latest_id)
+    await set_channel_scan_cursor(channel_id, latest_id, settings_col_ref)
+    print(f"[RESCAN] {channel_title}: scanned {result['scanned']}, "
+          f"new {result['new_indexed']}, orphans {result['orphans_removed']}")
+    return result
+
+
+async def start_db_rescan_monitor(interval_minutes=None):
+    """
+    Background task: periodically rescan every enabled channel for new content
+    (the scheduled /update_db). Started from features/bot.py; interval from
+    DB_RESCAN_INTERVAL_MINUTES (default 360 = every 6 hours); set
+    DB_RESCAN_ENABLED=false to disable.
+    """
+    from .config import client, DB_RESCAN_ENABLED, DB_RESCAN_INTERVAL_MINUTES
+    from .database import channels_col
+    if interval_minutes is None:
+        interval_minutes = DB_RESCAN_INTERVAL_MINUTES
+    # Guard against an accidental tiny interval flooding Telegram with scans.
+    interval_minutes = max(int(interval_minutes), 5)
+
+    while True:
+        if DB_RESCAN_ENABLED:
+            try:
+                channels = await channels_col.find({}).to_list(length=100)
+                for ch in channels:
+                    if not ch.get("enabled", True):
+                        continue
+                    try:
+                        await incremental_rescan(client, ch)
+                    except Exception as e:
+                        print(f"⚠️ [RESCAN] {ch.get('channel_title', ch.get('channel_id'))}: {e}")
+            except Exception as e:
+                print(f"❌ [RESCAN] Monitor error: {e}")
+        await asyncio.sleep(interval_minutes * 60)

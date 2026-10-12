@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import uuid
+import aiofiles
 from datetime import datetime, timezone, timedelta
 
 from .config import file_deletions, file_deletions_lock
@@ -16,7 +17,7 @@ from .config import file_deletions, file_deletions_lock
 # Canonical implementation lives in utils.py (optional dict argument, defaults
 # to the shared config.bulk_downloads); re-exported here for backward compat
 # (identity is pinned by tests/test_critical_fixes.py).
-from .utils import cleanup_expired_bulk_downloads
+from .utils import cleanup_expired_bulk_downloads  # noqa: F401 - re-export pinned by tests/test_critical_fixes.py
 
 
 async def cleanup_expired_file_deletions():
@@ -52,21 +53,41 @@ async def cleanup_expired_file_deletions():
             print(f"🧹 Cleaned up {len(expired_keys)} expired file deletion records")
 
 
-async def track_file_for_deletion(user_id, message_id, delete_at=None):
-    """Track a file for auto-deletion"""
+async def track_file_for_deletion(user_id, message_id, delete_at=None,
+                                  duration_minutes=None, warn_minutes=None):
+    """Track a file for auto-deletion.
+
+    ``delete_at`` (explicit datetime) wins; otherwise the retention is
+    ``duration_minutes`` (default 5). ``warn_minutes`` is the lead time for the
+    pre-deletion warning (default 2, never more than half the retention) and is
+    stored so the monitor can render an accurate countdown.
+    """
     if delete_at is None:
-        # Default: 5 minutes from now
-        delete_at = datetime.now(timezone.utc) + timedelta(minutes=5)
-    
+        minutes = 5 if duration_minutes is None else max(1, int(duration_minutes))
+        delete_at = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+
+    # Derive the retention from delete_at so an explicit datetime still gets a
+    # correct warning + accurate notice text.
+    if duration_minutes is None:
+        try:
+            duration_minutes = max(
+                1, round((delete_at - datetime.now(timezone.utc)).total_seconds() / 60))
+        except Exception:
+            duration_minutes = 5
+    if warn_minutes is None:
+        warn_minutes = max(1, min(2, int(duration_minutes) // 2 or 1))
+
     file_id = str(uuid.uuid4())[:8]
-    
+
     async with file_deletions_lock:
         file_deletions[file_id] = {
             'user_id': user_id,
             'message_id': message_id,
             'sent_at': datetime.now(timezone.utc),
             'delete_at': delete_at,
-            'notified': False,  # Track if 5-minute warning was sent
+            'duration_minutes': int(duration_minutes),
+            'warn_minutes': int(warn_minutes),
+            'notified': False,  # Track if the pre-deletion warning was sent
             'retry_count': 0   # Track retry attempts
         }
     
@@ -91,8 +112,10 @@ async def check_files_for_deletion():
     # Thread-safe access to file_deletions
     async with file_deletions_lock:
         for file_id, data in file_deletions.items():
-            # Check if it's time to send 2-minute warning (for 5-minute deletion timer)
-            warning_time = data['delete_at'] - timedelta(minutes=2)
+            # Pre-deletion warning (lead time stored per record; legacy records
+            # default to 2 minutes).
+            warn_minutes = int(data.get('warn_minutes') or 2)
+            warning_time = data['delete_at'] - timedelta(minutes=warn_minutes)
             if not data['notified'] and current_time >= warning_time:
                 files_to_warn.append((file_id, data.copy()))
 
@@ -100,14 +123,16 @@ async def check_files_for_deletion():
             if current_time >= data['delete_at']:
                 files_to_delete.append((file_id, data.copy()))
 
-    # Send 2-minute warnings
+    # Send pre-deletion warnings
     warned_count = 0
     for file_id, data in files_to_warn:
         try:
+            warn_minutes = int(data.get('warn_minutes') or 2)
             await client.send_message(
                 data['user_id'],
-                f"⏰ **2-Minute Warning**\n\n"
-                f"The file I sent you will be **auto-deleted** in 2 minutes.\n"
+                f"⏰ **{warn_minutes}-Minute Warning**\n\n"
+                f"The file I sent you will be **auto-deleted** in "
+                f"{warn_minutes} minute(s).\n"
                 f"Please save it if you want to keep it!"
             )
 
@@ -134,16 +159,11 @@ async def check_files_for_deletion():
     failed_count = 0
 
     for file_id, data in files_to_delete:
-        deletion_success = False
-        retry_count = data.get('retry_count', 0)
-        max_retries = 3
-
         # Check if this is an immediate deletion (no warning sent)
         is_immediate = not data['notified']
 
         try:
             await client.delete_messages(data['user_id'], data['message_id'])
-            deletion_success = True
             deleted_count += 1
 
             # Send notification about deletion (only if not immediate deletion)
@@ -154,7 +174,7 @@ async def check_files_for_deletion():
                         "🗑️ **Auto-Deleted**\n\n"
                         "The file has been automatically deleted as scheduled."
                     )
-                except Exception as notify_error:
+                except Exception:
                     # Silently continue if notification fails - not critical
                     pass
 
@@ -162,7 +182,6 @@ async def check_files_for_deletion():
             failed_count += 1
             # Only log errors, not every deletion
             print(f"❌ Failed to delete message {data['message_id']} for user {data['user_id']}: {e}")
-            deletion_success = False
 
         # Remove from tracking (always remove, regardless of success/failure for test compatibility)
         async with file_deletions_lock:
@@ -196,13 +215,15 @@ async def save_file_deletions_to_disk(verbose=False):
                     'message_id': data['message_id'],
                     'sent_at': data['sent_at'].isoformat(),
                     'delete_at': data['delete_at'].isoformat(),
+                    'duration_minutes': data.get('duration_minutes'),
+                    'warn_minutes': data.get('warn_minutes'),
                     'notified': data['notified'],
                     'retry_count': data.get('retry_count', 0)
                 }
 
         # Write to file
-        with open('file_deletions.json', 'w') as f:
-            json.dump(serializable_data, f)
+        async with aiofiles.open('file_deletions.json', 'w') as f:
+            await f.write(json.dumps(serializable_data))
 
         # Only log if verbose mode is enabled
         if verbose:
@@ -219,8 +240,9 @@ async def load_file_deletions_from_disk():
             print("📂 No existing file deletions data found")
             return
         
-        with open('file_deletions.json', 'r') as f:
-            data = json.load(f)
+        async with aiofiles.open('file_deletions.json', 'r') as f:
+            content = await f.read()
+            data = json.loads(content)
         
         # Load data into memory with proper datetime objects
         async with file_deletions_lock:
@@ -236,6 +258,8 @@ async def load_file_deletions_from_disk():
                         'message_id': file_data['message_id'],
                         'sent_at': sent_at,
                         'delete_at': delete_at,
+                        'duration_minutes': file_data.get('duration_minutes'),
+                        'warn_minutes': file_data.get('warn_minutes'),
                         'notified': file_data['notified'],
                         'retry_count': file_data.get('retry_count', 0)
                     }

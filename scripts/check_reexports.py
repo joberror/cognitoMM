@@ -249,7 +249,7 @@ def scan(root):
                 elif symbol in src_imported_from:
                     canonical = src_imported_from[symbol]
                     if canonical == "<__getattr__>":
-                        hint = f"which lazily re-exports it via __getattr__ — import from the defining module directly"
+                        hint = "which lazily re-exports it via __getattr__ — import from the defining module directly"
                     else:
                         hint = f"which only re-imports it from {canonical} — import from {canonical} directly"
                     violations.append(

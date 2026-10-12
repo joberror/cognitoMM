@@ -5,24 +5,105 @@ This module contains all callback handlers for inline buttons and user interacti
 It handles file requests, pagination, bulk downloads, and other button interactions.
 """
 
-import asyncio
-import uuid
 from datetime import datetime, timezone
+import html
 import io
 from bson import ObjectId
-from pyrogram import Client, filters
-from pyrogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, LinkPreviewOptions
 from pyrogram.enums import ParseMode
 
 # Import from our modules
-from .config import LOG_CHANNEL, client
-from .database import users_col, movies_col, requests_col, premium_users_col, premium_features_col
-from .config import bulk_downloads, temp_data, user_input_events
-from .utils import cleanup_expired_bulk_downloads, wait_for_user_input, set_user_input, construct_final_caption, format_file_size
+from .database import users_col, movies_col, requests_col
+from .config import bulk_downloads
+from .utils import construct_final_caption
 from .file_deletion import track_file_for_deletion
 from .search import send_search_results
 from .user_management import should_process_command_for_user, has_accepted_terms, is_admin, log_action
-from .premium_management import is_premium_user, get_premium_user, add_premium_user, edit_premium_user, remove_premium_user, get_days_remaining, is_feature_premium_only, toggle_feature, add_premium_feature, get_all_premium_features, get_all_premium_users
+from .premium_management import (toggle_feature, get_all_premium_features,
+                                 build_premium_user_list, build_premium_menu)
+
+# Upper bound on a single "Get All" / season-pack delivery (keeps one callback
+# from flooding Telegram with hundreds of sequential uploads).
+MAX_PACK_FILES = 20
+
+
+async def _deliver_bulk_files(client, callback_query, files, retention_minutes):
+    """Send every file in ``files`` to the caller (shared by ``bulk:`` and
+    ``getpack:``).
+
+    Tracks each delivered message for auto-deletion at ``retention_minutes``
+    and counts them against the caller's daily download quota. Returns
+    ``(success_count, failed_files)``.
+    """
+    from .premium_management import record_download
+
+    user_id = callback_query.from_user.id
+    user_name = callback_query.from_user.first_name
+    success_count = 0
+    failed_files = []
+    sent_messages = []
+
+    for file_info in files:
+        channel_id = int(file_info['channel_id'])
+        message_id = int(file_info['message_id'])
+        try:
+            msg = await client.get_messages(channel_id, message_id)
+            if not msg:
+                raise Exception("Message not found")
+
+            db_item = await movies_col.find_one(
+                {"channel_id": channel_id, "message_id": message_id})
+            file_size = 0
+            if msg.video:
+                file_size = msg.video.file_size
+            elif msg.document:
+                file_size = msg.document.file_size
+
+            final_caption = construct_final_caption(db_item, file_size, user_name) or html.escape(msg.caption or "", quote=False)
+
+            sent_message = None
+            if msg.video:
+                sent_message = await client.send_cached_media(
+                    chat_id=user_id, file_id=msg.video.file_id, caption=final_caption,
+                    parse_mode=ParseMode.HTML)
+            elif msg.document:
+                sent_message = await client.send_cached_media(
+                    chat_id=user_id, file_id=msg.document.file_id, caption=final_caption,
+                    parse_mode=ParseMode.HTML)
+            else:
+                raise Exception("Message does not contain video or document")
+
+            if sent_message:
+                sent_messages.append(sent_message.id)
+            success_count += 1
+        except Exception as e:
+            print(f"❌ Failed to send {channel_id}:{message_id}: {e}")
+            failed_files.append(f"{channel_id}:{message_id}")
+            continue
+
+    for msg_id in sent_messages:
+        await track_file_for_deletion(
+            user_id=user_id, message_id=msg_id,
+            duration_minutes=retention_minutes,
+        )
+    for _ in range(success_count):
+        await record_download(user_id)
+
+    if sent_messages:
+        try:
+            await client.send_message(
+                user_id,
+                f"⏰ **Auto-Delete Notice**\n\n"
+                f"All {len(sent_messages)} files will be **automatically deleted in "
+                f"{retention_minutes} minutes**.\n"
+                "You'll receive a warning before deletion.\n\n"
+                "💡 Please save files if you want to keep them!"
+            )
+        except Exception as notify_error:
+            print(f"❌ Failed to send bulk auto-delete notification: {notify_error}")
+
+    return success_count, failed_files
+
 
 async def callback_handler(client, callback_query: CallbackQuery):
     """Handle inline button callbacks"""
@@ -78,10 +159,15 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
             return
             
-        # Handle help callback
-        if data == "help":
-            from .commands import cmd_help
-            await cmd_help(client, callback_query.message, user_id=user_id)
+        # Handle help menu callbacks (Tutorial button + help:<section> pages).
+        # The plain "help" button rides on the welcome PHOTO message, so it
+        # sends a fresh message; "help:<section>" navigates by editing.
+        if data == "help" or data.startswith("help:"):
+            from .commands import render_help_page
+            section = data.split(":", 1)[1] if ":" in data else "home"
+            await render_help_page(
+                client, callback_query.message, user_id, section,
+                edit=data.startswith("help:"))
             await callback_query.answer()
             return
 
@@ -98,11 +184,119 @@ async def callback_handler(client, callback_query: CallbackQuery):
             )
             return
 
+        if data.startswith("buyplan:"):
+            # Premium purchase: send a Telegram Stars invoice for the plan.
+            plan_key = data.split(":", 1)[1]
+            from .premium_payments import send_premium_invoice
+            ok, err = await send_premium_invoice(
+                client, callback_query.from_user.id, plan_key,
+                user_id=callback_query.from_user.id)
+            if ok:
+                await callback_query.answer("⭐ Invoice sent - complete the payment in Telegram!")
+            else:
+                await callback_query.answer(f"⚠️ {err or 'Could not start payment.'}",
+                                            show_alert=True)
+            return
+
+        if data.startswith("choose:"):
+            # In-place pick filter: replace the search message with only the
+            # chosen title's copies (series get per-season pick buttons, all
+            # titles get [720p]/[1080p]/[2160p] resolution filters).
+            # 6-part format: choose:{sid}:{gi}:{season}:{res}:{page}. The
+            # legacy 5-part format (no trailing page) is still accepted so
+            # buttons from messages rendered before season paging keep working.
+            parts = data.split(":")
+            if len(parts) not in (5, 6):
+                return await callback_query.answer("⚠️ Invalid chooser data.")
+            try:
+                _, search_id, group_idx, season_str, res_str = parts[:5]
+                season_page = int(parts[5]) if len(parts) == 6 and parts[5] else 0
+                group_idx = int(group_idx)
+            except (ValueError, IndexError):
+                return await callback_query.answer("⚠️ Invalid chooser data.")
+
+            group_data = bulk_downloads.get(search_id, {})
+            # Ownership check: a callback can only open a pick view for a
+            # search this user initiated (mirrors the page: flow's guard).
+            if group_data.get("user_id") != user_id:
+                return await callback_query.answer("🚫 This search belongs to another user.")
+
+            season = int(season_str[1:]) if season_str and season_str.startswith("S") else None
+            resolution = res_str or None
+
+            from .search import render_pick_view
+            if not await render_pick_view(callback_query, group_data, group_idx,
+                                          search_id, season=season,
+                                          resolution=resolution,
+                                          season_page=season_page):
+                return await callback_query.answer("⚠️ This search expired. Run /search again.")
+            await callback_query.answer("✅ Filtered to copies")
+            return
+
+        if data.startswith("watchpick:"):
+            # /watch disambiguation picker: confirm one TMDb candidate, or
+            # cancel. Format ``watchpick:{token}:{idx}`` with idx == "cancel"
+            # for the cancel button. State lives in bulk_downloads under the
+            # token; ownership is checked so another user can't answer a
+            # picker they don't own.
+            _, token, arg = data.split(":", 2)
+            state = bulk_downloads.get(token)
+            if not state or state.get("type") != "watch_pick":
+                return await callback_query.answer(
+                    "⌛ This picker expired. Run /watch again.", show_alert=True)
+            if state.get("user_id") != user_id:
+                return await callback_query.answer(
+                    "🚫 This picker belongs to another user.", show_alert=True)
+
+            if arg == "cancel":
+                bulk_downloads.pop(token, None)
+                await callback_query.message.edit_text(
+                    "👁️ Cancelled — nothing added to your watchlist.",
+                    parse_mode=ParseMode.MARKDOWN)
+                return await callback_query.answer("Cancelled")
+
+            try:
+                idx = int(arg)
+            except ValueError:
+                return await callback_query.answer("⚠️ Invalid pick.", show_alert=True)
+            candidates = state.get("candidates") or []
+            if idx < 0 or idx >= len(candidates):
+                return await callback_query.answer(
+                    "⌛ This picker expired. Run /watch again.", show_alert=True)
+
+            from .watchlist import store_watch_pick
+            bulk_downloads.pop(token, None)
+            added = await store_watch_pick(user_id, candidates[idx],
+                                           callback_query.message,
+                                           raw_title=state.get("query"))
+            return await callback_query.answer(
+                "👁️ Added to your watchlist" if added else "👁️ Already on your watchlist")
+
+        if data.startswith("watchupd:"):
+            # /watchlist UPDATE button — re-check title status on TMDb/IMDb.
+            # ``watchupd:{all|one}:{owner_id}[:{title_key}]``
+            parts = data.split(":")
+            scope = parts[1] if len(parts) > 1 else "all"
+            arg = parts[3] if len(parts) > 3 else None
+            from .watchlist import handle_watch_update
+            await handle_watch_update(client, callback_query, scope, arg or "")
+            return
+
         if data.startswith("get_file:"):
             # Handle single file request
             _, channel_id, message_id = data.split(":")
             channel_id = int(channel_id)
             message_id = int(message_id)
+
+            # Daily download quota gate (free vs premium tier).
+            from .premium_management import (check_download_quota, record_download,
+                                              get_retention_minutes)
+            allowed, remaining, limit, quota_msg = await check_download_quota(user_id)
+            if not allowed:
+                return await callback_query.answer(quota_msg, show_alert=True)
+
+            # Tier-based auto-delete retention (premium keeps files longer).
+            retention_minutes = await get_retention_minutes(user_id)
 
             await callback_query.answer("📥 Fetching file...")
             
@@ -142,7 +336,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     
                 user_name = callback_query.from_user.first_name
                 
-                final_caption = construct_final_caption(db_item, file_size, user_name) or msg.caption or ""
+                final_caption = construct_final_caption(db_item, file_size, user_name) or html.escape(msg.caption or "", quote=False)
 
                 # Extract media and send using send_cached_media (no forward header)
                 sent_message = None
@@ -150,13 +344,15 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     sent_message = await client.send_cached_media(
                         chat_id=callback_query.from_user.id,
                         file_id=msg.video.file_id,
-                        caption=final_caption
+                        caption=final_caption,
+                        parse_mode=ParseMode.HTML
                     )
                 elif msg.document:
                     sent_message = await client.send_cached_media(
                         chat_id=callback_query.from_user.id,
                         file_id=msg.document.file_id,
-                        caption=final_caption
+                        caption=final_caption,
+                        parse_mode=ParseMode.HTML
                     )
                 else:
                     raise Exception("Message does not contain video or document")
@@ -165,16 +361,20 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 if sent_message:
                     await track_file_for_deletion(
                         user_id=callback_query.from_user.id,
-                        message_id=sent_message.id
+                        message_id=sent_message.id,
+                        duration_minutes=retention_minutes,
                     )
+                    # Count against the daily download quota.
+                    await record_download(callback_query.from_user.id)
                     
                     # Send immediate notification about auto-deletion
                     try:
                         await client.send_message(
                             callback_query.from_user.id,
-                            "⏰ **Auto-Delete Notice**\n\n"
-                            "This file will be **automatically deleted in 5 minutes**.\n"
-                            "You'll receive a 2-minute warning before deletion.\n\n"
+                            f"⏰ **Auto-Delete Notice**\n\n"
+                            f"This file will be **automatically deleted in "
+                            f"{retention_minutes} minute(s)**.\n"
+                            f"You'll receive a warning before deletion.\n\n"
                             "💡 Please save the file if you want to keep it!"
                         )
                     except Exception as notify_error:
@@ -188,9 +388,20 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 await callback_query.answer(f"❌ Failed to fetch file: {str(e)}", show_alert=True)
 
         elif data.startswith("page:"):
-            # Handle pagination callback
-            _, search_id, page_str = data.split(":")
-            page = int(page_str)
+            # Pagination callback - 3-part (page:{sid}:{page}) for plain page
+            # navigation, or 5-part (page:{sid}:{page}:{gi}:{sp}) for one
+            # group's season-shortcut paging on the results list (the legacy
+            # 3-part form is still accepted).
+            parts = data.split(":")
+            if len(parts) not in (3, 5):
+                return await callback_query.answer("⚠️ Invalid page data.")
+            try:
+                _, search_id, page_str = parts[:3]
+                page = int(page_str)
+                gi = int(parts[3]) if len(parts) == 5 and parts[3] else None
+                season_page = int(parts[4]) if len(parts) == 5 and parts[4] else 0
+            except (ValueError, IndexError):
+                return await callback_query.answer("⚠️ Invalid page data.")
 
             # Retrieve search data
             if search_id not in bulk_downloads:
@@ -204,164 +415,34 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 await callback_query.answer("❌ You can only navigate your own searches", show_alert=True)
                 return
 
-            results = search_data['results']
-            query = search_data['query']
+            if gi is not None:
+                # Season-shortcut paging for one group: remember its page so the
+                # results list rebuilds with that group's Sxx buttons advanced.
+                search_data.setdefault("season_pages", {})[gi] = season_page
 
-            await callback_query.answer(f"📄 Page {page}")
+            from .search import render_search_page
+            await render_search_page(callback_query, search_data, page, search_id)
+            await callback_query.answer(f"📄 Page {page}" if gi is None else "🎬 More seasons")
+            return
 
-            # Update message with new page
-            # Create header
-            RESULTS_PER_PAGE = 9
-            total_results = len(results)
-            total_pages = (total_results + RESULTS_PER_PAGE - 1) // RESULTS_PER_PAGE
+        elif data.startswith("back:"):
+            # Return from the pick filter view to the full search results
+            _, search_id = data.split(":")
 
-            # Calculate start and end indices for current page
-            start_idx = (page - 1) * RESULTS_PER_PAGE
-            end_idx = min(start_idx + RESULTS_PER_PAGE, total_results)
-            page_results = results[start_idx:end_idx]
+            if search_id not in bulk_downloads:
+                await callback_query.answer("❌ Search expired or not found", show_alert=True)
+                return
 
-            # Create search text
-            search_text = f"```\n"
-            search_text += f"Search: \"{query}\"\n"
-            search_text += f"Total Results: {total_results} | Page {page}/{total_pages}\n\n"
+            search_data = bulk_downloads[search_id]
 
-            # Format each result on current page
-            button_data = []
-            for i, result in enumerate(page_results, start=start_idx + 1):
-                title = result.get('title', 'Unknown Title')
-                year = result.get('year')
-                quality = result.get('quality')
-                rip = result.get('rip')
-                movie_type = result.get('type', 'Movie')
-                season = result.get('season')
-                episode = result.get('episode')
-                file_size = result.get('file_size')
-                channel_id = result.get('channel_id')
-                message_id = result.get('message_id')
+            if search_data['user_id'] != callback_query.from_user.id:
+                await callback_query.answer("❌ You can only navigate your own searches", show_alert=True)
+                return
 
-                # Format file size
-                size_str = format_file_size(file_size)
-                quality_str = quality if quality else ""
-
-                # Format season/episode info for series
-                series_info = ""
-                if movie_type.lower() in ['series', 'tv', 'show'] and (season or episode):
-                    if season and episode:
-                        series_info = f"S{season:02d}E{episode:02d}"
-                    elif season:
-                        series_info = f"S{season:02d}"
-                    elif episode:
-                        series_info = f"E{episode:02d}"
-
-                year_str = str(year) if year else ""
-
-                # Format rip type
-                rip_str = ""
-                if rip and rip.lower() in ['bluray', 'blu-ray', 'bdrip', 'bd']:
-                    rip_str = "Blu"
-                elif rip and 'web' in rip.lower():
-                    rip_str = "Web"
-                elif rip and 'hd' in rip.lower():
-                    rip_str = "HD"
-
-                # Build info string
-                info_parts = []
-                if size_str != "N/A":
-                    info_parts.append(size_str)
-                if quality_str:
-                    info_parts.append(quality_str)
-                if series_info:
-                    info_parts.append(series_info)
-                if year_str:
-                    info_parts.append(year_str)
-                if rip_str:
-                    info_parts.append(rip_str)
-
-                info_string = ".".join(info_parts) if info_parts else "N/A"
-                search_text += f"{i}. {title} [{info_string}]\n"
-
-                if channel_id and message_id:
-                    button_data.append({
-                        'number': i,
-                        'channel_id': channel_id,
-                        'message_id': message_id
-                    })
-
-            search_text += f"```"
-
-            # Create buttons
-            buttons = []
-            if button_data:
-                # Create individual file buttons in rows of 3
-                current_row = []
-                for btn in button_data:
-                    current_row.append(
-                        InlineKeyboardButton(
-                            f"Get [{btn['number']}]",
-                            callback_data=f"get_file:{btn['channel_id']}:{btn['message_id']}"
-                        )
-                    )
-                    if len(current_row) == 3 or btn == button_data[-1]:
-                        buttons.append(current_row)
-                        current_row = []
-
-                # Create navigation row
-                nav_row = []
-
-                # Previous button
-                if page > 1:
-                    nav_row.append(
-                        InlineKeyboardButton(
-                            "← Prev",
-                            callback_data=f"page:{search_id}:{page-1}"
-                        )
-                    )
-
-                # Get All button
-                if total_results > 1:
-                    # Check if Get All is premium-only
-                    show_get_all = True
-                    if await is_feature_premium_only("get_all"):
-                        # Only show if user is premium or admin
-                        uid = callback_query.from_user.id
-                        if not await is_admin(uid) and not await is_premium_user(uid):
-                            show_get_all = False
-
-                    if show_get_all:
-                        bulk_id = str(uuid.uuid4())[:8]
-                        bulk_downloads[bulk_id] = {
-                            'files': [{'channel_id': r.get('channel_id'), 'message_id': r.get('message_id')}
-                                     for r in results if r.get('channel_id') and r.get('message_id')][:10],
-                            'created_at': datetime.now(timezone.utc),
-                            'user_id': callback_query.from_user.id
-                        }
-                        nav_row.append(
-                            InlineKeyboardButton(
-                                f"Get All ({total_results})",
-                                callback_data=f"bulk:{bulk_id}"
-                            )
-                        )
-
-                # Next button
-                if page < total_pages:
-                    nav_row.append(
-                        InlineKeyboardButton(
-                            "Next →",
-                            callback_data=f"page:{search_id}:{page+1}"
-                        )
-                    )
-
-                if nav_row:
-                    buttons.append(nav_row)
-
-            keyboard = InlineKeyboardMarkup(buttons) if buttons else None
-
-            # Edit the message
-            await callback_query.edit_message_text(
-                search_text,
-                reply_markup=keyboard,
-                disable_web_page_preview=True
-            )
+            from .search import render_search_page
+            await render_search_page(callback_query, search_data, search_data.get("page", 1), search_id)
+            await callback_query.answer("← Back to results")
+            return
 
         elif data.startswith("index#"):
             # Handle indexing callback
@@ -392,9 +473,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 cmd_remove_channel,
                 cmd_index_channel,
                 cmd_update_db,
-                cmd_reset_channel,
-                cmd_toggle_indexing,
-                cmd_manage_channel
+                cmd_reset_channel
             )
 
             parts = data.split("#")
@@ -553,6 +632,64 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     reply_markup=reply_markup
                 )
 
+        elif data.startswith("usr#"):
+            # /user dashboard: status filters, action prompts, and the
+            # confirm/cancel step of a batch role change.
+            #   usr#pg#<page>#<filter>   usr#act#<action>
+            #   usr#cnf#<token>          usr#can#<token>   usr#all
+            from .user_commands import (
+                FILTER_ALL,
+                FILTER_UID,
+                VISIBLE_FILTERS,
+                can_use_dashboard,
+                cancel_user_action,
+                confirm_user_action,
+                render_user_page,
+                start_user_action,
+            )
+
+            parts = data.split("#")
+            kind = parts[1] if len(parts) > 1 else ""
+            chat = getattr(callback_query.message, "chat", None)
+            # Re-checked on every press, not just at render time: callback
+            # data can be forged, and promote/demote need a config Super Admin.
+            if not await can_use_dashboard(user_id, getattr(chat, "type", None)):
+                return await callback_query.answer("🚫 Admins only.", show_alert=True)
+
+            if kind == "pg":
+                if len(parts) < 4:
+                    return await callback_query.answer("⚠️ Invalid page data.", show_alert=True)
+                try:
+                    page = max(1, int(parts[2]))
+                except ValueError:
+                    return await callback_query.answer("⚠️ Invalid page data.", show_alert=True)
+                filter_key = parts[3]
+                if filter_key != FILTER_UID and filter_key not in VISIBLE_FILTERS:
+                    return await callback_query.answer("⚠️ Unknown filter.", show_alert=True)
+                await callback_query.answer()
+                await render_user_page(client, callback_query, page, filter_key)
+
+            elif kind == "act":
+                if len(parts) < 3:
+                    return await callback_query.answer("⚠️ Invalid action.", show_alert=True)
+                await start_user_action(client, callback_query, parts[2])
+
+            elif kind == "cnf":
+                await confirm_user_action(client, callback_query,
+                                          parts[2] if len(parts) > 2 else "")
+
+            elif kind == "can":
+                await cancel_user_action(client, callback_query,
+                                         parts[2] if len(parts) > 2 else "")
+
+            elif kind == "all":
+                await callback_query.answer()
+                await render_user_page(client, callback_query, 1, FILTER_ALL)
+
+            else:
+                await callback_query.answer("⚠️ Unknown action.", show_alert=True)
+            return
+
         elif data.startswith("bulk:"):
             # Handle bulk download request using stored data
             _, bulk_id = data.split(":", 1)
@@ -568,6 +705,15 @@ async def callback_handler(client, callback_query: CallbackQuery):
             if bulk_data['user_id'] != callback_query.from_user.id:
                 await callback_query.answer("❌ You can only download your own searches", show_alert=True)
                 return
+
+            # Daily download quota gate (bulk counts each delivered file).
+            from .premium_management import check_download_quota, get_retention_minutes
+            allowed, remaining, limit, quota_msg = await check_download_quota(user_id)
+            if not allowed:
+                return await callback_query.answer(quota_msg, show_alert=True)
+
+            # Tier-based retention for bulk deliveries (longer than single).
+            bulk_retention = await get_retention_minutes(user_id, bulk=True)
 
             files = bulk_data['files']
             await callback_query.answer(f"📦 Fetching {len(files)} files...")
@@ -589,80 +735,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
             except Exception as e:
                 print(f"⚠️ Failed to track bulk download for user {user_id}: {e}")
 
-            success_count = 0
-            failed_files = []
-            sent_messages = []  # Track sent messages for auto-deletion
-
-            for file_info in files:
-                try:
-                    channel_id = int(file_info['channel_id'])
-                    message_id = int(file_info['message_id'])
-
-                    # Get the message from the channel to extract media
-                    msg = await client.get_messages(channel_id, message_id)
-
-                    if not msg:
-                        raise Exception("Message not found")
-
-                    # Parse custom caption from database
-                    db_item = await movies_col.find_one({"channel_id": channel_id, "message_id": message_id})
-                    
-                    # Get file size and user info
-                    file_size = 0
-                    if msg.video:
-                        file_size = msg.video.file_size
-                    elif msg.document:
-                        file_size = msg.document.file_size
-                        
-                    user_name = callback_query.from_user.first_name
-                    
-                    final_caption = construct_final_caption(db_item, file_size, user_name) or msg.caption or ""
-
-                    # Extract media and send using send_cached_media (no forward header)
-                    sent_message = None
-                    if msg.video:
-                        sent_message = await client.send_cached_media(
-                            chat_id=callback_query.from_user.id,
-                            file_id=msg.video.file_id,
-                            caption=final_caption
-                        )
-                    elif msg.document:
-                        sent_message = await client.send_cached_media(
-                            chat_id=callback_query.from_user.id,
-                            file_id=msg.document.file_id,
-                            caption=final_caption
-                        )
-                    else:
-                        raise Exception("Message does not contain video or document")
-
-                    if sent_message:
-                        sent_messages.append(sent_message.id)
-                    success_count += 1
-
-                except Exception as e:
-                    print(f"❌ Failed to send {channel_id}:{message_id}: {e}")
-                    failed_files.append(f"{channel_id}:{message_id}")
-                    continue
-
-            # Track all sent files for auto-deletion
-            for msg_id in sent_messages:
-                await track_file_for_deletion(
-                    user_id=callback_query.from_user.id,
-                    message_id=msg_id
-                )
-
-            # Send notification about auto-deletion for bulk files
-            if sent_messages:
-                try:
-                    await client.send_message(
-                        callback_query.from_user.id,
-                        f"⏰ **Auto-Delete Notice**\n\n"
-                        f"All {len(sent_messages)} files will be **automatically deleted in 15 minutes**.\n"
-                        "You'll receive a 5-minute warning before deletion.\n\n"
-                        "💡 Please save files if you want to keep them!"
-                    )
-                except Exception as notify_error:
-                    print(f"❌ Failed to send bulk auto-delete notification: {notify_error}")
+            success_count, failed_files = await _deliver_bulk_files(
+                client, callback_query, files, bulk_retention)
 
             # Clean up temporary data after use
             del bulk_downloads[bulk_id]
@@ -672,12 +746,76 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
             if failed_files:
                 result_text += f"\n❌ Failed: {len(failed_files)} files"
-                result_text += f"\n💡 Add bot as admin to channels for direct file access"
+                result_text += "\n💡 Add bot as admin to channels for direct file access"
 
             await callback_query.edit_message_text(
                 f"{result_text}\n\n{callback_query.message.text}",
                 reply_markup=callback_query.message.reply_markup
             )
+
+        elif data.startswith("getpack:"):
+            # "Get All" from the pick view: deliver every copy of the chosen
+            # title (optionally narrowed by the active season/resolution
+            # filter) as one batch - the season-pack flow.
+            parts = data.split(":")
+            if len(parts) != 5:
+                return await callback_query.answer("⚠️ Invalid pack data.")
+            _, search_id, gi_str, season_str, res_str = parts
+            search_data = bulk_downloads.get(search_id)
+            if not search_data or search_data.get("user_id") != user_id:
+                return await callback_query.answer("⚠️ This search expired. Run /search again.")
+            groups = search_data.get("groups") or []
+            try:
+                gi = int(gi_str)
+            except (TypeError, ValueError):
+                return await callback_query.answer("⚠️ Invalid pack data.")
+            if gi >= len(groups) or not groups[gi]:
+                return await callback_query.answer("⚠️ This search expired. Run /search again.")
+
+            season = int(season_str[1:]) if season_str and season_str.startswith("S") else None
+            resolution = res_str or None
+            from .search import filter_copies
+            selected = filter_copies(groups[gi], season=season, resolution=resolution)
+            files = [{"channel_id": c.get("channel_id"), "message_id": c.get("message_id")}
+                     for c in selected if c.get("channel_id") and c.get("message_id")]
+            if not files:
+                return await callback_query.answer("❌ No downloadable copies for this filter.",
+                                                   show_alert=True)
+            files = files[:MAX_PACK_FILES]
+
+            from .premium_management import check_download_quota, get_retention_minutes
+            allowed, remaining, limit, quota_msg = await check_download_quota(user_id)
+            if not allowed:
+                return await callback_query.answer(quota_msg, show_alert=True)
+            pack_retention = await get_retention_minutes(user_id, bulk=True)
+
+            await callback_query.answer(f"📦 Fetching {len(files)} files...")
+            try:
+                await users_col.update_one(
+                    {"user_id": user_id},
+                    {
+                        "$inc": {"download_count": len(files)},
+                        "$push": {"download_history": {
+                            "bulk": True,
+                            "file_count": len(files),
+                            "ts": datetime.now(timezone.utc)
+                        }}
+                    },
+                    upsert=True
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to track pack download for user {user_id}: {e}")
+
+            success_count, failed_files = await _deliver_bulk_files(
+                client, callback_query, files, pack_retention)
+
+            summary = f"✅ Sent {success_count}/{len(files)} files from the pack!"
+            if failed_files:
+                summary += f"\n❌ Failed: {len(failed_files)}"
+            try:
+                await client.send_message(user_id, summary)
+            except Exception as e:
+                print(f"⚠️ pack summary send failed: {e}")
 
         elif data.startswith("hsearch#") or data.startswith("hsearch_exact#"):
             # Handle history search callback
@@ -690,8 +828,10 @@ async def callback_handler(client, callback_query: CallbackQuery):
             from .search import perform_search
             from .config import FUZZY_THRESHOLD
 
-            # Perform the search
-            results = await perform_search(query, exact_search=is_exact, fuzzy_threshold=FUZZY_THRESHOLD)
+            # Perform the search (dict: results + exact/fuzzy classification)
+            search = await perform_search(query, exact_search=is_exact,
+                                          fuzzy_threshold=FUZZY_THRESHOLD)
+            results = search["results"]
 
             # Check if results exist
             if not results:
@@ -710,7 +850,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 client=client,
                 message=callback_query.message,
                 results=results,
-                query=query
+                query=query,
+                exact_ids=search["exact_ids"]
             )
 
             # Record search history
@@ -778,7 +919,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 try:
                     await callback_query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
                     await callback_query.answer(f"{'Selected' if idx in session['selected'] else 'Deselected'} entry #{idx + 1}")
-                except Exception as e:
+                except Exception:
                     await callback_query.answer("Error updating selection.", show_alert=True)
 
             elif action == "confirm":
@@ -814,7 +955,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                             print(f"Error deleting entry {doc['_id']}: {e}")
                             # DIAGNOSTIC LOG: Check if this is the specific error
                             if "cannot access local variable 'movies_col'" in str(e):
-                                print(f"🔍 CRITICAL: This is the movies_col scoping error!")
+                                print("🔍 CRITICAL: This is the movies_col scoping error!")
                                 print(f"🔍 DEBUG: movies_col type in exception: {type(movies_col) if 'movies_col' in locals() else 'NOT IN LOCALS'}")
 
                 # Log the action
@@ -828,11 +969,11 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 })
 
                 # Update message with results
-                result_text = f"**Deletion Complete**\n\n"
+                result_text = "**Deletion Complete**\n\n"
                 result_text += f"Deleted: {deleted_count} entries\n"
                 if errors > 0:
                     result_text += f"Errors: {errors}\n"
-                result_text += f"\n**Deleted Entries:**\n"
+                result_text += "\n**Deleted Entries:**\n"
 
                 for title in deleted_titles[:10]:  # Show first 10
                     result_text += f"{title}\n"
@@ -894,18 +1035,23 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc), "completed_by": user_id}}
             )
 
-            # Notify the user
-            try:
-                notification_text = (
-                    f"✅ **Request Fulfilled!**\n\n"
-                    f"Your request for **{request.get('title')}** ({request.get('year')}) has been fulfilled.\n\n"
-                    f"Thank you for using our service!"
-                )
-                await client.send_message(request.get("user_id"), notification_text)
-            except Exception as e:
-                print(f"Failed to notify user {request.get('user_id')}: {e}")
+            # Notify the requester and everyone who upvoted
+            recipients = []
+            for uid in [request.get("user_id")] + list(request.get("voters") or []):
+                if uid is not None and uid not in recipients:
+                    recipients.append(uid)
+            for uid in recipients:
+                try:
+                    notification_text = (
+                        f"✅ **Request Fulfilled!**\n\n"
+                        f"Your request for **{request.get('title')}** ({request.get('year')}) has been fulfilled.\n\n"
+                        f"Thank you for using our service!"
+                    )
+                    await client.send_message(uid, notification_text)
+                except Exception as e:
+                    print(f"Failed to notify user {uid}: {e}")
 
-            await callback_query.answer(f"✅ Request marked as done!")
+            await callback_query.answer("✅ Request marked as done!")
 
             # Log the action
             await log_action("request_completed", by=user_id, target=request.get("user_id"), extra={
@@ -918,8 +1064,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
             # Get the request_list_id from bulk_downloads to refresh the page
             # For simplicity, just update the message text
             await callback_query.message.edit_text(
-                f"✅ Request marked as done!\n\n"
-                f"Use /request_list to view updated list."
+                "✅ Request marked as done!\n\n"
+                "Use /request_list to view updated list."
             )
 
         elif data.startswith("req_page:"):
@@ -947,8 +1093,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
             await callback_query.answer(f"📄 Page {page}")
 
-            # Import send_request_list_page from commands
-            from .commands import send_request_list_page
+            # send_request_list_page lives in request_commands (canonical home)
+            from .request_commands import send_request_list_page
 
             # Update message with new page (edit=True for pagination)
             await send_request_list_page(client, callback_query.message, requests_list, request_list_id, page, edit=True)
@@ -979,28 +1125,34 @@ async def callback_handler(client, callback_query: CallbackQuery):
             await callback_query.answer("⚠️ Marking all requests as done...", show_alert=True)
 
             # Mark all as completed
+            request_ids = [req.get("_id") for req in requests_list if req.get("_id")]
             completed_count = 0
+            if request_ids:
+                result = await requests_col.update_many(
+                    {"_id": {"$in": request_ids}},
+                    {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc), "completed_by": user_id}}
+                )
+                completed_count = result.modified_count
+
             notified_count = 0
 
             for request in requests_list:
-                # Update status
-                await requests_col.update_one(
-                    {"_id": request.get("_id")},
-                    {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc), "completed_by": user_id}}
-                )
-                completed_count += 1
-
-                # Notify user
+                # Notify requester + voters
                 try:
-                    notification_text = (
-                        f"✅ **Request Fulfilled!**\n\n"
-                        f"Your request for **{request.get('title')}** ({request.get('year')}) has been fulfilled.\n\n"
-                        f"Thank you for using our service!"
-                    )
-                    await client.send_message(request.get("user_id"), notification_text)
-                    notified_count += 1
+                    recipients = []
+                    for uid in [request.get("user_id")] + list(request.get("voters") or []):
+                        if uid is not None and uid not in recipients:
+                            recipients.append(uid)
+                    for uid in recipients:
+                        notification_text = (
+                            f"✅ **Request Fulfilled!**\n\n"
+                            f"Your request for **{request.get('title')}** ({request.get('year')}) has been fulfilled.\n\n"
+                            f"Thank you for using our service!"
+                        )
+                        await client.send_message(uid, notification_text)
+                        notified_count += 1
                 except Exception as e:
-                    print(f"Failed to notify user {request.get('user_id')}: {e}")
+                    print(f"Failed to notify users for request {request.get('_id')}: {e}")
 
             # Log the action
             await log_action("request_all_completed", by=user_id, extra={
@@ -1018,6 +1170,124 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
             # Clean up bulk_downloads
             del bulk_downloads[request_list_id]
+
+        elif data.startswith("genre_page:"):
+            # /genres <name> browse pagination (state stored like the request
+            # list: a typed entry in bulk_downloads, owned by the user who
+            # started the browse). 3-part (page), 4-part (page + sort) and
+            # 6-part (page + sort + group index + season page - the S◀/S▶
+            # season-shortcut paging for a series' Pick[n][Sxx] buttons) forms
+            # are accepted; the legacy 3-part form falls back to the stored
+            # sort.
+            parts = data.split(":")
+            if len(parts) not in (3, 4, 6):
+                await callback_query.answer("❌ Invalid data.", show_alert=True)
+                return
+            _, genre_id, page_str = parts[:3]
+            page = int(page_str)
+            sort = parts[3] if len(parts) >= 4 else None
+            gi = int(parts[4]) if len(parts) == 6 else None
+            season_page = int(parts[5]) if len(parts) == 6 else 0
+
+            if genre_id not in bulk_downloads:
+                await callback_query.answer("❌ Genre list expired. Run /genres again.", show_alert=True)
+                return
+
+            list_data = bulk_downloads[genre_id]
+            if list_data.get("type") != "genre_list":
+                await callback_query.answer("❌ Invalid data.", show_alert=True)
+                return
+
+            if list_data.get("user_id") != user_id:
+                await callback_query.answer("❌ You can only browse your own genre lists", show_alert=True)
+                return
+
+            if sort is None:
+                # Legacy 3-part button (pre-deploy): keep the stored sort.
+                sort = list_data.get("sort") or "az"
+            else:
+                # Keep state in sync so legacy buttons keep this sort too.
+                list_data["sort"] = sort
+
+            if gi is not None:
+                # Season-shortcut paging for one group: remember its page so
+                # the results re-render with that group's Sxx buttons advanced.
+                list_data.setdefault("season_pages", {})[gi] = season_page
+
+            from .commands import send_genre_page
+            await send_genre_page(client, callback_query.message, list_data["genre"],
+                                  page, total=list_data.get("total"),
+                                  files_split=list_data.get("files_split"),
+                                  genre_id=genre_id, edit=True, sort=sort,
+                                  season_pages=list_data.get("season_pages"))
+            await callback_query.answer(f"📄 Page {page}" if gi is None else "🎬 More seasons")
+            return
+
+        elif data.startswith("genre_pick:"):
+            # In-place pick filter for one /genres <name> line (mirrors the
+            # choose: flow for /search). 6-part format
+            # ``genre_pick:{gid}:{gi}:{season}:{res}:{page}``; the legacy
+            # 5-part form (no trailing page) is still accepted.
+            parts = data.split(":")
+            if len(parts) not in (5, 6):
+                return await callback_query.answer("⚠️ Invalid picker data.")
+            try:
+                _, genre_id, group_idx, season_str, res_str = parts[:5]
+                season_page = int(parts[5]) if len(parts) == 6 and parts[5] else 0
+                group_idx = int(group_idx)
+            except (ValueError, IndexError):
+                return await callback_query.answer("⚠️ Invalid picker data.")
+
+            state = bulk_downloads.get(genre_id, {})
+            if state.get("type") != "genre_list":
+                return await callback_query.answer("❌ Genre list expired. Run /genres again.", show_alert=True)
+            if state.get("user_id") != user_id:
+                return await callback_query.answer("🚫 This browse belongs to another user.")
+
+            entries = state.get("entries") or []
+            if group_idx >= len(entries) or not entries[group_idx].get("copies"):
+                return await callback_query.answer("⚠️ This browse expired. Run /genres again.")
+
+            season = int(season_str[1:]) if season_str and season_str.startswith("S") else None
+            resolution = res_str or None
+
+            from .search import build_pick_view
+            text, keyboard = build_pick_view(
+                genre_id, group_idx, entries[group_idx]["copies"], season=season,
+                resolution=resolution, season_page=season_page,
+                prefix="genre_pick", back_prefix="genre_back")
+            await callback_query.message.edit_text(
+                text,
+                reply_markup=keyboard,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+            await callback_query.answer("✅ Filtered to copies")
+            return
+
+        elif data.startswith("genre_back:"):
+            # Return from a genre pick view to the /genres <name> page the
+            # user was browsing (restores the exact page + sort).
+            _, genre_id = data.split(":")
+            if genre_id not in bulk_downloads:
+                await callback_query.answer("❌ Genre list expired. Run /genres again.", show_alert=True)
+                return
+
+            state = bulk_downloads[genre_id]
+            if state.get("type") != "genre_list":
+                await callback_query.answer("❌ Invalid data.", show_alert=True)
+                return
+            if state.get("user_id") != user_id:
+                await callback_query.answer("❌ You can only browse your own genre lists", show_alert=True)
+                return
+
+            from .commands import send_genre_page
+            await send_genre_page(client, callback_query.message, state["genre"],
+                                  page=state.get("page") or 1, total=state.get("total"),
+                                  files_split=state.get("files_split"),
+                                  genre_id=genre_id, edit=True,
+                                  sort=state.get("sort") or "az")
+            await callback_query.answer("← Back to genre")
+            return
 
         # -------------------------
         # Premium Management Callbacks
@@ -1068,6 +1338,11 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 from .config import user_input_events
                 key = f"{callback_query.message.chat.id}_{user_id}"
                 user_input_events[key] = {'input_type': 'premium_remove_user_id', 'event': None, 'message': None}
+
+            elif action == "list_users":
+                await callback_query.answer()
+                text, keyboard = await build_premium_user_list(page=1, query=None)
+                await callback_query.message.edit_text(text, reply_markup=keyboard)
 
             elif action == "manage_features":
                 await callback_query.answer()
@@ -1138,26 +1413,68 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
             elif action == "back":
                 await callback_query.answer()
-                # Recreate the main premium menu
-                buttons = [
-                    [InlineKeyboardButton("Add Users", callback_data="premium:add_users")],
-                    [InlineKeyboardButton("Edit Users", callback_data="premium:edit_users")],
-                    [InlineKeyboardButton("Remove Users", callback_data="premium:remove_users")],
-                    [InlineKeyboardButton("Manage Features", callback_data="premium:manage_features")]
-                ]
+                # Recreate the main premium menu (shared builder with cmd_premium)
+                help_text, keyboard = build_premium_menu()
+                await callback_query.message.edit_text(help_text, reply_markup=keyboard)
 
-                keyboard = InlineKeyboardMarkup(buttons)
+        elif data.startswith("plist:"):
+            # Premium user list: pagination (target page + optional filter),
+            # search prompt, clear filter, per-row Edit/Remove (prefilled).
+            if not await is_admin(user_id):
+                await callback_query.answer("🚫 Admins only.", show_alert=True)
+                return
 
-                help_text = (
-                    "**Premium Management System**\n\n"
-                    "**Add Users:** Add users to premium with specified duration\n"
-                    "**Edit Users:** Modify premium duration for existing users\n"
-                    "**Remove Users:** Remove users from premium\n"
-                    "**Manage Features:** Control which features are premium-only\n\n"
-                    "Select an option below:"
+            parts = data.split(":")
+            kind = parts[1] if len(parts) > 1 else ""
+
+            if kind == "noop":
+                await callback_query.answer()
+
+            elif kind in ("prev", "next"):
+                try:
+                    page = int(parts[2])
+                except (IndexError, ValueError):
+                    await callback_query.answer("❌ Invalid page.", show_alert=True)
+                    return
+                list_query = parts[3] if len(parts) > 3 else None
+                text, keyboard = await build_premium_user_list(page=page, query=list_query)
+                await callback_query.answer()
+                await callback_query.message.edit_text(text, reply_markup=keyboard)
+
+            elif kind == "clear":
+                text, keyboard = await build_premium_user_list(page=1, query=None)
+                await callback_query.answer()
+                await callback_query.message.edit_text(text, reply_markup=keyboard)
+
+            elif kind == "search":
+                await callback_query.answer()
+                await callback_query.message.edit_text(
+                    "**Search Premium User**\n\n"
+                    "Send a User ID or @username to filter the list.\n\n"
+                    "You can type **CANCEL** to abort."
                 )
 
-                await callback_query.message.edit_text(help_text, reply_markup=keyboard)
+                from .config import user_input_events
+                key = f"{callback_query.message.chat.id}_{user_id}"
+                user_input_events[key] = {'input_type': 'premium_search_user_id', 'event': None, 'message': None}
+
+            elif kind in ("edit", "remove"):
+                try:
+                    target_user_id = int(parts[2])
+                except (IndexError, ValueError):
+                    await callback_query.answer("❌ Invalid user.", show_alert=True)
+                    return
+                await callback_query.answer()
+                from .premium_commands import (handle_edit_premium_user,
+                                               handle_remove_premium_user)
+                if kind == "edit":
+                    await handle_edit_premium_user(
+                        client, callback_query.message,
+                        actor_id=user_id, target_user_id=target_user_id)
+                else:
+                    await handle_remove_premium_user(
+                        client, callback_query.message,
+                        actor_id=user_id, target_user_id=target_user_id)
 
         elif data.startswith("stats_export:"):
             # Handle statistics export callbacks
@@ -1365,7 +1682,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 await callback_query.message.edit_text(
                     output,
                     reply_markup=InlineKeyboardMarkup(buttons),
-                    disable_web_page_preview=True
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
                 )
 
             except Exception as e:

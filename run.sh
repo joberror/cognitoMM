@@ -89,9 +89,18 @@ else
     echo "⚠️  Pyroblack not found in $PYTHON — install it with 'pip install pyroblack' (see requirements.txt)"
 fi
 
-# Clean up stale session files
-echo "🧹 Cleaning stale session files..."
-rm -f *.session *.session-journal *.session-shm *.session-wal
+# Session files
+# The .session file stores the bot's auth AND the Telegram peer cache (access
+# hashes). Deleting it on every start makes log sends fail with
+# PEER_ID_INVALID until each peer re-resolves (e.g. the admin messages the
+# bot again). Keep sessions by default; only wipe when explicitly asked
+# (corrupt session) via CLEAN_SESSIONS=1.
+if [ "${CLEAN_SESSIONS:-0}" = "1" ]; then
+    echo "🧹 CLEAN_SESSIONS=1 - wiping session files..."
+    rm -f *.session *.session-journal *.session-shm *.session-wal
+else
+    echo "ℹ️  Keeping session files (set CLEAN_SESSIONS=1 to wipe stale ones)"
+fi
 
 echo ""
 echo "🎬 Starting MovieBot (using $PYTHON)..."

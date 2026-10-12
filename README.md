@@ -9,21 +9,97 @@ pinned: false
 
 # CognitoMM Telegram Bot
 
+[![CI](https://github.com/joberror/cognitoMM/actions/workflows/static-checks.yml/badge.svg)](https://github.com/joberror/cognitoMM/actions/workflows/static-checks.yml) [![Deploy](https://github.com/joberror/cognitoMM/actions/workflows/deploy.yml/badge.svg)](https://github.com/joberror/cognitoMM/actions/workflows/deploy.yml)
+
 This is a Telegram bot hosted on Hugging Face Spaces.
+
+## Features
+
+**🎬 Search & discover**
+- `/search <title>` — smart search (exact + fuzzy, with trailing filters:
+  `/search Dune 2021 1080p movie` — year, quality, type; library facets
+  `lang:hindi`, `subs:esub`, `audio:atmos`, `hdr`). Results are grouped **one
+  line per title** in a code block: `Search : X` / `Titles Found: N (X Exact | Y
+  Fuzzy)` / `Files Found: N (Movie - X | Series - Y)`, then per-title lines with
+  the file count and the **latest** file (`1. Lucky > 2 files > Latest: 1080p |
+  2.5GB | WebRip`). A TMDb **Title(s) Information** block (⭐ rating · 🎭 genres ·
+  clickable IMDb link) sits below the code block and survives pagination. Every
+  title gets both a `Pick [n]` button (filters in place; series get `Pick[n][Sxx]`
+  season picks + `[720p] [1080p] [2160p]` resolution filters) and a `Get [n]`
+  button that fetches the latest file directly.
+- `/f <title>` — quick search · inline mode `@yourbot <query>` (poster thumbnails)
+- `/recent` — newly indexed content (plain HTML listing, **tap any title to copy the `Title (year)` string straight into `/search`**) · `/trending` — TMDb trending (listed in the same format as `/search`; trending keeps ⭐ ratings and clickable IMDb/TMDb links)
+- `/genres` — browse by TMDb genre (counts; `/genres <name>` lists titles deduplicated in the `/search` per-title + latest-file layout — `1. Breaking Bad > 4 files > 2 seasons [5] · 3 eps [35] > Latest: S01E02 | 720p ⭐8.9` (brackets = real TMDb totals), paginated with `🔤 A–Z` / `🆕 Newest` / `⭐ Top Rated` sort toggle; every title has `Pick [n]` (in-place filter, series get `Pick[n][Sxx]`) + `Get [n]`)
+- `/random` — surprise me: a random indexed title (poster when available)
+- `/request <title>` / `/request_list` — request missing titles (rate-limited, TMDb-verified with upvotes + auto-fulfill on index)
+
+**👤 Your library**
+- `/watch <title>` — TMDb-verified watchlist: ambiguous titles come back as a
+  pick list, and the entry stores type, year, status, and IMDb/TMDb links
+  (5 titles free, 20 premium)
+- `/unwatch <title>` — remove from watchlist
+- `/watchlist` — your watched titles as `Title: M / 2026 / Released · IMDb`
+  (M = movie, S = series), **tap any title to copy**, with a 🔄 UPDATE button
+  to re-read each status from IMDb/TMDb. You get a DM the moment a copy is
+  indexed — once per title, so a full season dropping at once sends one message
+  · `/my_history` — your searches (plain HTML, **tap any query to copy**, grouped by date)
+- `/my_stat` — usage + premium info · `/premium` — premium info/management
+- `/buy_premium` — buy premium with Telegram Stars (activates on payment)
+- Delivered files auto-delete after a tier-based retention (free vs premium),
+  with a lead-time warning; a pick-view `📦 Get All` sends a title/season pack
+- `/help` — full command menu
+
+**👑 Admin**
+- `/logs [n]` — recent audit-log entries (default 10, max 50)
+- `/enrich [n]` — backfill TMDb metadata (poster/genres/rating/IMDb)
+- `/enrich_status` — TMDb backfill progress (enriched / pending / no-match)
+- `/add_channel` / `/remove_channel` / `/manage_channel` / `/index_channel`
+  `/toggle_indexing` — channel management & indexing
+- `/update_db` — reconcile a channel (also runs on a background schedule)
+- `/manual_deletion <title>` · `/indexing_stats` · `/queue` · `/reset_stats`
+- `/stat` / `/quickstat` — statistics dashboard (incl. prune stats, CSV export)
+- `/broadcast` · `/user` — user manager (filters + promote/demote/ban/unban)
+- `/reset_channel` · `/reset` (full wipe, confirmed)
+
+When `TMDB_API` is configured, search/recent/trending results carry posters,
+ratings, genres, and IMDb links; newly indexed entries are enriched
+automatically (`TMDB_ENRICH_INDEX=true`). See `info/commands.md` for the full
+command reference and `.env` options.
 
 ## Developer tools
 
 ```bash
 make check          # run the static import check (re-export chains / broken imports / duplicate definitions)
+make lint           # run ruff (pyflakes F + E9): undefined names, unused imports/vars
 make test           # install deps, then run the full pytest suite (mirrors CI's tests job)
-make verify         # run everything CI gates on: check + test
-make install-hooks  # install the pre-commit hook (runs `make check` before each commit)
+make verify         # run everything CI gates on: check + lint + test
+make install-hooks  # install the pre-commit hook (runs `make check` + ruff + version-bump check)
+make bump           # bump the bot version (minor) before committing a new feature
+make bump-patch     # bump the bot version (patch) for small changes / bugfixes
+make bump-major     # bump the bot version (major)
 ```
 
 `make install-hooks` sets `git config core.hooksPath .githooks`; the versioned
-hook at `.githooks/pre-commit` runs `scripts/check_reexports.py` whenever
-`features/*.py` or `main.py` are staged. The same check runs in CI on every
-push/PR via `.github/workflows/static-checks.yml`.
+hook at `.githooks/pre-commit` runs `scripts/check_reexports.py` **and**
+`scripts/check_version_bump.py` whenever `features/*.py` or `main.py` are
+staged. The same checks run in CI on every push/PR via
+`.github/workflows/static-checks.yml`.
+
+## Versioning
+
+The bot version lives in one place: `BOT_VERSION` in `features/config.py`
+(re-exported as `features.__version__`, shown on the webapp `/` endpoint and in
+the startup banner). **A new feature must ship with a version bump** — the
+pre-commit hook rejects commits that add a new command/handler/module without
+one:
+
+```bash
+make bump          # new feature  → 1.2.0
+make bump-patch    # bugfix       → 1.2.1
+```
+
+`make bump` also writes the new version to `LATEST_RELEASE`. Override at
+deploy time with the `BOT_VERSION` env var if needed.
 
 ## Telegram library (pyroblack)
 

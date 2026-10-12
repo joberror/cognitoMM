@@ -160,23 +160,32 @@ def run_update_db(client, input_texts, existing):
     """
     Patch the commands module namespace, run cmd_update_db end-to-end, and
     return (fake_message, fake_movies_col, log_records).
+
+    The stubs are restored in the `finally`: they are plain module attributes,
+    so a leaked `is_admin` / `log_action` would answer for every LATER test
+    file (e.g. the /user dashboard's admin gate and audit log).
     """
     message = FakeMessage()
-
-    commands.is_admin = _is_admin
-    commands.wait_for_user_input = make_input_sequence(*input_texts)
 
     log_records = []
 
     async def _log_action(action, by=None, target=None, extra=None):
         log_records.append({"action": action, "extra": extra or {}})
 
+    movies = FakeMoviesCol(existing)
+    saved = (commands.is_admin, commands.wait_for_user_input, commands.log_action,
+             commands.channels_col, commands.movies_col)
+    commands.is_admin = _is_admin
+    commands.wait_for_user_input = make_input_sequence(*input_texts)
     commands.log_action = _log_action
     commands.channels_col = FakeChannelsCol()
-    movies = FakeMoviesCol(existing)
     commands.movies_col = movies
 
-    asyncio.run(commands.cmd_update_db(client, message))
+    try:
+        asyncio.run(commands.cmd_update_db(client, message))
+    finally:
+        (commands.is_admin, commands.wait_for_user_input, commands.log_action,
+         commands.channels_col, commands.movies_col) = saved
     return message, movies, log_records
 
 
