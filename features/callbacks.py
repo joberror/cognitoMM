@@ -1125,17 +1125,18 @@ async def callback_handler(client, callback_query: CallbackQuery):
             await callback_query.answer("⚠️ Marking all requests as done...", show_alert=True)
 
             # Mark all as completed
+            request_ids = [req.get("_id") for req in requests_list if req.get("_id")]
             completed_count = 0
+            if request_ids:
+                result = await requests_col.update_many(
+                    {"_id": {"$in": request_ids}},
+                    {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc), "completed_by": user_id}}
+                )
+                completed_count = result.modified_count
+
             notified_count = 0
 
             for request in requests_list:
-                # Update status
-                await requests_col.update_one(
-                    {"_id": request.get("_id")},
-                    {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc), "completed_by": user_id}}
-                )
-                completed_count += 1
-
                 # Notify requester + voters
                 try:
                     recipients = []
