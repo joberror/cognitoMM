@@ -14,7 +14,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Optional
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 try:
     from .config import BOT_START_TIME, BOT_VERSION
@@ -97,7 +97,13 @@ if DefaultJSONProvider is not None:
 @app.after_request
 def add_cors_headers(response):
     """Allow cross-origin requests from monitoring dashboards."""
-    response.headers.setdefault("Access-Control-Allow-Origin", "*")
+    allowed_origins = os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",")
+    origin = request.headers.get("Origin")
+
+    if origin and origin in [o.strip() for o in allowed_origins if o.strip()]:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers.add("Vary", "Origin")
+
     response.headers.setdefault("Access-Control-Allow-Methods", "GET, OPTIONS")
     response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type")
     return response
