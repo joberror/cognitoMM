@@ -21,6 +21,16 @@ def test_format_number():
     assert format_number(1234567) == "1,234,567"
     assert format_number(10) == "10"
 
+    # Negative numbers
+    assert format_number(-10) == "-10"
+    assert format_number(-1000) == "-1,000"
+
+    # Floating point numbers
+    assert format_number(1000.5) == "1,000.5"
+    assert format_number(-1000.5) == "-1,000.5"
+
     # Edge cases
     assert format_number(0) == "0"
     assert format_number(None) == "0"
+    assert format_number("") == "0"
+    assert format_number(False) == "0"
