@@ -277,7 +277,7 @@ async def set_channel_scan_cursor(channel_id: int, value: int, settings_col_ref=
         print(f"⚠️ set_channel_scan_cursor failed for {channel_id}: {e}")
 
 
-async def incremental_rescan(client, channel_doc: dict, settings_col_ref=None, scan_ref=None):
+async def incremental_rescan(client, channel_doc: dict, settings_col_ref=None, scan_ref=None, cursor_value=None):
     """
     Scan a channel's new messages since the last stored cursor (the scheduled
     counterpart of /update_db - same scan_message_range core).
@@ -312,7 +312,19 @@ async def incremental_rescan(client, channel_doc: dict, settings_col_ref=None, s
         print(f"⚠️ [RESCAN] Empty history for {channel_title}")
         return None
 
-    cursor = await get_channel_scan_cursor(channel_id, settings_col_ref)
+    # Use the passed-in cursor if available, otherwise fetch from DB
+    if cursor_value is not None:
+        # We need a way to distinguish "no cursor exists" (-1 or similar)
+        # from "cursor is 0" or "didn't pass one". Let's allow `cursor_value=False` or `-1` to mean "none exists".
+        # But wait, it's safer to use an explicit sentinel if we want to pass "none exists".
+        # Actually, let's just pass `cursor_value` as the literal integer, or False for "no cursor".
+        if cursor_value is False:
+            cursor = None
+        else:
+            cursor = cursor_value
+    else:
+        cursor = await get_channel_scan_cursor(channel_id, settings_col_ref)
+
     if cursor is None:
         start_id = max(1, latest_id - 1000)
     else:
@@ -336,7 +348,7 @@ async def start_db_rescan_monitor(interval_minutes=None):
     DB_RESCAN_ENABLED=false to disable.
     """
     from .config import client, DB_RESCAN_ENABLED, DB_RESCAN_INTERVAL_MINUTES
-    from .database import channels_col
+    from .database import channels_col, settings_col
     if interval_minutes is None:
         interval_minutes = DB_RESCAN_INTERVAL_MINUTES
     # Guard against an accidental tiny interval flooding Telegram with scans.
@@ -346,11 +358,25 @@ async def start_db_rescan_monitor(interval_minutes=None):
         if DB_RESCAN_ENABLED:
             try:
                 channels = await channels_col.find({}).to_list(length=100)
-                for ch in channels:
-                    if not ch.get("enabled", True):
-                        continue
+
+                # N+1 Optimization: Bulk fetch cursors for all enabled channels
+                enabled_channels = [ch for ch in channels if ch.get("enabled", True)]
+                if enabled_channels:
+                    cursor_keys = [f"scan_cursor:{ch.get('channel_id')}" for ch in enabled_channels]
+                    # query all at once
+                    cursor_docs = await settings_col.find({"k": {"$in": cursor_keys}}).to_list(length=len(cursor_keys))
+                    cursor_map = {doc["k"]: doc.get("v") for doc in cursor_docs}
+                else:
+                    cursor_map = {}
+
+                for ch in enabled_channels:
                     try:
-                        await incremental_rescan(client, ch)
+                        channel_id = ch.get("channel_id")
+                        cursor_key = f"scan_cursor:{channel_id}"
+                        # Pass the cursor value if found, else pass False to indicate no baseline exists
+                        c_val = cursor_map.get(cursor_key, False)
+
+                        await incremental_rescan(client, ch, cursor_value=c_val)
                     except Exception as e:
                         print(f"⚠️ [RESCAN] {ch.get('channel_title', ch.get('channel_id'))}: {e}")
             except Exception as e:
