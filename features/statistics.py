@@ -166,10 +166,11 @@ async def collect_comprehensive_stats(admin_id=None):
         
         # Get channel titles
         channel_titles = {}
-        for ch_stat in channel_dist:
-            ch_doc = await channels_col.find_one({"channel_id": ch_stat['_id']})
-            if ch_doc:
-                channel_titles[ch_stat['_id']] = ch_doc.get('channel_title', 'Unknown')
+        if channel_dist:
+            channel_ids = [ch_stat['_id'] for ch_stat in channel_dist]
+            ch_docs = await channels_col.find({"channel_id": {"$in": channel_ids}}).to_list(length=None)
+            for ch_doc in ch_docs:
+                channel_titles[ch_doc['channel_id']] = ch_doc.get('channel_title', 'Unknown')
         stats['channel_titles'] = channel_titles
         
         # Top searches and search statistics
