@@ -31,6 +31,10 @@ _trending_cache = {
 }
 CACHE_TTL_MINUTES = 30
 
+_title_status_cache = {}
+TITLE_STATUS_CACHE_TTL_MINUTES = 60
+MAX_TITLE_STATUS_CACHE_SIZE = 1000
+
 
 def get_cached_trending(category: str) -> Optional[List[Dict]]:
     """Get cached trending data if valid"""
@@ -377,6 +381,12 @@ async def fetch_title_status(tmdb_id: int, content_type: str = "Movie") -> Dict:
     ctype = normalize_content_type(content_type)
     if not TMDB_API or TMDB_API == "your_api_key_here" or not tmdb_id:
         return {}
+
+    cache_key = (tmdb_id, ctype)
+    cached = _title_status_cache.get(cache_key)
+    if cached and cached.get("expires") and datetime.now() < cached["expires"]:
+        return cached["data"]
+
     endpoint = "movie" if ctype == "Movie" else "tv"
 
     details = None
@@ -413,26 +423,47 @@ async def fetch_title_status(tmdb_id: int, content_type: str = "Movie") -> Dict:
             "rating": round(details.get("vote_average", 0) or 0, 1),
             "overview": (details.get("overview") or "")[:200],
         }
-        return out
+    else:
+        status = derive_series_status(
+            last_air_date=details.get("last_air_date"),
+            tmdb_status=details.get("status"),
+            next_episode=details.get("next_episode_to_air"),
+        )
+        out = {
+            "title": details.get("name") or details.get("original_name"),
+            "year": extract_year({"first_air_date": details.get("first_air_date")}, "Series"),
+            "type": "Series",
+            "imdb_id": details.get("imdb_id"),
+            "status": status,
+            "seasons": details.get("number_of_seasons"),
+            "episodes": details.get("number_of_episodes"),
+            "poster_url": (TMDB_IMAGE_BASE + details["poster_path"])
+            if details.get("poster_path") else None,
+            "rating": round(details.get("vote_average", 0) or 0, 1),
+            "overview": (details.get("overview") or "")[:200],
+        }
 
-    status = derive_series_status(
-        last_air_date=details.get("last_air_date"),
-        tmdb_status=details.get("status"),
-        next_episode=details.get("next_episode_to_air"),
-    )
-    return {
-        "title": details.get("name") or details.get("original_name"),
-        "year": extract_year({"first_air_date": details.get("first_air_date")}, "Series"),
-        "type": "Series",
-        "imdb_id": details.get("imdb_id"),
-        "status": status,
-        "seasons": details.get("number_of_seasons"),
-        "episodes": details.get("number_of_episodes"),
-        "poster_url": (TMDB_IMAGE_BASE + details["poster_path"])
-        if details.get("poster_path") else None,
-        "rating": round(details.get("vote_average", 0) or 0, 1),
-        "overview": (details.get("overview") or "")[:200],
+    # Clean up old cache entries if it gets too large
+    if len(_title_status_cache) >= MAX_TITLE_STATUS_CACHE_SIZE:
+        now = datetime.now()
+        # Remove expired entries first
+        expired_keys = [k for k, v in list(_title_status_cache.items()) if now >= v["expires"]]
+        for k in expired_keys:
+            del _title_status_cache[k]
+
+        # If still too large, just clear a chunk to avoid doing heavy sorting
+        if len(_title_status_cache) >= MAX_TITLE_STATUS_CACHE_SIZE:
+            # simple strategy: clear half
+            keys_to_delete = list(_title_status_cache.keys())[:MAX_TITLE_STATUS_CACHE_SIZE // 2]
+            for k in keys_to_delete:
+                del _title_status_cache[k]
+
+    _title_status_cache[cache_key] = {
+        "data": out,
+        "expires": datetime.now() + timedelta(minutes=TITLE_STATUS_CACHE_TTL_MINUTES)
     }
+
+    return out
 
 
 async def search_watch_candidates(title: str, year=None, limit: int = 5) -> List[Dict]:
