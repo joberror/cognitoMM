@@ -2376,7 +2376,7 @@ async def cmd_manual_deletion(client, message: Message):
 
         # Search using regex for partial matching (case-insensitive)
         cursor = movies_col.find(
-            {"title": {"$regex": search_title, "$options": "i"}},
+            {"title": {"$regex": re.escape(search_title), "$options": "i"}},
             {"_id": 1, "title": 1, "channel_id": 1, "message_id": 1, "indexed_at": 1}
         ).limit(50)  # Limit to 50 results to avoid overwhelming
 
