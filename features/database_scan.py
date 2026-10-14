@@ -16,6 +16,9 @@ from .database import movies_col
 from .indexing import ACCESS_ERRORS, index_message
 from .reliability import retry_on_flood
 
+# Sentinel for per-message access errors during batch fallback
+_ACCESS_ERROR_SENTINEL = object()
+
 
 async def scan_message_range(
     client,

@@ -59,7 +59,8 @@ async def _deliver_bulk_files(client, callback_query, files, retention_minutes):
             elif msg.document:
                 file_size = msg.document.file_size
 
-            final_caption = construct_final_caption(db_item, file_size, user_name) or html.escape(msg.caption or "", quote=False)
+            caption = construct_final_caption(db_item, file_size, user_name)
+            final_caption = caption or html.escape(msg.caption or "", quote=False)
 
             sent_message = None
             if msg.video:
@@ -336,7 +337,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
                     
                 user_name = callback_query.from_user.first_name
                 
-                final_caption = construct_final_caption(db_item, file_size, user_name) or html.escape(msg.caption or "", quote=False)
+                caption = construct_final_caption(db_item, file_size, user_name)
+                final_caption = caption or html.escape(msg.caption or "", quote=False)
 
                 # Extract media and send using send_cached_media (no forward header)
                 sent_message = None
@@ -464,7 +466,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 from .config import temp_data
                 temp_data.CANCEL = True
                 await callback_query.answer("🛑 Cancelling indexing...")
-                await callback_query.message.edit_text("❌ **Indexing Cancelled**\n\nThe indexing process has been cancelled by user request.")
+                cancel_msg = "❌ **Indexing Cancelled**\n\nThe indexing process has been cancelled by user request."
+                await callback_query.message.edit_text(cancel_msg)
 
         elif data.startswith("mc#"):
             # Handle manage_channel button callbacks - execute commands directly
@@ -873,7 +876,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
             # Check if session exists
             if not hasattr(temp_data, 'deletion_sessions') or temp_data_key not in temp_data.deletion_sessions:
-                await callback_query.answer("Session expired. Please start a new search with /manual_deletion", show_alert=True)
+                err_msg = "Session expired. Please start a new search with /manual_deletion"
+                await callback_query.answer(err_msg, show_alert=True)
                 return
 
             session = temp_data.deletion_sessions[temp_data_key]
@@ -918,14 +922,16 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 # Update message
                 try:
                     await callback_query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
-                    await callback_query.answer(f"{'Selected' if idx in session['selected'] else 'Deselected'} entry #{idx + 1}")
+                    status = "Selected" if idx in session['selected'] else "Deselected"
+                    await callback_query.answer(f"{status} entry #{idx + 1}")
                 except Exception:
                     await callback_query.answer("Error updating selection.", show_alert=True)
 
             elif action == "confirm":
                 # Confirm and delete selected entries
                 if not session['selected']:
-                    await callback_query.answer("No entries selected. Please select at least one entry to delete.", show_alert=True)
+                    err_msg = "No entries selected. Please select at least one entry to delete."
+                    await callback_query.answer(err_msg, show_alert=True)
                     return
 
                 await callback_query.answer("Deleting selected entries...")
@@ -956,7 +962,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
                             # DIAGNOSTIC LOG: Check if this is the specific error
                             if "cannot access local variable 'movies_col'" in str(e):
                                 print("🔍 CRITICAL: This is the movies_col scoping error!")
-                                print(f"🔍 DEBUG: movies_col type in exception: {type(movies_col) if 'movies_col' in locals() else 'NOT IN LOCALS'}")
+                                mc_type = type(movies_col) if 'movies_col' in locals() else 'NOT IN LOCALS'
+                                print(f"🔍 DEBUG: movies_col type in exception: {mc_type}")
 
                 # Log the action
                 await log_action("manual_deletion_confirmed", by=user_id, extra={
@@ -1097,7 +1104,9 @@ async def callback_handler(client, callback_query: CallbackQuery):
             from .request_commands import send_request_list_page
 
             # Update message with new page (edit=True for pagination)
-            await send_request_list_page(client, callback_query.message, requests_list, request_list_id, page, edit=True)
+            await send_request_list_page(
+                client, callback_query.message, requests_list, request_list_id, page, edit=True
+            )
 
         elif data.startswith("req_all_done:"):
             # Handle marking all requests as done
@@ -1130,7 +1139,13 @@ async def callback_handler(client, callback_query: CallbackQuery):
             if request_ids:
                 result = await requests_col.update_many(
                     {"_id": {"$in": request_ids}},
-                    {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc), "completed_by": user_id}}
+                    {
+                        "$set": {
+                            "status": "completed",
+                            "completed_at": datetime.now(timezone.utc),
+                            "completed_by": user_id,
+                        }
+                    },
                 )
                 completed_count = result.modified_count
 
@@ -1144,9 +1159,11 @@ async def callback_handler(client, callback_query: CallbackQuery):
                         if uid is not None and uid not in recipients:
                             recipients.append(uid)
                     for uid in recipients:
+                        title = request.get('title')
+                        year = request.get('year')
                         notification_text = (
                             f"✅ **Request Fulfilled!**\n\n"
-                            f"Your request for **{request.get('title')}** ({request.get('year')}) has been fulfilled.\n\n"
+                            f"Your request for **{title}** ({year}) has been fulfilled.\n\n"
                             f"Thank you for using our service!"
                         )
                         await client.send_message(uid, notification_text)
@@ -1624,7 +1641,12 @@ async def callback_handler(client, callback_query: CallbackQuery):
 
         elif data.startswith("trending:"):
             # Handle trending category callbacks
-            from .tmdb_integration import get_trending_movies, get_trending_shows, get_new_releases, format_trending_list
+            from .tmdb_integration import (
+                get_trending_movies,
+                get_trending_shows,
+                get_new_releases,
+                format_trending_list,
+            )
 
             parts = data.split(":")
             category = parts[1]

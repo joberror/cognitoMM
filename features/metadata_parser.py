@@ -902,7 +902,12 @@ def parse_metadata(caption: str = None, filename: str = None) -> dict:
         # In MovieFilenameParser, both rip types and publisher sources are stored in parsed_media.source.
         # Map them intelligently.
         if parsed_media.source:
-            if re.search(r"webrip|web-dl|web dl|bluray|bdrip|bd5|brrip|hdtv|pdtv|dsrip|dvdrip|dvdr|dvdscr|screener|r5|camrip|cam|tsrip|tcrip|hdcam|hdts|ppv|vodrip|satrip|dthrip", parsed_media.source, re.I):
+            rip_pattern = (
+                r"webrip|web-dl|web dl|bluray|bdrip|bd5|brrip|hdtv|pdtv|dsrip|dvdrip"
+                r"|dvdr|dvdscr|screener|r5|camrip|cam|tsrip|tcrip|hdcam|hdts"
+                r"|ppv|vodrip|satrip|dthrip"
+            )
+            if re.search(rip_pattern, parsed_media.source, re.I):
                 md["rip"] = parsed_media.source
             else:
                 md["source"] = parsed_media.source

@@ -73,8 +73,9 @@ class FakeMedia:
 
 
 class FakeMsg:
-    def __init__(self, empty=False, has_video=False, has_doc=False):
+    def __init__(self, empty=False, has_video=False, has_doc=False, access_error=False):
         self.empty = empty
+        self.access_error = access_error
         self.video = FakeMedia() if has_video else None
         self.document = FakeMedia(
             file_name="Doc.mkv", mime_type="video/mp4"
@@ -82,7 +83,14 @@ class FakeMsg:
 
 
 class FakeClient:
-    """get_messages returns/raises per message id, mimicking channel state."""
+    """get_messages returns/raises per message id, mimicking channel state.
+    
+    For batch fetch (list of IDs), returns a list of messages/empty stubs.
+    Only raises exceptions for channel-level errors (FloodWait).
+    ChannelPrivate is returned as a special error stub per-message to allow
+    the scan to continue (matching the original per-message behavior).
+    Individual deleted messages are returned as empty stubs, not exceptions.
+    """
 
     def __init__(self, missing_ids=None, access_ids=None, flood_ids=None,
                  empty_ids=None, media_ids=None, doc_ids=None,
@@ -96,12 +104,23 @@ class FakeClient:
         self.non_media_ids = set(non_media_ids or [])
 
     async def get_messages(self, channel_id, msg_id):
+        # Support both single ID and list of IDs (batch fetch)
+        if isinstance(msg_id, list):
+            # For batch fetch, only FloodWait is a batch-level error
+            if self.flood_ids & set(msg_id):
+                raise FloodWait(7)
+            # ChannelPrivate and missing are handled per-message
+            return [self._get_single(channel_id, mid) for mid in msg_id]
+        return self._get_single(channel_id, msg_id)
+    
+    def _get_single(self, channel_id, msg_id):
         if msg_id in self.flood_ids:
             raise FloodWait(7)
         if msg_id in self.access_ids:
             raise ChannelPrivate("caused by " + str(msg_id))
         if msg_id in self.missing_ids:
-            raise Exception("Message not found (deleted)")
+            # Deleted messages return empty stub, not exception (mimics real API)
+            return FakeMsg(empty=True)
         if msg_id in self.empty_ids:
             return FakeMsg(empty=True)
         if msg_id in self.media_ids:

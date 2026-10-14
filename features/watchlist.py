@@ -35,9 +35,6 @@ from .config import (
 # the module attribute so the dependency is explicit at each call site (and
 # stubbable in tests without rebinding three local names).
 from . import tmdb_integration as tmdb
-
-STATUS_UNKNOWN = tmdb.STATUS_UNKNOWN
-
 from .user_management import (
     add_to_watchlist,
     remove_from_watchlist,
@@ -46,6 +43,8 @@ from .user_management import (
     watchlist_capacity,
     log_action,
 )
+
+STATUS_UNKNOWN = tmdb.STATUS_UNKNOWN
 
 # How long a disambiguation picker stays clickable before it's swept up by
 # cleanup_expired_bulk_downloads (shared store, so we stay well inside it).
@@ -69,8 +68,8 @@ def _links_html(entry: dict) -> str:
             f'<a href="https://www.imdb.com/title/{imdb_id}/">IMDb</a>')
     tmdb_id = entry.get("tmdb_id")
     if tmdb_id is not None:
-        links.append(
-            f'<a href="https://www.themoviedb.org/{"movie" if _type_letter(entry) == "M" else "tv"}/{tmdb_id}">TMDb</a>')
+        media_type = "movie" if _type_letter(entry) == "M" else "tv"
+        links.append(f'<a href="https://www.themoviedb.org/{media_type}/{tmdb_id}">TMDb</a>')
     return " · ".join(links)
 
 

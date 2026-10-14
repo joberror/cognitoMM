@@ -150,7 +150,11 @@ async def handle_raw_update(client, update, users, chats):
 
         # Only log if something was actually removed to reduce noise
         if deleted_count > 0:
-            print(f"[REALTIME-DELETE] Channel {channel_id}: removed {deleted_count}/{len(message_ids)} indexed entries for deleted messages {message_ids}")
+            total = len(message_ids)
+            print(
+                f"[REALTIME-DELETE] Channel {channel_id}: removed {deleted_count}/{total} "
+                f"indexed entries for deleted messages {message_ids}"
+            )
             await log_action(
                 "realtime_channel_message_delete",
                 extra={

@@ -38,7 +38,11 @@ async def cleanup_expired_file_deletions():
             # OR it's been more than 6 hours (for any deletion)
             # OR it's been more than 30 minutes since sent_at (for any deletion)
             time_since_sent = (current_time - data['sent_at']).total_seconds()
-            if time_since_deletion > 3600 and (retry_count >= max_retries or time_since_deletion > 21600 or time_since_sent > 1800):
+            max_age = time_since_deletion > 3600
+            retries_done = retry_count >= max_retries
+            very_old = time_since_deletion > 21600
+            sent_long_ago = time_since_sent > 1800
+            if max_age and (retries_done or very_old or sent_long_ago):
                 expired_keys.append(file_id)
             
             # For testing purposes, also clean up if delete_at is more than 2 hours ago
