@@ -157,18 +157,5 @@ async def ensure_indexes():
 # log_action) are canonical in user_management.py. They were previously
 # duplicated here with a diverging log_action implementation (direct logger
 # route vs user_management's direct send_message). Consolidated into
-# user_management.py; re-exported lazily below via PEP 562 __getattr__ so
-# `from .database import log_action` keeps working WITHOUT a top-level import
-# (which would create a circular import: user_management imports this module's
-# collections at module level).
-
-_USER_MANAGEMENT_HELPERS = ("get_user_doc", "is_admin", "is_banned",
-                            "has_accepted_terms", "log_action")
-
-
-def __getattr__(name):
-    """Lazy backward-compat re-export of the user-management helpers."""
-    if name in _USER_MANAGEMENT_HELPERS:
-        from . import user_management
-        return getattr(user_management, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+# user_management.py. Import from there or from features.__init__ directly.
+# The __getattr__ lazy re-export was removed to eliminate circular import risk.

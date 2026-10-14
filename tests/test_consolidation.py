@@ -529,14 +529,18 @@ def test_format_recent_output_missing_year_falls_back_to_title():
 
 def test_role_helpers_single_canonical_home():
     """get_user_doc/is_admin/is_banned/has_accepted_terms/log_action are
-    canonical in user_management.py; database.py re-exports them lazily."""
-    import features.database as database
+    canonical in user_management.py; database.py no longer re-exports them
+    (circular import fix). Import from user_management or features.__init__."""
     import features.user_management as um
     for name in ("get_user_doc", "is_admin", "is_banned",
                  "has_accepted_terms", "log_action"):
         assert callable(getattr(um, name)), f"{name} missing from user_management"
-        assert getattr(database, name) is getattr(um, name), \
-            f"database.{name} should resolve to the user_management copy"
+    # database.py should not have these attributes (lazy re-export removed)
+    import features.database as database
+    for name in ("get_user_doc", "is_admin", "is_banned",
+                 "has_accepted_terms", "log_action"):
+        assert not hasattr(database, name), \
+            f"database.{name} should not exist (lazy re-export removed)"
 
 
 def test_role_helpers_not_defined_in_database():
