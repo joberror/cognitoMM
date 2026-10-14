@@ -7,7 +7,17 @@ including file management, time formatting, and helper functions.
 
 import asyncio
 import html
+import re
 from datetime import datetime, timezone
+
+from .user_management import (
+    should_process_command,
+    require_not_banned,
+    should_process_command_for_user,
+    load_terms_and_privacy,
+    check_banned,
+    check_terms_acceptance,
+)
 
 async def wait_for_user_input(chat_id: int, user_id: int, timeout: int = 60):
     """Wait for user input - replacement for client.listen"""
@@ -35,28 +45,38 @@ def set_user_input(chat_id: int, user_id: int, message):
         user_input_events[key]['event'].set()
 
 async def cleanup_expired_bulk_downloads(bulk_downloads=None):
-    """Remove bulk downloads older than 1 hour.
+    """Remove expired entries from the session/bulk download store.
+
+    Handles two types of entries:
+    - Bulk downloads: have 'created_at' (datetime), expire after 1 hour
+    - Premium payment sessions: have 'expires' (epoch timestamp), expire when time passes
 
     Accepts an explicit dict for callers that already hold a reference (e.g.
     search.py passes the shared config.bulk_downloads); when called with no
-    argument it operates on the shared config.bulk_downloads dict. This was
-    previously duplicated with a conflicting signature in file_deletion.py.
+    argument it operates on the shared config.bulk_downloads dict.
     """
     if bulk_downloads is None:
         from .config import bulk_downloads
 
     current_time = datetime.now(timezone.utc)
+    current_epoch = current_time.timestamp()
     expired_keys = []
 
     for bulk_id, data in bulk_downloads.items():
-        if (current_time - data['created_at']).total_seconds() > 3600:  # 1 hour
-            expired_keys.append(bulk_id)
+        # Bulk download entries (have created_at datetime)
+        if 'created_at' in data:
+            if (current_time - data['created_at']).total_seconds() > 3600:  # 1 hour
+                expired_keys.append(bulk_id)
+        # Premium payment session entries (have expires epoch timestamp)
+        elif 'expires' in data:
+            if data['expires'] < current_epoch:
+                expired_keys.append(bulk_id)
 
     for key in expired_keys:
         del bulk_downloads[key]
 
     if expired_keys:
-        print(f"🧹 Cleaned up {len(expired_keys)} expired bulk downloads")
+        print(f"🧹 Cleaned up {len(expired_keys)} expired entries")
 
 def get_readable_time(seconds):
     """Convert seconds to readable time format"""
@@ -82,22 +102,6 @@ def format_file_size(size_bytes):
         return f"{size_bytes / 1024:.0f}KB"
     else:
         return f"{size_bytes}B"
-
-# Access-control helpers (check_banned, check_terms_acceptance,
-# load_terms_and_privacy, should_process_command, require_not_banned,
-# should_process_command_for_user) are canonical in user_management.py.
-# Re-export them so existing importers keep working with a single
-# implementation. The versions previously defined here diverged (local
-# DB imports vs module-level, wrong chat-type comparisons, an
-# unconditional group-command bypass).
-from .user_management import (
-    should_process_command,
-    require_not_banned,
-    should_process_command_for_user,
-    load_terms_and_privacy,
-    check_banned,
-    check_terms_acceptance,
-)
 
 def group_recent_content(results):
     """Group database results by title with quality/episode consolidation and categorization"""
@@ -335,7 +339,9 @@ def construct_final_caption(db_item, file_size_bytes=None, user_name="User"):
         rows.append(row("Format", ext))
 
     imdb_id = db_item.get('imdb_id') or db_item.get('imdb')
-    if imdb_id:
+    # Validate IMDb ID format (tt + 7-8 digits) to prevent HTML injection.
+    # TMDb should return valid IDs, but defense-in-depth.
+    if imdb_id and re.match(r'^tt\d{7,8}$', str(imdb_id)):
         rows.append(row("IMDb", f'<a href="https://www.imdb.com/title/{esc(imdb_id)}/">{esc(imdb_id)}</a>'))
 
     rows.append(row("Requested by", esc(user_name)))
@@ -357,7 +363,13 @@ def construct_final_caption(db_item, file_size_bytes=None, user_name="User"):
 
     return "\n".join(lines)
 
-def format_recent_output(categorized_results, total_files=None, total_movies=None, total_series=None, last_updated=None):
+def format_recent_output(
+    categorized_results,
+    total_files=None,
+    total_movies=None,
+    total_series=None,
+    last_updated=None,
+):
     """Format categorized results as plain HTML with click-to-copy search strings.
 
     Consolidated per-title lines (``N. <code>Title (year)</code> [details]``)

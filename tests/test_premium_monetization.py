@@ -220,10 +220,10 @@ def test_send_invoice_and_disabled():
 
 def test_pre_checkout_validation():
     client = FakeClient()
-    good = SimpleNamespace(id="q1", invoice_payload="premium:1m:42")
+    good = SimpleNamespace(id="q1", invoice_payload="premium:1m:42", from_user=SimpleNamespace(id=42))
     assert run(premium_payments.handle_pre_checkout(client, good)) is True
     assert client.pre_checkouts[-1]["ok"] is True
-    bad = SimpleNamespace(id="q2", invoice_payload="garbage")
+    bad = SimpleNamespace(id="q2", invoice_payload="garbage", from_user=SimpleNamespace(id=42))
     assert run(premium_payments.handle_pre_checkout(client, bad)) is False
     assert client.pre_checkouts[-1]["ok"] is False
 

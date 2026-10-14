@@ -23,7 +23,10 @@ from .utils import format_file_size
 # as a module-level cache so stats endpoints (/metrics, /stat) never call
 # Telegram's get_me() on every request - that call is bound to the bot's
 # main event loop and is the most fragile part of the stats path.
+# Thread-safe: webapp may read from a different thread.
+import threading
 _bot_info_cache: dict = {}
+_bot_info_cache_lock = threading.Lock()
 
 
 def cache_bot_info(bot_info: dict):
@@ -32,7 +35,8 @@ def cache_bot_info(bot_info: dict):
     Called once by the bot's main() right after a successful get_me().
     """
     global _bot_info_cache
-    _bot_info_cache = dict(bot_info or {})
+    with _bot_info_cache_lock:
+        _bot_info_cache = dict(bot_info or {})
 
 
 async def collect_comprehensive_stats(admin_id=None):
@@ -136,7 +140,10 @@ async def collect_comprehensive_stats(admin_id=None):
                 quality_map[normalized] = quality_map.get(normalized, 0) + count
         
         # Sort by count and create final list
-        quality_dist = [{'_id': k, 'count': v} for k, v in sorted(quality_map.items(), key=lambda x: x[1], reverse=True)]
+        quality_dist = [
+            {'_id': k, 'count': v}
+            for k, v in sorted(quality_map.items(), key=lambda x: x[1], reverse=True)
+        ]
         
         # Add Unknown at the end if it exists
         if unknown_count > 0:
@@ -338,22 +345,32 @@ async def collect_comprehensive_stats(admin_id=None):
         ]
         top_users_raw = await users_col.aggregate(top_users_pipeline).to_list(length=20)
 
-        # Filter out config admins and check premium status
+        # Filter out config admins and check premium status in batch
+        # Collect user_ids first (excluding config admins)
+        user_ids = [u.get('user_id') for u in top_users_raw if u.get('user_id') not in ADMINS]
+        # Batch fetch premium statuses with single $in query
+        premium_docs = {}
+        if user_ids:
+            cursor = premium_users_col.find({"user_id": {"$in": user_ids}})
+            async for doc in cursor:
+                premium_docs[doc['user_id']] = doc
+
         top_users = []
+        now = datetime.now(timezone.utc)
         for user in top_users_raw:
             user_id = user.get('user_id')
             if user_id in ADMINS:
                 continue  # Skip config admins
 
-            # Check if user is premium
-            premium_doc = await premium_users_col.find_one({"user_id": user_id})
+            # Check premium status from batch results
             is_premium = False
+            premium_doc = premium_docs.get(user_id)
             if premium_doc:
                 expiry = premium_doc.get('expiry_date')
                 if expiry:
                     if expiry.tzinfo is None:
                         expiry = expiry.replace(tzinfo=timezone.utc)
-                    is_premium = expiry > datetime.now(timezone.utc)
+                    is_premium = expiry > now
 
             top_users.append({
                 'user_id': user_id,
@@ -432,7 +449,7 @@ async def collect_bot_info(admin_id=None):
                     bot_info['invoked_by_username'] = admin_doc.get('username') or f"User_{admin_id}"
                 else:
                     bot_info['invoked_by_username'] = f"User_{admin_id}"
-            except:
+            except Exception:
                 bot_info['invoked_by_username'] = f"User_{admin_id}"
         
         # Calculate uptime
@@ -448,13 +465,16 @@ async def collect_bot_info(admin_id=None):
         # Bot identity - prefer the cached values fetched once at startup so
         # stats endpoints never call Telegram on every request (cross-loop
         # + latency risk). Only fall back to a live lookup if no cache exists.
-        if _bot_info_cache:
+        # Use lock for thread safety (webapp may read from different thread).
+        with _bot_info_cache_lock:
+            cache = dict(_bot_info_cache)
+        if cache:
             # Coalesce to 'Unknown' so a partial cache never renders as None
             # in the dashboard (a present-but-None key bypasses .get defaults).
-            bot_info['bot_username'] = _bot_info_cache.get('username') or 'Unknown'
-            bot_info['bot_id'] = _bot_info_cache.get('id') or 'Unknown'
-            bot_info['bot_name'] = _bot_info_cache.get('first_name') or 'Unknown'
-            bot_info['bot_dc_id'] = _bot_info_cache.get('dc_id')
+            bot_info['bot_username'] = cache.get('username') or 'Unknown'
+            bot_info['bot_id'] = cache.get('id') or 'Unknown'
+            bot_info['bot_name'] = cache.get('first_name') or 'Unknown'
+            bot_info['bot_dc_id'] = cache.get('dc_id')
         elif actual_client:
             # No cache (direct import / tests / pre-startup) - live lookup
             try:
@@ -552,19 +572,22 @@ def format_stats_output(stats):
                 start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
                 start_formatted = start_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
                 output.append(f"┠ <b>Started:</b> <code>{start_formatted}</code>")
-            except:
+            except Exception:
                 pass
         
         output.append("")
         output.append(f"┠ <b>Version:</b> <code>{bot_info.get('bot_version', 'Unknown')}</code>")
         output.append(f"┠ <b>Python:</b> {bot_info.get('python_version', 'Unknown')}")
-        output.append(f"┠ <b>Platform:</b> {bot_info.get('platform', 'Unknown')} {bot_info.get('platform_release', '')}")
+        platform_str = f"{bot_info.get('platform', 'Unknown')} {bot_info.get('platform_release', '')}"
+        output.append(f"┠ <b>Platform:</b> {platform_str}")
         output.append(f"┠ <b>Architecture:</b> {bot_info.get('architecture', 'Unknown')}")
         
         # Admin who invoked
         if bot_info.get('invoked_by_admin_id'):
             output.append("")
-            output.append(f"┖ <b>Invoked by:</b> {bot_info.get('invoked_by_username', 'Unknown')} <i>(ID: {bot_info.get('invoked_by_admin_id')})</i>")
+            uname = bot_info.get('invoked_by_username', 'Unknown')
+            aid = bot_info.get('invoked_by_admin_id')
+            output.append(f"┖ <b>Invoked by:</b> {uname} <i>(ID: {aid})</i>")
         else:
             # If no invoked_by, close the last line
             output[-1] = output[-1].replace("┠", "┖", 1)
@@ -582,8 +605,10 @@ def format_stats_output(stats):
     premium_users = stats.get('premium_users', 0)
     
     output.append(f"┎ <b>Total Users:</b> {format_number(total_users)}")
-    output.append(f"┠ <b>Active (7d):</b> {format_number(active_users)} <i>({format_percentage(active_users, total_users)})</i>")
-    output.append(f"┠ <b>Premium Users:</b> {format_number(premium_users)} <i>({format_percentage(premium_users, total_users)})</i>")
+    active_pct = format_percentage(active_users, total_users)
+    output.append(f"┠ <b>Active (7d):</b> {format_number(active_users)} <i>({active_pct})</i>")
+    prem_pct = format_percentage(premium_users, total_users)
+    output.append(f"┠ <b>Premium Users:</b> {format_number(premium_users)} <i>({prem_pct})</i>")
     output.append(f"┠ <b>Admin Users:</b> {format_number(admin_users)}")
     output.append(f"┠ <b>Banned Users:</b> {format_number(banned_users)}")
     output.append("")
@@ -644,8 +669,10 @@ def format_stats_output(stats):
     unique_show_titles = stats.get('unique_show_titles', 0)
 
     output.append(f"┎ <b>Total Files:</b> {format_number(total_content)}")
-    output.append(f"┠ <b>Movie Files:</b> {format_number(total_movies)} <i>({format_percentage(total_movies, total_content)})</i>")
-    output.append(f"┠ <b>Series/TV Files:</b> {format_number(total_series)} <i>({format_percentage(total_series, total_content)})</i>")
+    mov_pct = format_percentage(total_movies, total_content)
+    ser_pct = format_percentage(total_series, total_content)
+    output.append(f"┠ <b>Movie Files:</b> {format_number(total_movies)} <i>({mov_pct})</i>")
+    output.append(f"┠ <b>Series/TV Files:</b> {format_number(total_series)} <i>({ser_pct})</i>")
     output.append("")
     output.append(f"┠ <b>Movie Titles:</b> {format_number(unique_movie_titles)}")
     output.append(f"┠ <b>Show Titles:</b> {format_number(unique_show_titles)}")
@@ -786,7 +813,10 @@ def format_stats_output(stats):
         output.append(f"┠  • Last Run: {last_run_str} · {prune_stats_data.get('last_duration', 0)}s{pause_suffix}")
         if last_error:
             output.append(f"┠  • ⚠️ Last Error: {last_error}")
-        output.append(f"┠  • Last: Verified {format_number(prune_stats_data.get('last_verified', 0))} · Deleted {format_number(prune_stats_data.get('last_deleted', 0))} · Access-Skipped {format_number(prune_stats_data.get('last_skipped_access', 0))}")
+        last_verified = format_number(prune_stats_data.get('last_verified', 0))
+        last_deleted = format_number(prune_stats_data.get('last_deleted', 0))
+        last_skipped = format_number(prune_stats_data.get('last_skipped_access', 0))
+        output.append(f"┠  • Last: Verified {last_verified} · Deleted {last_deleted} · Access-Skipped {last_skipped}")
         output.append(f"┖  • Total Deleted: {format_number(prune_stats_data.get('total_deleted', 0))}")
     output.append("")
     
@@ -885,8 +915,16 @@ def format_quick_stats_output(stats):
     # Orphan prune monitor (channel-deletion cleanup) - hidden until first run
     prune_stats_data = stats.get('prune_stats', {})
     if prune_stats_data.get('last_run'):
-        output += f"🗑️ Prune Runs:      {format_number(prune_stats_data.get('runs', 0))} | Total Deleted: {format_number(prune_stats_data.get('total_deleted', 0))}\n"
-        output += f"🗑️ Last Prune:      {format_number(prune_stats_data.get('last_verified', 0))} verified · {format_number(prune_stats_data.get('last_deleted', 0))} deleted · {format_number(prune_stats_data.get('last_skipped_access', 0))} skipped\n"
+        runs = format_number(prune_stats_data.get('runs', 0))
+        total_deleted = format_number(prune_stats_data.get('total_deleted', 0))
+        output += f"🗑️ Prune Runs:      {runs} | Total Deleted: {total_deleted}\n"
+        last_verified = format_number(prune_stats_data.get('last_verified', 0))
+        last_deleted = format_number(prune_stats_data.get('last_deleted', 0))
+        last_skipped = format_number(prune_stats_data.get('last_skipped_access', 0))
+        output += (
+            f"🗑️ Last Prune:      {last_verified} verified · "
+            f"{last_deleted} deleted · {last_skipped} skipped\n"
+        )
     output += "\n"
     
     gen_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -929,7 +967,9 @@ async def export_stats_csv(stats):
             writer.writerow(['Bot', 'Python Version', bot_info.get('python_version', 'Unknown')])
             writer.writerow(['Bot', 'Platform', bot_info.get('platform', 'Unknown')])
             if bot_info.get('invoked_by_admin_id'):
-                writer.writerow(['Bot', 'Invoked By', f"{bot_info.get('invoked_by_username', 'Unknown')} (ID: {bot_info.get('invoked_by_admin_id')})"])
+                uname = bot_info.get('invoked_by_username', 'Unknown')
+                aid = bot_info.get('invoked_by_admin_id')
+                writer.writerow(['Bot', 'Invoked By', f"{uname} (ID: {aid})"])
         
         # User statistics
         writer.writerow(['Users', 'Total Users', stats.get('total_users', 0)])
@@ -1013,7 +1053,12 @@ async def collect_user_stats(user_id: int):
         stats['role'] = user_doc.get('role', 'user')
         
         # Join date (terms_accepted_at or first document creation)
-        stats['joined_date'] = user_doc.get('terms_accepted_at') or user_doc.get('_id').generation_time if hasattr(user_doc.get('_id'), 'generation_time') else None
+        oid = user_doc.get('_id')
+        if hasattr(oid, 'generation_time'):
+            gen_time = oid.generation_time
+        else:
+            gen_time = None
+        stats['joined_date'] = user_doc.get('terms_accepted_at') or gen_time
         stats['last_seen'] = user_doc.get('last_seen')
         
         # Premium information
@@ -1047,7 +1092,10 @@ async def collect_user_stats(user_id: int):
         stats['unique_searches'] = len(set([s.get('q', '').lower() for s in search_history if s.get('q')]))
         
         # Get recent searches (last 5)
-        recent_searches = sorted(search_history, key=lambda x: x.get('ts', datetime.min.replace(tzinfo=timezone.utc)), reverse=True)[:5]
+        default_ts = datetime.min.replace(tzinfo=timezone.utc)
+        recent_searches = sorted(
+            search_history, key=lambda x: x.get('ts', default_ts), reverse=True
+        )[:5]
         stats['recent_searches'] = [{'query': s.get('q'), 'timestamp': s.get('ts')} for s in recent_searches]
         
         # Download statistics

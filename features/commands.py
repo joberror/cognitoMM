@@ -14,11 +14,31 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, 
 from pyrogram.enums import ParseMode, ChatType
 
 # Import from our modules
-from .config import AUTO_INDEX_DEFAULT, temp_data, bulk_downloads, START_MESSAGE, SUPPORT_LINK, HELP_GUIDE_URL, ADMIN_GUIDE_URL
+from .config import (
+    AUTO_INDEX_DEFAULT,
+    temp_data,
+    bulk_downloads,
+    START_MESSAGE,
+    SUPPORT_LINK,
+    HELP_GUIDE_URL,
+    ADMIN_GUIDE_URL,
+)
 from .database import movies_col, users_col, channels_col, settings_col, logs_col
 from .utils import wait_for_user_input, cleanup_expired_bulk_downloads, resolve_chat_ref
 
-from .user_management import is_admin, has_accepted_terms, load_terms_and_privacy, log_action, check_banned, check_terms_acceptance, should_process_command, apply_role_action, format_role_summary, format_role_skipped_lines, resolve_targets
+from .user_management import (
+    is_admin,
+    has_accepted_terms,
+    load_terms_and_privacy,
+    log_action,
+    check_banned,
+    check_terms_acceptance,
+    should_process_command,
+    apply_role_action,
+    format_role_summary,
+    format_role_skipped_lines,
+    resolve_targets,
+)
 from .config import indexing_lock, message_queue
 from .statistics_store import indexing_stats, prune_stats
 from .search import (
@@ -448,7 +468,8 @@ async def cmd_search(client, message: Message):
         raw_query = " ".join(parts[1:]).strip()
 
     # record search history (raw input so /my_history re-search reproduces it)
-    await users_col.update_one({"user_id": uid}, {"$push": {"search_history": {"q": raw_query, "ts": datetime.now(timezone.utc)}}}, upsert=True)
+    history_entry = {"q": raw_query, "ts": datetime.now(timezone.utc)}
+    await users_col.update_one({"user_id": uid}, {"$push": {"search_history": history_entry}}, upsert=True)
 
     # The search engine (exact + fuzzy matching, exact/fuzzy classification)
     # lives in search.py - keep a single canonical implementation. Trailing
@@ -830,7 +851,8 @@ async def cmd_genres(client, message: Message):
         # with Prev/Next nav so large genres are fully browsable.
         total = await _genre_title_count(genre_query)
         if total == 0:
-            return await message.reply_text(f"🎭 No indexed titles found in genre <b>{genre_query}</b>.", parse_mode=ParseMode.HTML)
+            err_text = f"🎭 No indexed titles found in genre <b>{genre_query}</b>."
+            return await message.reply_text(err_text, parse_mode=ParseMode.HTML)
 
         # File totals (movie/series split) for the header, computed once and
         # stored with the browse state like the title count.
@@ -966,7 +988,18 @@ def _format_genre_details(title_doc, meta):
     return " · ".join(parts)
 
 
-async def send_genre_page(client, message, genre, page, total=None, files_split=None, genre_id=None, edit=False, sort="az", season_pages=None):
+async def send_genre_page(
+    client,
+    message,
+    genre,
+    page,
+    total=None,
+    files_split=None,
+    genre_id=None,
+    edit=False,
+    sort="az",
+    season_pages=None,
+):
     """Render one page of /genres <name> results.
 
     Shared by the initial /genres <name> send and the genre_page: pagination
@@ -1176,7 +1209,9 @@ async def cmd_logs(client, message: Message):
             lines.append(line)
 
         text = f"📋 <b>Recent Logs</b> (last {len(docs)})\n\n" + "\n".join(lines)
-        await message.reply_text(text, parse_mode=ParseMode.HTML, link_preview_options=LinkPreviewOptions(is_disabled=True))
+        await message.reply_text(
+            text, parse_mode=ParseMode.HTML, link_preview_options=LinkPreviewOptions(is_disabled=True)
+        )
     except Exception as e:
         print(f"Error in logs command: {e}")
         await message.reply_text("❌ Unable to fetch logs.")
@@ -1219,7 +1254,8 @@ async def cmd_enrich(client, message: Message):
                 enriched += 1
             await asyncio.sleep(0.2)  # gentle pace toward TMDb rate limits
 
-        await status.edit_text(f"✅ Enriched <b>{enriched}/{len(docs)}</b> entries with TMDb metadata.", parse_mode=ParseMode.HTML)
+        enrich_text = f"✅ Enriched <b>{enriched}/{len(docs)}</b> entries with TMDb metadata."
+        await status.edit_text(enrich_text, parse_mode=ParseMode.HTML)
     except Exception as e:
         print(f"Error in enrich command: {e}")
         await status.edit_text("❌ Enrichment failed. Please try again later.")
@@ -1269,7 +1305,13 @@ async def cmd_add_channel(client, message: Message):
     target = parts[1]
     try:
         chat = await resolve_chat_ref(target, client)
-        doc = {"channel_id": chat.id, "channel_title": getattr(chat, "title", None), "added_by": uid, "added_at": datetime.now(timezone.utc), "enabled": True}
+        doc = {
+            "channel_id": chat.id,
+            "channel_title": getattr(chat, "title", None),
+            "added_by": uid,
+            "added_at": datetime.now(timezone.utc),
+            "enabled": True,
+        }
         await channels_col.update_one({"channel_id": chat.id}, {"$set": doc}, upsert=True)
         await log_action("add_channel", by=uid, target=chat.id, extra={"title": doc["channel_title"]})
         await message.reply_text(f"✅ Channel added: {doc['channel_title']} ({chat.id})")
@@ -1301,7 +1343,8 @@ async def cmd_index_channel(client, message: Message):
     if indexing_lock.locked():
         return await message.reply_text("⏳ Another indexing process is already running. Please wait.")
 
-    i = await message.reply_text("📝 Send me channel username, channel ID, or a message link from the channel you want to index.")
+    prompt = "📝 Send me channel username, channel ID, or a message link from the channel you want to index."
+    i = await message.reply_text(prompt)
 
     try:
         # Wait for user response using our custom input system
@@ -1317,9 +1360,13 @@ async def cmd_index_channel(client, message: Message):
                 chat_id = msg_link[-2]
                 if chat_id.isnumeric():
                     chat_id = int(("-100" + chat_id))
-            except:
+            except Exception:
                 return await message.reply_text('❌ Invalid message link!')
-        elif getattr(response, "forward_origin", None) and getattr(response.forward_origin, "chat", None) and response.forward_origin.chat.type == ChatType.CHANNEL:
+        elif (
+    getattr(response, "forward_origin", None)
+    and getattr(response.forward_origin, "chat", None)
+    and response.forward_origin.chat.type == ChatType.CHANNEL
+):
             # Handle forwarded message (forward_origin replaces the deprecated
             # forward_from_chat / forward_from_message_id properties)
             last_msg_id = response.forward_origin.message_id
@@ -1343,7 +1390,7 @@ async def cmd_index_channel(client, message: Message):
 
         try:
             skip = int(skip_response.text)
-        except:
+        except Exception:
             return await message.reply_text("❌ Invalid number.")
 
         # Confirmation
@@ -1652,7 +1699,8 @@ async def cmd_reset_channel(client, message: Message):
 
             # Handle cancellation
             if not response or (response.text and response.text.upper().strip() == "CANCEL"):
-                await selection_msg.edit_text("❌ **Channel Reset Cancelled**\n\n🛡️ No changes were made to the database.")
+                cancel_text = "❌ **Channel Reset Cancelled**\n\n🛡️ No changes were made to the database."
+                await selection_msg.edit_text(cancel_text)
                 return
 
             # Parse channel selection
@@ -1662,7 +1710,8 @@ async def cmd_reset_channel(client, message: Message):
                     raise ValueError("Invalid selection")
                 selected_channel = channels[selection - 1]
             except (ValueError, IndexError):
-                await selection_msg.edit_text("❌ **Invalid Selection**\n\nPlease send a valid channel number or 'CANCEL' to abort.")
+                err_text = "❌ **Invalid Selection**\n\nPlease send a valid channel number or 'CANCEL' to abort."
+                await selection_msg.edit_text(err_text)
                 return
 
             # Step 4: Show confirmation with channel details
@@ -1735,7 +1784,10 @@ async def cmd_reset_channel(client, message: Message):
                         f"💡 Use `/index_channel` to re-index movie files for this channel."
                     )
 
-                    print(f"🗑️ Channel reset completed by user {uid}. Deleted {deleted_count} movie entries from channel {channel_id} ({channel_title}).")
+                    print(
+                f"🗑️ Channel reset completed by user {uid}. "
+                f"Deleted {deleted_count} movie entries from channel {channel_id} ({channel_title})."
+            )
 
                 except Exception as e:
                     # Handle database error
@@ -1817,7 +1869,8 @@ async def cmd_indexing_stats(client, message: Message):
 
     # Concurrency analysis
     if indexing_stats['concurrent_peak'] > 1:
-        stats_text += f"🔄 **CONCURRENCY ISSUES**: Peak of {indexing_stats['concurrent_peak']} simultaneous operations\n"
+        peak = indexing_stats['concurrent_peak']
+        stats_text += f"🔄 **CONCURRENCY ISSUES**: Peak of {peak} simultaneous operations\n"
         stats_text += "💡 Auto-indexing lacks proper synchronization\n"
         stats_text += "🔧 Recommendation: Implement message queuing for better handling\n\n"
     else:
@@ -2034,7 +2087,8 @@ async def cmd_update_db(client, message: Message):
             selection = int(response.text.strip())
             if selection < 1 or selection > len(channels):
                 await selection_msg.delete()
-                return await message.reply_text(f"❌ Invalid selection. Please choose a number between 1 and {len(channels)}.")
+                err_text = f"❌ Invalid selection. Please choose a number between 1 and {len(channels)}."
+                return await message.reply_text(err_text)
         except ValueError:
             await selection_msg.delete()
             return await message.reply_text("❌ Invalid input. Please send a number.")
@@ -2420,7 +2474,7 @@ async def cmd_manual_deletion(client, message: Message):
             if indexed_at:
                 try:
                     date_str = indexed_at.strftime('%Y-%m-%d')
-                except:
+                except Exception:
                     date_str = 'Unknown'
             else:
                 date_str = 'Unknown'
@@ -2539,7 +2593,12 @@ async def cmd_stat(client, message: Message):
         keyboard = InlineKeyboardMarkup(buttons)
         
         # Send statistics
-        await loading_msg.edit_text(output, reply_markup=keyboard, link_preview_options=LinkPreviewOptions(is_disabled=True), parse_mode=ParseMode.HTML)
+        await loading_msg.edit_text(
+            output,
+            reply_markup=keyboard,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            parse_mode=ParseMode.HTML,
+        )
         
         # Log action
         await log_action("stat_command", by=uid, extra={

@@ -177,7 +177,10 @@ async def add_premium_user(user_id: int, days: int, added_by: int, username: str
                 "new_expiry": new_expiry.isoformat()
             })
             
-            return True, f"Extended premium for user {user_id} by {days} days. New expiry: {new_expiry.strftime('%Y-%m-%d %H:%M UTC')}"
+            return True, (
+                f"Extended premium for user {user_id} by {days} days. "
+                f"New expiry: {new_expiry.strftime('%Y-%m-%d %H:%M UTC')}"
+            )
         else:
             # Add new premium user
             expiry_date = now + timedelta(days=days)
@@ -199,7 +202,10 @@ async def add_premium_user(user_id: int, days: int, added_by: int, username: str
                 "expiry": expiry_date.isoformat()
             })
 
-            return True, f"Added user {user_id} to premium for {days} days. Expiry: {expiry_date.strftime('%Y-%m-%d %H:%M UTC')}"
+            return True, (
+                f"Added user {user_id} to premium for {days} days. "
+                f"Expiry: {expiry_date.strftime('%Y-%m-%d %H:%M UTC')}"
+            )
 
     except Exception as e:
         print(f"Error adding premium user {user_id}: {e}")
@@ -255,7 +261,10 @@ async def edit_premium_user(user_id: int, days_delta: int, edited_by: int) -> Tu
         })
 
         action = "added" if days_delta > 0 else "removed"
-        return True, f"{action.capitalize()} {abs(days_delta)} days for user {user_id}. New expiry: {new_expiry.strftime('%Y-%m-%d %H:%M UTC')}"
+        return True, (
+            f"{action.capitalize()} {abs(days_delta)} days for user {user_id}. "
+            f"New expiry: {new_expiry.strftime('%Y-%m-%d %H:%M UTC')}"
+        )
 
     except Exception as e:
         print(f"Error editing premium user {user_id}: {e}")

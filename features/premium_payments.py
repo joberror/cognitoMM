@@ -87,6 +87,18 @@ async def send_premium_invoice(client, chat_id: int, plan_key: str, user_id=None
         return False, "Unknown plan."
     if not PREMIUM_STARS_ENABLED:
         return False, "Payments are currently disabled."
+    
+    # Store the selected plan in session with TTL for validation in pre_checkout
+    from .config import bulk_downloads
+    import time
+    session_key = f"premium_session:{user_id if user_id is not None else chat_id}"
+    bulk_downloads[session_key] = {
+        "type": "premium_payment",
+        "plan_key": plan_key,
+        "user_id": user_id if user_id is not None else chat_id,
+        "expires": time.time() + 300,  # 5 min TTL
+    }
+    
     payload = build_payment_payload(plan_key, user_id if user_id is not None else chat_id)
     try:
         await client.send_invoice(
@@ -112,6 +124,35 @@ async def handle_pre_checkout(client, pre_checkout_query):
             pre_checkout_query.id, ok=False,
             error_message="This plan is no longer available. Use /buy_premium.")
         return False
+    
+    # Validate session TTL to prevent replay attacks
+    from .config import bulk_downloads
+    import time
+    user_id = pre_checkout_query.from_user.id
+    session_key = f"premium_session:{user_id}"
+    session = bulk_downloads.get(session_key)
+    
+    if not session or session.get("type") != "premium_payment":
+        await client.answer_pre_checkout_query(
+            pre_checkout_query.id, ok=False,
+            error_message="Payment session expired. Please try again with /buy_premium.")
+        return False
+    
+    if session.get("expires", 0) < time.time():
+        bulk_downloads.pop(session_key, None)
+        await client.answer_pre_checkout_query(
+            pre_checkout_query.id, ok=False,
+            error_message="Payment session expired. Please try again with /buy_premium.")
+        return False
+    
+    if session.get("plan_key") != info.get("plan_key") or session.get("user_id") != user_id:
+        await client.answer_pre_checkout_query(
+            pre_checkout_query.id, ok=False,
+            error_message="Invalid payment session. Please try again with /buy_premium.")
+        return False
+    
+    # Valid session - clean it up and approve
+    bulk_downloads.pop(session_key, None)
     await client.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
     return True
 

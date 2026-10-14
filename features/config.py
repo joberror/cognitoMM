@@ -5,8 +5,10 @@ This module contains all configuration variables, environment settings,
 and initialization code for the Movie Bot application.
 """
 
+import asyncio
 import os
 import sys
+from collections import deque
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
@@ -45,8 +47,9 @@ FUZZY_THRESHOLD = int(os.getenv("FUZZY_THRESHOLD", "68"))
 DB_RESCAN_ENABLED = os.getenv("DB_RESCAN_ENABLED", "true").lower() in ("1", "true", "yes")
 DB_RESCAN_INTERVAL_MINUTES = int(os.getenv("DB_RESCAN_INTERVAL_MINUTES", "360"))
 AUTO_INDEX_DEFAULT = os.getenv("AUTO_INDEXING", "True").lower() in ("1", "true", "yes")
-TMDB_API = os.getenv("TMDB_API", "")               # TMDb API key for request feature
-START_MESSAGE = os.getenv("START_MESSAGE", os.getenv("START_MESSAGEE", "Welcome to the bot! Use buttons below to navigate."))
+TMDB_API = os.getenv("TMDB_API", "")  # TMDb API key for request feature
+_default_start = "Welcome to the bot! Use buttons below to navigate."
+START_MESSAGE = os.getenv("START_MESSAGE", os.getenv("START_MESSAGEE", _default_start))
 SUPPORT_LINK = os.getenv("SUPPORT_LINK", "https://t.me/")
 # Public Telegraph help guides (published/updated by scripts/publish_telegraph.py).
 # HELP_GUIDE_URL shows on every /help page; ADMIN_GUIDE_URL adds an admin-only
@@ -146,7 +149,6 @@ bulk_downloads = {}
 file_deletions = {}
 
 # Lock for thread-safe access to file_deletions
-import asyncio
 file_deletions_lock = asyncio.Lock()
 
 # Lock for thread-safe access to indexing operations
@@ -154,9 +156,6 @@ indexing_lock = asyncio.Lock()
 
 # Global variables for indexing
 INDEX_EXTENSIONS = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.ts', '.m2ts']
-
-# SOLUTION: Message queue for sequential processing
-from collections import deque
 
 # Global message queue for sequential processing
 message_queue = deque(maxlen=100)

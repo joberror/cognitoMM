@@ -41,6 +41,18 @@ async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
     no_media = 0
     unsupported = 0
     current = skip
+    BATCH_SIZE = 50  # Batch size for bulk inserts
+    batch_docs: list[dict] = []
+
+    async def flush_batch():
+        nonlocal total_files, duplicate, errors
+        if not batch_docs:
+            return
+        ins, dup, err = await save_files_batch(batch_docs)
+        total_files += ins
+        duplicate += dup
+        errors += err
+        batch_docs.clear()
 
     async with indexing_lock:
         try:
@@ -48,7 +60,12 @@ async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
             chat = await client.get_chat(chat_id)
 
             # Update initial message
-            await msg.edit_text("🚀 **Starting Indexing Process**\n\n📺 **Channel:** {}\n🔄 **Status:** Initializing...".format(chat.title))
+            init_text = (
+                "🚀 **Starting Indexing Process**\n\n"
+                "📺 **Channel:** {}\n"
+                "🔄 **Status:** Initializing..."
+            ).format(chat.title)
+            await msg.edit_text(init_text)
 
             # Try to use iter_messages as in Auto-Filter-Bot
             print(f"🔍 Attempting to use iter_messages for chat {chat_id}, last_msg_id: {last_msg_id}, skip: {skip}")
@@ -62,6 +79,7 @@ async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
                     # Check for cancellation
                     if temp_data.CANCEL:
                         temp_data.CANCEL = False
+                        await flush_batch()
                         await msg.edit_text(
                             f"❌ **Indexing Cancelled!**\n\n"
                             f"📺 **Channel:** {chat.title}\n"
@@ -126,18 +144,50 @@ async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
                             unsupported += 1
                             continue
 
-                    # Save file
-                    try:
-                        result = await save_file_to_db(media, message)
-                        if result == 'suc':
-                            total_files += 1
-                        elif result == 'dup':
-                            duplicate += 1
-                        elif result == 'err':
-                            errors += 1
-                    except Exception as e:
-                        errors += 1
-                        print(f"❌ Error processing message {message.id}: {e}")
+                    # Build document for batch insert
+                    if hasattr(media, 'file_name') and media.file_name:
+                        file_name = media.file_name
+                    else:
+                        file_name = f"file_{message.id}"
+
+                    # Clean filename for better searching
+                    clean_name = re.sub(r"@\w+|(_|\-|\.|\+)", " ", str(file_name))
+
+                    # Get file caption
+                    file_caption = ""
+                    if hasattr(media, 'caption') and media.caption:
+                        file_caption = re.sub(r"@\w+|(_|\-|\.|\+)", " ", str(media.caption))
+                    elif message.caption:
+                        file_caption = re.sub(r"@\w+|(_|\-|\.|\+)", " ", str(message.caption))
+
+                    # Create document for database
+                    document = {
+                        '_id': f"{message.chat.id}_{message.id}",  # Unique identifier
+                        'file_name': clean_name,
+                        'original_file_name': file_name,
+                        'file_size': getattr(media, 'file_size', 0),
+                        'caption': file_caption,
+                        'channel_id': message.chat.id,
+                        'message_id': message.id,
+                        'date': message.date,
+                        'indexed_at': datetime.now(timezone.utc),
+                        'file_type': 'video' if hasattr(media, 'duration') else 'document',
+                        'duration': getattr(media, 'duration', 0),
+                        'mime_type': getattr(media, 'mime_type', ''),
+                    }
+
+                    # Parse additional metadata
+                    metadata = parse_metadata(file_caption, file_name)
+                    document.update(metadata)
+
+                    batch_docs.append(document)
+
+                    # Flush batch when it reaches BATCH_SIZE
+                    if len(batch_docs) >= BATCH_SIZE:
+                        await flush_batch()
+
+                # Flush any remaining documents
+                await flush_batch()
 
                 # Final success message
                 time_taken = get_readable_time(time.time() - start_time)
@@ -240,11 +290,76 @@ async def save_file_to_db(media, message):
         return 'err'
 
 
+async def save_files_batch(documents: list) -> tuple[int, int, int]:
+    """Batch insert multiple documents with duplicate handling.
+
+    Returns: (inserted_count, duplicate_count, error_count)
+    Retries non-duplicate errors once individually.
+    """
+    if not documents:
+        return 0, 0, 0
+
+    total_inserted = 0
+    total_duplicates = 0
+    total_errors = 0
+    remaining_docs = documents
+
+    # Try batch insert first
+    while remaining_docs:
+        try:
+            result = await movies_col.insert_many(remaining_docs, ordered=False)
+            total_inserted += len(result.inserted_ids)
+            break  # All inserted successfully
+        except Exception as e:
+            # Handle BulkWriteError - extract inserted and duplicate counts
+            if hasattr(e, 'details'):
+                details = e.details
+                inserted = details.get('nInserted', 0)
+                total_inserted += inserted
+                # Collect write errors
+                write_errors = details.get('writeErrors', [])
+                # Separate duplicates from other errors
+                retry_docs = []
+                for i, err in enumerate(write_errors):
+                    if err.get('code') == 11000:
+                        total_duplicates += 1
+                    else:
+                        total_errors += 1
+                        # Get the failed document index and add to retry
+                        idx = err.get('index')
+                        if idx is not None and idx < len(remaining_docs):
+                            retry_docs.append(remaining_docs[idx])
+                # Retry non-duplicate errors individually
+                if retry_docs:
+                    remaining_docs = retry_docs
+                    continue
+                break
+            # Fallback for other exceptions - try individually
+            print(f"❌ Batch insert error, retrying individually: {e}")
+            for doc in remaining_docs:
+                try:
+                    await movies_col.insert_one(doc)
+                    total_inserted += 1
+                except Exception as indiv_err:
+                    if 'duplicate key' in str(indiv_err).lower():
+                        total_duplicates += 1
+                    else:
+                        total_errors += 1
+            break
+
+    return total_inserted, total_duplicates, total_errors
+
+
 async def index_message(msg):
     """Index a single message from a channel"""
     try:
         # Debug logging (remove this in production)
-        # print(f"🔍 Index attempt: Chat={getattr(msg.chat, 'type', 'None')} ID={getattr(msg.chat, 'id', 'None')} HasVideo={getattr(msg, 'video', None) is not None} HasDoc={getattr(msg, 'document', None) is not None}")
+        # print(
+        #     f"🔍 Index attempt: Chat={getattr(msg.chat, 'type', 'None')} "
+        #     f"ID={getattr(msg.chat, 'id', 'None')} "
+        #     f"HasVideo={getattr(msg, 'video', None) is not None} "
+        #     f"HasDoc={getattr(msg, 'document', None) is not None}"
+        # )
 
         # DIAGNOSTIC LOG: Track indexing attempts
         import threading
@@ -267,12 +382,17 @@ async def index_message(msg):
         # Only index channels that exist in channels_col and enabled True
         chdoc = await channels_col.find_one({"channel_id": msg.chat.id})
         if not chdoc or not chdoc.get("enabled", True):
-            print(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: Channel {msg.chat.id} not registered or disabled")
+            msg_txt = (
+                f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: "
+                f"Channel {msg.chat.id} not registered or disabled"
+            )
+            print(msg_txt)
             return
 
         # Only process video or documents with video mime
         has_video = getattr(msg, "video", None) is not None
-        has_doc = getattr(msg, "document", None) is not None and getattr(msg.document, "mime_type", "").startswith("video")
+        doc = getattr(msg, "document", None)
+        has_doc = doc is not None and getattr(doc, "mime_type", "").startswith("video")
         if not (has_video or has_doc):
             print(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: No video content")
             return
@@ -317,7 +437,11 @@ async def index_message(msg):
             "episode": parsed.get("episode"),
             "file_size": file_size,
             "duration": duration,
-            "upload_date": datetime.utcfromtimestamp(msg.date.timestamp()) if getattr(msg, "date", None) else datetime.now(timezone.utc),
+            "upload_date": (
+    datetime.utcfromtimestamp(msg.date.timestamp())
+    if getattr(msg, "date", None)
+    else datetime.now(timezone.utc)
+),
             "channel_id": msg.chat.id,
             "channel_title": getattr(msg.chat, "title", None),
             "message_id": msg.id,
@@ -340,7 +464,14 @@ async def index_message(msg):
             print(f"[DIAGNOSTIC] {timestamp} - Successfully inserted message {msg.id} into database")
             indexing_stats['successful_inserts'] += 1
             from .user_management import log_action, notify_watchlist
-            await log_action("indexed_message", extra={"title": entry["title"], "channel_id": entry["channel_id"], "message_id": entry["message_id"]})
+            await log_action(
+                "indexed_message",
+                extra={
+                    "title": entry["title"],
+                    "channel_id": entry["channel_id"],
+                    "message_id": entry["message_id"],
+                },
+            )
             print(f"[INDEXED] {entry['title']} from {entry['channel_title']}")
 
             # Post-index side effects (both fire-and-forget tolerant):
@@ -381,10 +512,18 @@ async def index_message(msg):
             print(f"[DIAGNOSTIC] {timestamp} - Database insertion failed for message {msg.id}: {str(db_error)}")
             # Check if it's a duplicate key error
             if 'duplicate key' in str(db_error).lower():
-                print(f"[DIAGNOSTIC] {timestamp} - Duplicate key error detected for message {msg.id} - RACE CONDITION CONFIRMED")
+                dup_msg = (
+                    f"[DIAGNOSTIC] {timestamp} - Duplicate key error detected for "
+                    f"message {msg.id} - RACE CONDITION CONFIRMED"
+                )
+                print(dup_msg)
                 indexing_stats['duplicate_errors'] += 1
             else:
-                print(f"[DIAGNOSTIC] {timestamp} - Other database error for message {msg.id}: {str(db_error)}")
+                err_msg = (
+                    f"[DIAGNOSTIC] {timestamp} - Other database error for "
+                    f"message {msg.id}: {str(db_error)}"
+                )
+                print(err_msg)
                 indexing_stats['other_errors'] += 1
             from .user_management import log_action
             await log_action("index_error", extra={"error": str(db_error)})
@@ -451,10 +590,15 @@ async def process_message_queue():
             
             # Check if this message has media before attempting to index
             has_video = getattr(message, "video", None) is not None
-            has_doc = getattr(message, "document", None) is not None and getattr(message.document, "mime_type", "").startswith("video")
+            doc = getattr(message, "document", None)
+            has_doc = doc is not None and getattr(doc, "mime_type", "").startswith("video")
             
             if has_video or has_doc:
-                print(f"[DIAGNOSTIC] {timestamp} - Media detected in queued message {message.id}, attempting to index...")
+                msg_txt = (
+                    f"[DIAGNOSTIC] {timestamp} - Media detected in queued message "
+                    f"{message.id}, attempting to index..."
+                )
+                print(msg_txt)
                 
                 try:
                     await index_message(message)
@@ -498,7 +642,11 @@ async def on_message(client, message):
     # DIAGNOSTIC: Check if this is a command message
     if message.text and message.text.startswith('/'):
         timestamp = datetime.now(timezone.utc).isoformat()
-        print(f"[DIAGNOSTIC] {timestamp} - COMMAND DETECTED: {message.text} - This should be handled by command handler, not indexing!")
+        cmd_msg = (
+            f"[DIAGNOSTIC] {timestamp} - COMMAND DETECTED: {message.text} - "
+            f"This should be handled by command handler, not indexing!"
+        )
+        print(cmd_msg)
         # Don't process commands in indexing - let them fall through to command handler
         return
     # Auto-indexing for channel messages

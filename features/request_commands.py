@@ -61,8 +61,10 @@ async def cmd_request(client, message: Message):
         await message.reply_text(
             "📝 **Movie/Series Request**\n\n"
             "⚠️ **IMPORTANT WARNING:**\n"
-            "Before requesting, please search the database using /search to ensure the content is not already available.\n"
-            "Requesting content that already exists may result in a ban from the bot.\n\n"
+            "Before requesting, please search the database using /search to "
+            "ensure the content is not already available.\n"
+            "Requesting content that already exists may result in a ban "
+            "from the bot.\n\n"
             "Let's gather the information for your request.\n"
             "You can type **CANCEL** at any step to abort.\n\n"
             "**Step 1/3:** What type of content are you requesting?\n"
@@ -213,7 +215,9 @@ async def cmd_request(client, message: Message):
                 selection_idx = int(selection_input) - 1
 
                 if selection_idx < 0 or selection_idx >= len(tmdb_results):
-                    await message.reply_text(f"❌ Invalid selection. Please choose 1-{len(tmdb_results)}. Start over with /request")
+                    max_sel = len(tmdb_results)
+                    err = f"❌ Invalid selection. Please choose 1-{max_sel}. Start over with /request"
+                    await message.reply_text(err)
                     return
 
                 # Get IMDB link from selected result
@@ -223,9 +227,14 @@ async def cmd_request(client, message: Message):
 
                 if imdb_id:
                     imdb_link = f"https://www.imdb.com/title/{imdb_id}/"
-                    await message.reply_text(f"✅ Selected: {selected_result.get('title')} ({selected_result.get('year')})")
+                    title = selected_result.get('title')
+                    year = selected_result.get('year')
+                    await message.reply_text(f"✅ Selected: {title} ({year})")
                 else:
-                    await message.reply_text("⚠️ IMDB ID not available for this selection. Proceeding without IMDB link.")
+                    await message.reply_text(
+                        "⚠️ IMDB ID not available for this selection. "
+                        "Proceeding without IMDB link."
+                    )
         else:
             # No TMDb results found, allow manual entry or skip
             await search_msg.edit_text(
