@@ -7,6 +7,7 @@ including file management, time formatting, and helper functions.
 
 import asyncio
 import html
+import re
 from datetime import datetime, timezone
 
 async def wait_for_user_input(chat_id: int, user_id: int, timeout: int = 60):
@@ -335,7 +336,9 @@ def construct_final_caption(db_item, file_size_bytes=None, user_name="User"):
         rows.append(row("Format", ext))
 
     imdb_id = db_item.get('imdb_id') or db_item.get('imdb')
-    if imdb_id:
+    # Validate IMDb ID format (tt + 7-8 digits) to prevent HTML injection.
+    # TMDb should return valid IDs, but defense-in-depth.
+    if imdb_id and re.match(r'^tt\d{7,8}$', str(imdb_id)):
         rows.append(row("IMDb", f'<a href="https://www.imdb.com/title/{esc(imdb_id)}/">{esc(imdb_id)}</a>'))
 
     rows.append(row("Requested by", esc(user_name)))
