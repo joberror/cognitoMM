@@ -209,38 +209,48 @@ async def execute_broadcast(
         format_progress_message(metrics, 0, 0)
     )
     
-    # Calculate delay for rate limiting
+    # Concurrency control: semaphore limits simultaneous sends
+    # Rate limit is enforced by token bucket via delay between batches
+    semaphore = asyncio.Semaphore(BROADCAST_RATE_LIMIT)
     delay = 1.0 / BROADCAST_RATE_LIMIT
     
-    # Broadcast loop
-    for idx, user_id in enumerate(user_ids, 1):
-        # Send message
-        result = await send_broadcast_message(client, user_id, message_text, parse_mode)
+    async def send_with_semaphore(user_id: int) -> tuple[int, str | None]:
+        """Send to one user, return (user_id, error_type or None)"""
+        async with semaphore:
+            result = await send_broadcast_message(client, user_id, message_text, parse_mode)
+            await asyncio.sleep(delay)  # Rate limiting per slot
+            return user_id, result.get("error") if not result["success"] else None
+    
+    # Process in chunks to update progress periodically
+    CHUNK_SIZE = BROADCAST_PROGRESS_INTERVAL
+    start_time = metrics["start_time"]
+    
+    for chunk_start in range(0, len(user_ids), CHUNK_SIZE):
+        chunk = user_ids[chunk_start:chunk_start + CHUNK_SIZE]
+        
+        # Send chunk concurrently
+        results = await asyncio.gather(*[send_with_semaphore(uid) for uid in chunk])
         
         # Update metrics
-        if result["success"]:
-            metrics["sent"] += 1
-        else:
-            metrics["failed"] += 1
-            error_type = result.get("error", "unknown")
-            metrics["errors"][error_type] += 1
-        
-        # Rate limiting delay
-        await asyncio.sleep(delay)
+        for user_id, error_type in results:
+            if error_type is None:
+                metrics["sent"] += 1
+            else:
+                metrics["failed"] += 1
+                metrics["errors"][error_type] += 1
         
         # Progress update
-        if idx % BROADCAST_PROGRESS_INTERVAL == 0 or idx == len(user_ids):
-            elapsed = (datetime.now(timezone.utc) - metrics["start_time"]).total_seconds()
-            rate = idx / elapsed if elapsed > 0 else 0
-            remaining = (metrics["total"] - idx) / rate if rate > 0 else 0
-            
-            try:
-                await status_msg.edit_text(
-                    format_progress_message(metrics, elapsed, remaining)
-                )
-            except Exception as e:
-                # Ignore edit errors (message might be too old)
-                print(f"[BROADCAST] Progress update error: {e}")
+        idx = chunk_start + len(chunk)
+        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+        rate = idx / elapsed if elapsed > 0 else 0
+        remaining = (metrics["total"] - idx) / rate if rate > 0 else 0
+        
+        try:
+            await status_msg.edit_text(
+                format_progress_message(metrics, elapsed, remaining)
+            )
+        except Exception as e:
+            print(f"[BROADCAST] Progress update error: {e}")
     
     # Calculate final metrics
     end_time = datetime.now(timezone.utc)
@@ -261,7 +271,6 @@ async def execute_broadcast(
     try:
         await status_msg.edit_text(format_summary_message(results))
     except Exception:
-        # If edit fails, send new message
         await admin_message.reply_text(format_summary_message(results))
     
     return results
