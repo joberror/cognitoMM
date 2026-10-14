@@ -23,7 +23,10 @@ from .utils import format_file_size
 # as a module-level cache so stats endpoints (/metrics, /stat) never call
 # Telegram's get_me() on every request - that call is bound to the bot's
 # main event loop and is the most fragile part of the stats path.
+# Thread-safe: webapp may read from a different thread.
+import threading
 _bot_info_cache: dict = {}
+_bot_info_cache_lock = threading.Lock()
 
 
 def cache_bot_info(bot_info: dict):
@@ -32,7 +35,8 @@ def cache_bot_info(bot_info: dict):
     Called once by the bot's main() right after a successful get_me().
     """
     global _bot_info_cache
-    _bot_info_cache = dict(bot_info or {})
+    with _bot_info_cache_lock:
+        _bot_info_cache = dict(bot_info or {})
 
 
 async def collect_comprehensive_stats(admin_id=None):
@@ -448,13 +452,16 @@ async def collect_bot_info(admin_id=None):
         # Bot identity - prefer the cached values fetched once at startup so
         # stats endpoints never call Telegram on every request (cross-loop
         # + latency risk). Only fall back to a live lookup if no cache exists.
-        if _bot_info_cache:
+        # Use lock for thread safety (webapp may read from different thread).
+        with _bot_info_cache_lock:
+            cache = dict(_bot_info_cache)
+        if cache:
             # Coalesce to 'Unknown' so a partial cache never renders as None
             # in the dashboard (a present-but-None key bypasses .get defaults).
-            bot_info['bot_username'] = _bot_info_cache.get('username') or 'Unknown'
-            bot_info['bot_id'] = _bot_info_cache.get('id') or 'Unknown'
-            bot_info['bot_name'] = _bot_info_cache.get('first_name') or 'Unknown'
-            bot_info['bot_dc_id'] = _bot_info_cache.get('dc_id')
+            bot_info['bot_username'] = cache.get('username') or 'Unknown'
+            bot_info['bot_id'] = cache.get('id') or 'Unknown'
+            bot_info['bot_name'] = cache.get('first_name') or 'Unknown'
+            bot_info['bot_dc_id'] = cache.get('dc_id')
         elif actual_client:
             # No cache (direct import / tests / pre-startup) - live lookup
             try:
