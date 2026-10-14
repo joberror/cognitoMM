@@ -41,6 +41,18 @@ async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
     no_media = 0
     unsupported = 0
     current = skip
+    BATCH_SIZE = 50  # Batch size for bulk inserts
+    batch_docs: list[dict] = []
+
+    async def flush_batch():
+        nonlocal total_files, duplicate, errors
+        if not batch_docs:
+            return
+        ins, dup, err = await save_files_batch(batch_docs)
+        total_files += ins
+        duplicate += dup
+        errors += err
+        batch_docs.clear()
 
     async with indexing_lock:
         try:
@@ -62,6 +74,7 @@ async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
                     # Check for cancellation
                     if temp_data.CANCEL:
                         temp_data.CANCEL = False
+                        await flush_batch()
                         await msg.edit_text(
                             f"❌ **Indexing Cancelled!**\n\n"
                             f"📺 **Channel:** {chat.title}\n"
@@ -126,18 +139,50 @@ async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
                             unsupported += 1
                             continue
 
-                    # Save file
-                    try:
-                        result = await save_file_to_db(media, message)
-                        if result == 'suc':
-                            total_files += 1
-                        elif result == 'dup':
-                            duplicate += 1
-                        elif result == 'err':
-                            errors += 1
-                    except Exception as e:
-                        errors += 1
-                        print(f"❌ Error processing message {message.id}: {e}")
+                    # Build document for batch insert
+                    if hasattr(media, 'file_name') and media.file_name:
+                        file_name = media.file_name
+                    else:
+                        file_name = f"file_{message.id}"
+
+                    # Clean filename for better searching
+                    clean_name = re.sub(r"@\w+|(_|\-|\.|\+)", " ", str(file_name))
+
+                    # Get file caption
+                    file_caption = ""
+                    if hasattr(media, 'caption') and media.caption:
+                        file_caption = re.sub(r"@\w+|(_|\-|\.|\+)", " ", str(media.caption))
+                    elif message.caption:
+                        file_caption = re.sub(r"@\w+|(_|\-|\.|\+)", " ", str(message.caption))
+
+                    # Create document for database
+                    document = {
+                        '_id': f"{message.chat.id}_{message.id}",  # Unique identifier
+                        'file_name': clean_name,
+                        'original_file_name': file_name,
+                        'file_size': getattr(media, 'file_size', 0),
+                        'caption': file_caption,
+                        'channel_id': message.chat.id,
+                        'message_id': message.id,
+                        'date': message.date,
+                        'indexed_at': datetime.now(timezone.utc),
+                        'file_type': 'video' if hasattr(media, 'duration') else 'document',
+                        'duration': getattr(media, 'duration', 0),
+                        'mime_type': getattr(media, 'mime_type', ''),
+                    }
+
+                    # Parse additional metadata
+                    metadata = parse_metadata(file_caption, file_name)
+                    document.update(metadata)
+
+                    batch_docs.append(document)
+
+                    # Flush batch when it reaches BATCH_SIZE
+                    if len(batch_docs) >= BATCH_SIZE:
+                        await flush_batch()
+
+                # Flush any remaining documents
+                await flush_batch()
 
                 # Final success message
                 time_taken = get_readable_time(time.time() - start_time)
@@ -238,6 +283,32 @@ async def save_file_to_db(media, message):
     except Exception as e:
         print(f"❌ Error saving file: {e}")
         return 'err'
+
+
+async def save_files_batch(documents: list) -> tuple[int, int, int]:
+    """Batch insert multiple documents with duplicate handling.
+    
+    Returns: (inserted_count, duplicate_count, error_count)
+    """
+    if not documents:
+        return 0, 0, 0
+    
+    try:
+        result = await movies_col.insert_many(documents, ordered=False)
+        return len(result.inserted_ids), 0, 0
+    except Exception as e:
+        # Handle BulkWriteError - extract inserted and duplicate counts
+        if hasattr(e, 'details'):
+            details = e.details
+            inserted = details.get('nInserted', 0)
+            # Count write errors (duplicates)
+            write_errors = details.get('writeErrors', [])
+            duplicate_count = sum(1 for err in write_errors if err.get('code') == 11000)
+            error_count = len(write_errors) - duplicate_count
+            return inserted, duplicate_count, error_count
+        # Fallback for other exceptions
+        print(f"❌ Batch insert error: {e}")
+        return 0, 0, len(documents)
 
 
 async def index_message(msg):
