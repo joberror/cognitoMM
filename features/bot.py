@@ -178,22 +178,32 @@ async def main():
                 loop=asyncio.get_running_loop(),
             )
 
+            # Track background tasks for graceful shutdown
+            background_tasks: list[asyncio.Task] = []
+
             # Start deletion monitor background task
-            asyncio.create_task(start_deletion_monitor())
+            background_tasks.append(asyncio.create_task(start_deletion_monitor()))
 
             # Start orphan prune monitor (primary channel-deletion cleanup)
-            asyncio.create_task(start_orphan_prune_monitor())
+            background_tasks.append(asyncio.create_task(start_orphan_prune_monitor()))
 
             # Scheduled /update_db: periodically rescan channels for new content
-            asyncio.create_task(start_db_rescan_monitor())
+            background_tasks.append(asyncio.create_task(start_db_rescan_monitor()))
 
             # Premium expiry reminders (DM 3d / 1d before lapse)
-            asyncio.create_task(start_premium_expiry_monitor())
+            background_tasks.append(asyncio.create_task(start_premium_expiry_monitor()))
 
             # Self-keep-alive: ping the public URL so managed hosts (HF
             # Spaces) never put the container to sleep. No-op when no public
             # URL is configured (local dev, VPS, Docker).
-            start_keep_alive()
+            keep_alive_task = start_keep_alive()
+            if keep_alive_task:
+                background_tasks.append(keep_alive_task)
+
+            # Import queue_processor_task from config to track it for shutdown
+            from . import config
+            if config.queue_processor_task and not config.queue_processor_task.done():
+                background_tasks.append(config.queue_processor_task)
 
             print(f"✅ MovieBot is running! (v{BOT_VERSION})")
             print("🛑 Press Ctrl+C to stop")
@@ -204,6 +214,13 @@ async def main():
             # Handle shutdown gracefully
             async def signal_handler():
                 print("\n🛑 Received shutdown signal...")
+                # Cancel all background tasks
+                for task in background_tasks:
+                    if not task.done():
+                        task.cancel()
+                # Wait for tasks to finish cancellation
+                if background_tasks:
+                    await asyncio.gather(*background_tasks, return_exceptions=True)
                 await logger.flush()
                 logger.stop_capturing()
                 stop_event.set()
