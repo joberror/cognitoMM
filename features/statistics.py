@@ -342,22 +342,32 @@ async def collect_comprehensive_stats(admin_id=None):
         ]
         top_users_raw = await users_col.aggregate(top_users_pipeline).to_list(length=20)
 
-        # Filter out config admins and check premium status
+        # Filter out config admins and check premium status in batch
+        # Collect user_ids first (excluding config admins)
+        user_ids = [u.get('user_id') for u in top_users_raw if u.get('user_id') not in ADMINS]
+        # Batch fetch premium statuses with single $in query
+        premium_docs = {}
+        if user_ids:
+            cursor = premium_users_col.find({"user_id": {"$in": user_ids}})
+            async for doc in cursor:
+                premium_docs[doc['user_id']] = doc
+
         top_users = []
+        now = datetime.now(timezone.utc)
         for user in top_users_raw:
             user_id = user.get('user_id')
             if user_id in ADMINS:
                 continue  # Skip config admins
 
-            # Check if user is premium
-            premium_doc = await premium_users_col.find_one({"user_id": user_id})
+            # Check premium status from batch results
             is_premium = False
+            premium_doc = premium_docs.get(user_id)
             if premium_doc:
                 expiry = premium_doc.get('expiry_date')
                 if expiry:
                     if expiry.tzinfo is None:
                         expiry = expiry.replace(tzinfo=timezone.utc)
-                    is_premium = expiry > datetime.now(timezone.utc)
+                    is_premium = expiry > now
 
             top_users.append({
                 'user_id': user_id,
