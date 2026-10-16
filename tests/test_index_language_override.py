@@ -101,9 +101,31 @@ def test_unique_indexes_still_created():
     _with_fakes(check)
 
 
+def test_premium_payment_charge_id_index_is_unique():
+    """The payments charge_id index must actually be built, and unique.
+
+    Regression: this entry declared ``{"unique": True}`` in extra_kwargs while
+    its description was also in UNIQUE_INDEX_DESCRIPTIONS, so ensure_indexes()
+    called create_index(spec, unique=True, **{"unique": True}) and raised
+    "got multiple values for keyword argument 'unique'". The per-index handler
+    swallowed it, the unique index was never created, and duplicate premium
+    payments were no longer prevented.
+    """
+
+    def check(rec):
+        run(database.ensure_indexes())
+        by_spec = {tuple(map(tuple, spec)): kwargs for spec, kwargs in rec.calls}
+        charge = [k for k in by_spec if k == (("charge_id", 1),)]
+        assert charge, by_spec
+        assert by_spec[charge[0]].get("unique") is True, by_spec
+
+    _with_fakes(check)
+
+
 _TESTS = [
     test_text_index_uses_language_override,
     test_unique_indexes_still_created,
+    test_premium_payment_charge_id_index_is_unique,
 ]
 
 
