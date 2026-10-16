@@ -127,7 +127,7 @@ async def ensure_indexes():
             (user_request_limits_col, [("user_id", 1)], "limits user_id index", {}),
             (premium_users_col, [("user_id", 1)], "premium user_id index", {}),
             (premium_features_col, [("feature_name", 1)], "premium feature_name index", {}),
-            (premium_payments_col, [("charge_id", 1)], "premium payment charge_id index", {"unique": True}),
+            (premium_payments_col, [("charge_id", 1)], "premium payment charge_id index", {}),
             (broadcasts_col, [("broadcast_id", 1)], "broadcast_id index", {}),
             (broadcasts_col, [("admin_id", 1)], "broadcast admin_id index", {}),
             (broadcasts_col, [("started_at", -1)], "broadcast started_at index", {}),
