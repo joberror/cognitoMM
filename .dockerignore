@@ -43,6 +43,8 @@ IMPLEMENTATION_SUMMARY.md
 *.txt
 # But requirements.txt MUST be in the build context (Dockerfile COPY step)
 !requirements.txt
+# TERMS_AND_PRIVACY.md is needed at runtime for /start terms acceptance
+!TERMS_AND_PRIVACY.md
 info/
 
 # Agent config (not needed at runtime)
