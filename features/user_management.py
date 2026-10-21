@@ -6,6 +6,7 @@ for the MovieBot. It includes functions for checking user roles,
 banning/unbanning users, and verifying terms acceptance.
 """
 
+import os
 import re
 import time
 import aiofiles
@@ -19,6 +20,9 @@ from .database import users_col, logs_col, channels_col
 from .tmdb_integration import normalize_content_type
 
 _terms_text = None
+
+# Compute absolute path to TERMS_AND_PRIVACY.md relative to this module's directory
+_TERMS_FILE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'TERMS_AND_PRIVACY.md')
 
 async def get_user_doc(user_id: int):
     """Get user document from database"""
@@ -51,7 +55,7 @@ async def load_terms_and_privacy():
     if _terms_text is not None:
         return _terms_text
     try:
-        async with aiofiles.open('TERMS_AND_PRIVACY.md', 'r', encoding='utf-8') as f:
+        async with aiofiles.open(_TERMS_FILE_PATH, 'r', encoding='utf-8') as f:
             content = await f.read()
         _terms_text = content
         return content
