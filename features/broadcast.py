@@ -209,16 +209,14 @@ async def execute_broadcast(
         format_progress_message(metrics, 0, 0)
     )
     
-    # Rate limiting: token bucket style - one send per (1/BROADCAST_RATE_LIMIT) seconds
-    # Semaphore of 1 ensures we serialize sends while respecting the rate limit
-    semaphore = asyncio.Semaphore(1)
+    # Rate limiting: token bucket - semaphore = rate limit, sleep OUTSIDE critical section
+    semaphore = asyncio.Semaphore(BROADCAST_RATE_LIMIT)
     delay = 1.0 / BROADCAST_RATE_LIMIT
     
     async def send_with_rate_limit(user_id: int) -> tuple[int, str | None]:
         """Send to one user with rate limiting, return (user_id, error_type or None)"""
         async with semaphore:
             result = await send_broadcast_message(client, user_id, message_text, parse_mode)
-            await asyncio.sleep(delay)  # Rate limiting between sends
             return user_id, result.get("error") if not result["success"] else None
     
     # Process in chunks to update progress periodically
@@ -228,8 +226,11 @@ async def execute_broadcast(
     for chunk_start in range(0, len(user_ids), CHUNK_SIZE):
         chunk = user_ids[chunk_start:chunk_start + CHUNK_SIZE]
         
-        # Send chunk concurrently (but rate-limited by semaphore)
+        # Send chunk concurrently (rate-limited by semaphore)
         results = await asyncio.gather(*[send_with_rate_limit(uid) for uid in chunk])
+        
+        # Rate limit between chunks
+        await asyncio.sleep(delay * len(chunk))
         
         # Update metrics
         for user_id, error_type in results:

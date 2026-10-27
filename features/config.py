@@ -167,11 +167,71 @@ active_indexing_threads = set()
 # User input waiting system (replacement for client.listen)
 user_input_events = {}
 
+# Premium payment sessions (TTL-managed, for pre_checkout validation)
+premium_sessions = {}
+
+# Background cleanup tasks
+_premium_sessions_cleanup_task = None
+_bulk_downloads_cleanup_task = None
+
+
+async def cleanup_expired_premium_sessions() -> int:
+    """Remove expired premium payment sessions. Returns count removed."""
+    import time
+    now = time.time()
+    expired_keys = [k for k, v in premium_sessions.items() if v.get("expires", 0) < now]
+    for k in expired_keys:
+        premium_sessions.pop(k, None)
+    if expired_keys:
+        print(f"🧹 Cleaned up {len(expired_keys)} expired premium sessions")
+    return len(expired_keys)
+
+
+async def start_premium_sessions_cleanup(interval_seconds: int = 300):
+    """Background task: periodically clean expired premium sessions."""
+    global _premium_sessions_cleanup_task
+    if _premium_sessions_cleanup_task is not None:
+        return
+    async def _run():
+        while True:
+            try:
+                await cleanup_expired_premium_sessions()
+            except Exception as e:
+                print(f"⚠️ Premium sessions cleanup error: {e}")
+            await asyncio.sleep(interval_seconds)
+    _premium_sessions_cleanup_task = asyncio.create_task(_run())
+    print(f"✅ Started premium sessions cleanup monitor (interval: {interval_seconds}s)")
+
+
+async def start_bulk_downloads_cleanup(interval_seconds: int = 600):
+    """Background task: periodically clean expired bulk_downloads entries.
+
+    Uses the existing cleanup_expired_bulk_downloads from utils.py which handles
+    both bulk download entries (with created_at) and premium payment sessions
+    (with expires timestamp).
+    """
+    global _bulk_downloads_cleanup_task
+    if _bulk_downloads_cleanup_task is not None:
+        return
+    async def _run():
+        while True:
+            try:
+                from .utils import cleanup_expired_bulk_downloads
+                await cleanup_expired_bulk_downloads()
+            except Exception as e:
+                print(f"⚠️ Bulk downloads cleanup error: {e}")
+            await asyncio.sleep(interval_seconds)
+    _bulk_downloads_cleanup_task = asyncio.create_task(_run())
+    print(f"✅ Started bulk_downloads cleanup monitor (interval: {interval_seconds}s)")
+
+
 class TempData:
     """Temporary data storage for bot operations"""
-    CANCEL = False
-    INDEXING_CHAT = None
-    INDEXING_USER = None
+    def __init__(self):
+        self.CANCEL = False
+        self.INDEXING_CHAT = None
+        self.INDEXING_USER = None
+        self.deletion_sessions = {}
 
 temp_data = TempData()
 

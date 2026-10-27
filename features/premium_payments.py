@@ -89,11 +89,10 @@ async def send_premium_invoice(client, chat_id: int, plan_key: str, user_id=None
         return False, "Payments are currently disabled."
     
     # Store the selected plan in session with TTL for validation in pre_checkout
-    from .config import bulk_downloads
+    from .config import premium_sessions
     import time
     session_key = f"premium_session:{user_id if user_id is not None else chat_id}"
-    bulk_downloads[session_key] = {
-        "type": "premium_payment",
+    premium_sessions[session_key] = {
         "plan_key": plan_key,
         "user_id": user_id if user_id is not None else chat_id,
         "expires": time.time() + 300,  # 5 min TTL
@@ -126,20 +125,20 @@ async def handle_pre_checkout(client, pre_checkout_query):
         return False
     
     # Validate session TTL to prevent replay attacks
-    from .config import bulk_downloads
+    from .config import premium_sessions
     import time
     user_id = pre_checkout_query.from_user.id
     session_key = f"premium_session:{user_id}"
-    session = bulk_downloads.get(session_key)
+    session = premium_sessions.get(session_key)
     
-    if not session or session.get("type") != "premium_payment":
+    if not session:
         await client.answer_pre_checkout_query(
             pre_checkout_query.id, ok=False,
             error_message="Payment session expired. Please try again with /buy_premium.")
         return False
     
     if session.get("expires", 0) < time.time():
-        bulk_downloads.pop(session_key, None)
+        premium_sessions.pop(session_key, None)
         await client.answer_pre_checkout_query(
             pre_checkout_query.id, ok=False,
             error_message="Payment session expired. Please try again with /buy_premium.")
@@ -152,7 +151,7 @@ async def handle_pre_checkout(client, pre_checkout_query):
         return False
     
     # Valid session - clean it up and approve
-    bulk_downloads.pop(session_key, None)
+    premium_sessions.pop(session_key, None)
     await client.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
     return True
 
@@ -161,45 +160,56 @@ async def activate_payment(user_id: int, plan_key: str, charge_id: str = None,
                            provider_charge_id: str = None, username: str = None):
     """Grant premium for a paid invoice (idempotent per Telegram charge id).
 
-    Returns ``(ok: bool, reason: str)`` where reason is ``"ok"``,
-    ``"duplicate"`` or an error string.
+    Uses the unique index on charge_id as the source of truth: we attempt to
+    insert the payment record first (with status="pending"), and only grant
+    premium if the insert succeeds. This eliminates the race where a crash
+    between add_premium_user and insert_one would grant premium without a record.
     """
     plan = PREMIUM_PLANS.get(plan_key)
     if not plan:
         return False, "unknown_plan"
 
-    # Idempotency: a replayed successful_payment (Telegram retries) must not
-    # grant premium twice.
-    if charge_id:
-        try:
-            existing = await premium_payments_col.find_one({"charge_id": charge_id})
-        except Exception:
-            existing = None
-        if existing:
-            return False, "duplicate"
+    if not charge_id:
+        return False, "missing_charge_id"
 
+    # Atomic idempotency: try to insert payment record with unique charge_id.
+    # If duplicate key error, payment was already processed.
+    payment_doc = {
+        "user_id": user_id,
+        "username": username,
+        "plan_key": plan_key,
+        "days": plan["days"],
+        "stars": plan["stars"],
+        "currency": PREMIUM_STARS_CURRENCY,
+        "charge_id": charge_id,
+        "provider_charge_id": provider_charge_id,
+        "created_at": datetime.now(timezone.utc),
+        "status": "pending",
+    }
+    try:
+        await premium_payments_col.insert_one(payment_doc)
+    except Exception as e:
+        if 'duplicate key' in str(e).lower() or (hasattr(e, 'code') and e.code == 11000):
+            return False, "duplicate"
+        print(f"⚠️ premium payment record insert failed: {e}")
+        return False, f"insert_failed: {e}"
+
+    # Payment record created - now grant premium
     ok, message = await add_premium_user(
         user_id, plan["days"], added_by=0, username=username)
     if not ok:
+        # Mark payment as failed but keep record for audit
+        await premium_payments_col.update_one(
+            {"charge_id": charge_id},
+            {"$set": {"status": "failed", "error": message}}
+        )
         return False, message
 
-    try:
-        await premium_payments_col.insert_one({
-            "user_id": user_id,
-            "username": username,
-            "plan_key": plan_key,
-            "days": plan["days"],
-            "stars": plan["stars"],
-            "currency": PREMIUM_STARS_CURRENCY,
-            "charge_id": charge_id,
-            "provider_charge_id": provider_charge_id,
-            "created_at": datetime.now(timezone.utc),
-            "status": "completed",
-        })
-    except Exception as e:
-        # A unique-index race (same charge id) is harmless: premium was already
-        # granted on the first insert.
-        print(f"⚠️ premium payment record insert failed: {e}")
+    # Update payment status to completed
+    await premium_payments_col.update_one(
+        {"charge_id": charge_id},
+        {"$set": {"status": "completed"}}
+    )
 
     await log_action("premium_purchased", by=user_id, target=user_id, extra={
         "plan": plan_key, "days": plan["days"], "stars": plan["stars"],

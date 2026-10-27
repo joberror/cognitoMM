@@ -111,8 +111,24 @@ class FakePaymentsCol:
         return None
 
     async def insert_one(self, doc):
+        # Simulate unique index on charge_id
+        if "charge_id" in doc:
+            for d in self.docs:
+                if d.get("charge_id") == doc["charge_id"]:
+                    # Raise error similar to MongoDB duplicate key
+                    err = Exception("E11000 duplicate key error collection: premium_payments index: charge_id dup key")
+                    err.code = 11000
+                    raise err
         self.docs.append(dict(doc))
         return SimpleNamespace(inserted_id=len(self.docs))
+
+    async def update_one(self, query, update, upsert=False):
+        for d in self.docs:
+            if _matches(d, query):
+                for k, v in (update.get("$set") or {}).items():
+                    d[k] = v
+                return SimpleNamespace(matched_count=1, modified_count=1)
+        return SimpleNamespace(matched_count=0, modified_count=0)
 
 
 class FakeClient:
