@@ -1,15 +1,15 @@
-pyroblack>=3.0.3  # Telegram MTProto framework (installs the `pyrogram` package); successor to hydrogram
+pyroblack>=3.0.5  # Telegram MTProto framework (installs the `pyrogram` package); successor to hydrogram
 pymongo
-python-dotenv>=1.2.2
+python-dotenv>=1.2.4
 motor>=3.7.1
 fuzzywuzzy>=0.18.0
-python-levenshtein>=0.27.3  # optional but speeds up fuzzywuzzy
+python-levenshtein>=0.27.5  # optional but speeds up fuzzywuzzy
 tgcrypto>=1.2.5  # for better performance
 uvloop
 requests
 aiohttp
 aiofiles
-Pillow>=12.2.0
+Pillow>=13.0.0
 Flask>=3.1.3
 waitress  # production WSGI server for the health-check webapp
 
@@ -17,6 +17,6 @@ waitress  # production WSGI server for the health-check webapp
 # pytest-asyncio >= 1.4.0 guarantees asyncio_default_test_loop_scope (used in
 # pyproject.toml [tool.pytest.ini_options]) is supported.
 pytest>=7.0
-pytest-asyncio>=1.0
+pytest-asyncio>=1.4.0
 # Lint gate (make lint); pinned so CI stays deterministic.
-ruff==0.16.9
+ruff==0.17.1
