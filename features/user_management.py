@@ -9,6 +9,7 @@ banning/unbanning users, and verifying terms acceptance.
 import os
 import re
 import time
+import asyncio
 import aiofiles
 from datetime import datetime, timezone
 from pyrogram.types import Message
@@ -555,6 +556,7 @@ async def update_watchlist_status(user_id: int, title_key: str, fields: dict) ->
 # window notifies; the rest are suppressed. Keyed per title so two different
 # titles landing together each get their own single message.
 _notify_cooldowns: dict = {}
+_notify_cooldowns_lock = asyncio.Lock()
 
 
 def _notify_identity(title: str, tmdb_id) -> str:
@@ -564,19 +566,24 @@ def _notify_identity(title: str, tmdb_id) -> str:
     return f"title:{_watch_key(title)}"
 
 
-def _cooldown_active(key: tuple) -> bool:
-    """True when this (user, title) was already notified inside the window."""
-    record = _notify_cooldowns.get(key)
-    if not record:
-        return False
-    sent_at, count = record
-    if (time.monotonic() - sent_at) > WATCHLIST_NOTIFY_COOLDOWN_SECONDS:
-        _notify_cooldowns.pop(key, None)
-        return False
-    # Already DMed in this window: absorb the extra copy into the count
-    # instead of sending a second message.
-    _notify_cooldowns[key] = (sent_at, count + 1)
-    return True
+async def _cooldown_active(key: tuple) -> bool:
+    """True when this (user, title) was already notified inside the window.
+
+    Uses a lock to prevent races when concurrent indexing events check/update
+    the same (user, title) key.
+    """
+    async with _notify_cooldowns_lock:
+        record = _notify_cooldowns.get(key)
+        if not record:
+            return False
+        sent_at, count = record
+        if (time.monotonic() - sent_at) > WATCHLIST_NOTIFY_COOLDOWN_SECONDS:
+            _notify_cooldowns.pop(key, None)
+            return False
+        # Already DMed in this window: absorb the extra copy into the count
+        # instead of sending a second message.
+        _notify_cooldowns[key] = (sent_at, count + 1)
+        return True
 
 
 def reset_notify_cooldowns() -> None:
@@ -595,9 +602,13 @@ async def notify_watchlist(entry: dict) -> int:
     Floodgate: a burst of copies for the same title (a full season dropping
     at once, or several quality variants) sends each watcher ONE message —
     the rest are absorbed by the per-(user, title) cooldown above.
+
+    Rate limiting: uses a semaphore to limit concurrent DM sends (default 10)
+    and a small delay between sends to avoid FloodWait.
     """
     from .config import client
     from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    import asyncio
 
     title = (entry.get("title") or "").strip()
     if not title or client is None:
@@ -620,12 +631,14 @@ async def notify_watchlist(entry: dict) -> int:
     channel_id = entry.get("channel_id")
     message_id = entry.get("message_id")
     identity = _notify_identity(title, tmdb_id)
-    for doc in docs:
-        uid = doc.get("user_id")
-        if uid is None:
-            continue
-        if _cooldown_active((uid, identity)):
-            continue
+
+    # Rate limiting for DM sends
+    semaphore = asyncio.Semaphore(10)  # Max 10 concurrent DMs
+    delay = 0.1  # 100ms between sends
+
+    async def send_dm(uid: int) -> bool:
+        if await _cooldown_active((uid, identity)):
+            return False
         try:
             text = (
                 f"🎬 **{title}** is now available!\n\n"
@@ -639,13 +652,23 @@ async def notify_watchlist(entry: dict) -> int:
                         callback_data=f"get_file:{channel_id}:{message_id}",
                     )
                 ]])
-            await client.send_message(uid, text, reply_markup=reply_markup)
+            async with semaphore:
+                await client.send_message(uid, text, reply_markup=reply_markup)
+                await asyncio.sleep(delay)
             # Record only after a successful send, so a failed DM does not
             # burn the user's window.
             _notify_cooldowns[(uid, identity)] = (time.monotonic(), 0)
-            notified += 1
+            return True
         except Exception as e:
             print(f"⚠️ notify_watchlist DM failed for {uid}: {e}")
+            return False
+
+    # Send DMs concurrently with rate limiting
+    tasks = [send_dm(doc.get("user_id")) for doc in docs if doc.get("user_id") is not None]
+    if tasks:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        notified = sum(1 for r in results if r is True)
+
     return notified
 
 

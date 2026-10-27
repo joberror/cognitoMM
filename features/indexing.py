@@ -30,6 +30,15 @@ from .metadata_parser import parse_metadata
 from .utils import get_readable_time
 from .statistics_store import prune_stats, indexing_stats  # re-exported; owned by the shared stats store
 
+# Diagnostic logging gate - set DEBUG=1 in env to enable verbose indexing logs
+DEBUG_INDEXING = os.getenv("DEBUG_INDEXING", "0").lower() in ("1", "true", "yes")
+
+
+def _diag(msg: str) -> None:
+    """Print diagnostic message only if DEBUG_INDEXING is enabled."""
+    if DEBUG_INDEXING:
+        print(msg)
+
 
 async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
     """Enhanced indexing process using Pyroblack's get_chat_history"""
@@ -45,7 +54,7 @@ async def start_indexing_process(client, msg, chat_id, last_msg_id, skip):
     batch_docs: list[dict] = []
 
     async def flush_batch():
-        nonlocal total_files, duplicate, errors
+        nonlocal total_files, duplicate, errors, batch_docs
         if not batch_docs:
             return
         ins, dup, err = await save_files_batch(batch_docs)
@@ -294,15 +303,18 @@ async def save_files_batch(documents: list) -> tuple[int, int, int]:
     """Batch insert multiple documents with duplicate handling.
 
     Returns: (inserted_count, duplicate_count, error_count)
-    Retries non-duplicate errors once individually.
+    Retries non-duplicate errors up to MAX_BATCH_RETRIES times.
     """
     if not documents:
         return 0, 0, 0
+
+    MAX_BATCH_RETRIES = 3
 
     total_inserted = 0
     total_duplicates = 0
     total_errors = 0
     remaining_docs = documents
+    retry_count = 0
 
     # Try batch insert first
     while remaining_docs:
@@ -320,7 +332,7 @@ async def save_files_batch(documents: list) -> tuple[int, int, int]:
                 write_errors = details.get('writeErrors', [])
                 # Separate duplicates from other errors
                 retry_docs = []
-                for i, err in enumerate(write_errors):
+                for err in write_errors:
                     if err.get('code') == 11000:
                         total_duplicates += 1
                     else:
@@ -328,11 +340,32 @@ async def save_files_batch(documents: list) -> tuple[int, int, int]:
                         # Get the failed document index and add to retry
                         idx = err.get('index')
                         if idx is not None and idx < len(remaining_docs):
-                            retry_docs.append(remaining_docs[idx])
-                # Retry non-duplicate errors individually
-                if retry_docs:
+                            failed_doc = remaining_docs[idx]
+                            retry_docs.append(failed_doc)
+                            # Log failed document for debugging
+                            failed_id = failed_doc.get('_id', 'unknown')
+                            failed_title = failed_doc.get('title', 'unknown')
+                            print(f"⚠️ Batch insert non-duplicate error for doc {failed_id} ({failed_title}): {err.get('errmsg', 'unknown error')}")
+                        else:
+                            # No index - log all remaining docs as potential failures
+                            for d in remaining_docs:
+                                failed_id = d.get('_id', 'unknown')
+                                failed_title = d.get('title', 'unknown')
+                                print(f"⚠️ Batch insert error (no index): doc {failed_id} ({failed_title})")
+                            break
+                # Retry non-duplicate errors individually, up to MAX_BATCH_RETRIES
+                if retry_docs and retry_count < MAX_BATCH_RETRIES:
+                    retry_count += 1
                     remaining_docs = retry_docs
+                    print(f"🔄 Retrying {len(retry_docs)} failed documents (attempt {retry_count}/{MAX_BATCH_RETRIES})")
                     continue
+                elif retry_docs:
+                    # Max retries exceeded - count remaining as errors
+                    total_errors += len(retry_docs)
+                    for d in retry_docs:
+                        failed_id = d.get('_id', 'unknown')
+                        failed_title = d.get('title', 'unknown')
+                        print(f"❌ Max retries exceeded for doc {failed_id} ({failed_title})")
                 break
             # Fallback for other exceptions - try individually
             print(f"❌ Batch insert error, retrying individually: {e}")
@@ -345,6 +378,9 @@ async def save_files_batch(documents: list) -> tuple[int, int, int]:
                         total_duplicates += 1
                     else:
                         total_errors += 1
+                        failed_id = doc.get('_id', 'unknown')
+                        failed_title = doc.get('title', 'unknown')
+                        print(f"❌ Individual insert failed for doc {failed_id} ({failed_title}): {indiv_err}")
             break
 
     return total_inserted, total_duplicates, total_errors
@@ -365,18 +401,18 @@ async def index_message(msg):
         import threading
         current_thread = threading.current_thread().ident
         timestamp = datetime.now(timezone.utc).isoformat()
-        print(f"[DIAGNOSTIC] {timestamp} - index_message() called for msg {msg.id} on thread {current_thread}")
+        _diag(f"[DIAGNOSTIC] {timestamp} - index_message() called for msg {msg.id} on thread {current_thread}")
 
         # must be channel, supergroup, or forum post
         if getattr(msg, "chat", None) is None:
-            print(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: No chat object")
+            _diag(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: No chat object")
             return
 
         chat_type = getattr(msg.chat, "type", None)
         # Handle both string and enum values
         chat_type_str = str(chat_type).lower() if chat_type else ""
         if not any(supported in chat_type_str for supported in ["channel", "supergroup", "forum"]):
-            print(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: Unsupported chat type {chat_type}")
+            _diag(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: Unsupported chat type {chat_type}")
             return
 
         # Only index channels that exist in channels_col and enabled True
@@ -386,7 +422,7 @@ async def index_message(msg):
                 f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: "
                 f"Channel {msg.chat.id} not registered or disabled"
             )
-            print(msg_txt)
+            _diag(msg_txt)
             return
 
         # Only process video or documents with video mime
@@ -394,19 +430,19 @@ async def index_message(msg):
         doc = getattr(msg, "document", None)
         has_doc = doc is not None and getattr(doc, "mime_type", "").startswith("video")
         if not (has_video or has_doc):
-            print(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: No video content")
+            _diag(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: No video content")
             return
 
         # DIAGNOSTIC LOG: Track duplicate check race condition
-        print(f"[DIAGNOSTIC] {timestamp} - Checking for duplicate of message {msg.id} in channel {msg.chat.id}")
+        _diag(f"[DIAGNOSTIC] {timestamp} - Checking for duplicate of message {msg.id} in channel {msg.chat.id}")
         
         # Avoid duplicates
         existing = await movies_col.find_one({"channel_id": msg.chat.id, "message_id": msg.id})
         if existing:
-            print(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: Already exists in database")
+            _diag(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: Already exists in database")
             return
         
-        print(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} passed duplicate check, proceeding with database insertion")
+        _diag(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} passed duplicate check, proceeding with database insertion")
 
         file_size = None
         filename = None
@@ -457,11 +493,11 @@ async def index_message(msg):
 
         # DIAGNOSTIC LOG: Track database insertion
         timestamp = datetime.now(timezone.utc).isoformat()
-        print(f"[DIAGNOSTIC] {timestamp} - Attempting to insert message {msg.id} into database")
+        _diag(f"[DIAGNOSTIC] {timestamp} - Attempting to insert message {msg.id} into database")
         
         try:
             await movies_col.insert_one(entry)
-            print(f"[DIAGNOSTIC] {timestamp} - Successfully inserted message {msg.id} into database")
+            _diag(f"[DIAGNOSTIC] {timestamp} - Successfully inserted message {msg.id} into database")
             indexing_stats['successful_inserts'] += 1
             from .user_management import log_action, notify_watchlist
             await log_action(
@@ -509,21 +545,21 @@ async def index_message(msg):
             except Exception as fulfill_err:
                 print(f"⚠️ Request auto-fulfill failed for {entry.get('title')}: {fulfill_err}")
         except Exception as db_error:
-            print(f"[DIAGNOSTIC] {timestamp} - Database insertion failed for message {msg.id}: {str(db_error)}")
+            _diag(f"[DIAGNOSTIC] {timestamp} - Database insertion failed for message {msg.id}: {str(db_error)}")
             # Check if it's a duplicate key error
             if 'duplicate key' in str(db_error).lower():
                 dup_msg = (
                     f"[DIAGNOSTIC] {timestamp} - Duplicate key error detected for "
                     f"message {msg.id} - RACE CONDITION CONFIRMED"
                 )
-                print(dup_msg)
+                _diag(dup_msg)
                 indexing_stats['duplicate_errors'] += 1
             else:
                 err_msg = (
                     f"[DIAGNOSTIC] {timestamp} - Other database error for "
                     f"message {msg.id}: {str(db_error)}"
                 )
-                print(err_msg)
+                _diag(err_msg)
                 indexing_stats['other_errors'] += 1
             from .user_management import log_action
             await log_action("index_error", extra={"error": str(db_error)})
@@ -536,7 +572,7 @@ async def index_message(msg):
 
 async def process_message_queue():
     """Process messages from queue sequentially to avoid race conditions"""
-    print("[DIAGNOSTIC] Message queue processor started")
+    _diag("[DIAGNOSTIC] Message queue processor started")
     
     # Batch statistics
     batch_stats = {
@@ -570,7 +606,7 @@ async def process_message_queue():
                         'error': 0,
                         'skipped': 0
                      }
-                
+                 
                 await asyncio.sleep(1)  # Wait for new messages
                 continue
                 
@@ -586,7 +622,7 @@ async def process_message_queue():
             # Count as processed
             batch_stats['processed'] += 1
             
-            print(f"[DIAGNOSTIC] {timestamp} - Processing queued message {message.id} on thread {current_thread}")
+            _diag(f"[DIAGNOSTIC] {timestamp} - Processing queued message {message.id} on thread {current_thread}")
             
             # Check if this message has media before attempting to index
             has_video = getattr(message, "video", None) is not None
@@ -598,23 +634,23 @@ async def process_message_queue():
                     f"[DIAGNOSTIC] {timestamp} - Media detected in queued message "
                     f"{message.id}, attempting to index..."
                 )
-                print(msg_txt)
+                _diag(msg_txt)
                 
                 try:
                     await index_message(message)
                     indexing_stats['successful_inserts'] += 1
                     batch_stats['success'] += 1
-                    print(f"[DIAGNOSTIC] {timestamp} - Successfully indexed queued message {message.id}")
+                    _diag(f"[DIAGNOSTIC] {timestamp} - Successfully indexed queued message {message.id}")
                 except Exception as e:
                     indexing_stats['other_errors'] += 1
                     batch_stats['error'] += 1
-                    print(f"[DIAGNOSTIC] {timestamp} - ERROR indexing queued message {message.id}: {str(e)}")
+                    _diag(f"[DIAGNOSTIC] {timestamp} - ERROR indexing queued message {message.id}: {str(e)}")
             else:
                 batch_stats['skipped'] += 1
-                print(f"[DIAGNOSTIC] {timestamp} - Queued message {message.id} skipped: No media content")
+                _diag(f"[DIAGNOSTIC] {timestamp} - Queued message {message.id} skipped: No media content")
                 
         except Exception as e:
-            print(f"[DIAGNOSTIC] Message queue processor error: {e}")
+            _diag(f"[DIAGNOSTIC] Message queue processor error: {e}")
             await asyncio.sleep(5)  # Brief pause before retrying
 
 
@@ -646,7 +682,7 @@ async def on_message(client, message):
             f"[DIAGNOSTIC] {timestamp} - COMMAND DETECTED: {message.text} - "
             f"This should be handled by command handler, not indexing!"
         )
-        print(cmd_msg)
+        _diag(cmd_msg)
         # Don't process commands in indexing - let them fall through to command handler
         return
     # Auto-indexing for channel messages
@@ -663,14 +699,14 @@ async def on_message(client, message):
         global queue_processor_task
         if queue_processor_task is None:
             queue_processor_task = asyncio.create_task(process_message_queue())
-            print(f"[DIAGNOSTIC] {timestamp} - Started message queue processor task")
+            _diag(f"[DIAGNOSTIC] {timestamp} - Started message queue processor task")
         
         # Update global indexing statistics
         indexing_stats['total_attempts'] += 1
         
         # Log message arrival for analysis
-        print(f"[DIAGNOSTIC] {timestamp} - Message {message.id} queued for sequential processing")
-        print(f"[DIAGNOSTIC] {timestamp} - Queue size: {len(message_queue)}")
+        _diag(f"[DIAGNOSTIC] {timestamp} - Message {message.id} queued for sequential processing")
+        _diag(f"[DIAGNOSTIC] {timestamp} - Queue size: {len(message_queue)}")
 
 
 # -------------------------

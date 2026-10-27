@@ -2398,7 +2398,7 @@ async def cmd_manual_deletion(client, message: Message):
         prompt_msg = await message.reply_text(
             "**Manual Deletion**\n\n"
             "Please send the title (or part of the title) to search for.\n"
-            "Tip: You can send partial titles for broader search.\n"
+            "Note: Search is a literal substring match (not regex).\n"
             "Timeout: 60 seconds"
         )
 
@@ -2448,10 +2448,6 @@ async def cmd_manual_deletion(client, message: Message):
         # Store results in a temporary dict for callback handling
         deletion_session_id = str(uuid.uuid4())[:8]
         temp_data_key = f"manual_deletion_{deletion_session_id}"
-
-        # Store in temp_data (we'll use a dict attribute)
-        if not hasattr(temp_data, 'deletion_sessions'):
-            temp_data.deletion_sessions = {}
 
         temp_data.deletion_sessions[temp_data_key] = {
             'results': results,

@@ -875,7 +875,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
             temp_data_key = f"manual_deletion_{session_id}"
 
             # Check if session exists
-            if not hasattr(temp_data, 'deletion_sessions') or temp_data_key not in temp_data.deletion_sessions:
+            if temp_data_key not in temp_data.deletion_sessions:
                 err_msg = "Session expired. Please start a new search with /manual_deletion"
                 await callback_query.answer(err_msg, show_alert=True)
                 return
