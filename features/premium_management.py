@@ -745,23 +745,11 @@ async def build_premium_user_list(now: Optional[datetime] = None, page: int = 1,
 
 async def cleanup_expired_premium():
     """
-    Clean up expired premium users (optional maintenance task)
-    This can be called periodically to remove expired premium entries
+    No-op: is_premium_user() checks expiry_date at read time, so expired
+    records are naturally filtered without deletion. Kept for backward
+    compatibility with any external callers.
     """
-    try:
-        now = datetime.now(timezone.utc)
-        result = await premium_users_col.delete_many({
-            "expiry_date": {"$lt": now}
-        })
-
-        if result.deleted_count > 0:
-            print(f"🧹 Cleaned up {result.deleted_count} expired premium users")
-            await log_action("premium_cleanup", extra={
-                "deleted_count": result.deleted_count
-            })
-
-    except Exception as e:
-        print(f"Error cleaning up expired premium users: {e}")
+    return 0
 
 
 # ------------------------------------------------------------------ #

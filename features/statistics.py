@@ -533,8 +533,10 @@ def format_uptime(seconds):
 
 
 def format_number(num):
-    """Format number with commas"""
-    return f"{num:,}" if num else "0"
+    """Format number with commas. Returns '0' for None, '', False, or 0."""
+    if num is None or num == "" or num is False:
+        return "0"
+    return f"{num:,}"
 
 
 def format_percentage(part, total):

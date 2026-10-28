@@ -34,6 +34,8 @@ async def _deliver_bulk_files(client, callback_query, files, retention_minutes):
     Tracks each delivered message for auto-deletion at ``retention_minutes``
     and counts them against the caller's daily download quota. Returns
     ``(success_count, failed_files)``.
+
+    Optimized: batch-fetches all messages in one get_messages call per channel.
     """
     from .premium_management import record_download
 
@@ -43,13 +45,34 @@ async def _deliver_bulk_files(client, callback_query, files, retention_minutes):
     failed_files = []
     sent_messages = []
 
+    # Group by channel_id for batch fetch
+    by_channel: dict[int, list[dict]] = {}
     for file_info in files:
         channel_id = int(file_info['channel_id'])
-        message_id = int(file_info['message_id'])
+        by_channel.setdefault(channel_id, []).append(file_info)
+
+    for channel_id, channel_files in by_channel.items():
+        message_ids = [int(f['message_id']) for f in channel_files]
         try:
-            msg = await client.get_messages(channel_id, message_id)
+            # Batch fetch all messages in this channel
+            messages = await client.get_messages(channel_id, message_ids)
+            if not messages:
+                raise Exception("No messages returned")
+            # get_messages returns a list when given a list of ids
+            msg_map = {msg.id: msg for msg in messages if msg}
+        except Exception as e:
+            print(f"❌ Batch fetch failed for channel {channel_id}: {e}")
+            for f in channel_files:
+                failed_files.append(f"{channel_id}:{f['message_id']}")
+            continue
+
+        for file_info in channel_files:
+            message_id = int(file_info['message_id'])
+            msg = msg_map.get(message_id)
             if not msg:
-                raise Exception("Message not found")
+                print(f"❌ Message not found: {channel_id}:{message_id}")
+                failed_files.append(f"{channel_id}:{message_id}")
+                continue
 
             db_item = await movies_col.find_one(
                 {"channel_id": channel_id, "message_id": message_id})
@@ -72,15 +95,13 @@ async def _deliver_bulk_files(client, callback_query, files, retention_minutes):
                     chat_id=user_id, file_id=msg.document.file_id, caption=final_caption,
                     parse_mode=ParseMode.HTML)
             else:
-                raise Exception("Message does not contain video or document")
+                print(f"❌ Message {channel_id}:{message_id} has no video/document")
+                failed_files.append(f"{channel_id}:{message_id}")
+                continue
 
             if sent_message:
                 sent_messages.append(sent_message.id)
             success_count += 1
-        except Exception as e:
-            print(f"❌ Failed to send {channel_id}:{message_id}: {e}")
-            failed_files.append(f"{channel_id}:{message_id}")
-            continue
 
     for msg_id in sent_messages:
         await track_file_for_deletion(
