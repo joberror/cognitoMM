@@ -19,4 +19,4 @@ waitress  # production WSGI server for the health-check webapp
 pytest>=7.0
 pytest-asyncio>=1.4.0
 # Lint gate (make lint); pinned so CI stays deterministic.
-ruff==0.17.1
+ruff==0.17.2
