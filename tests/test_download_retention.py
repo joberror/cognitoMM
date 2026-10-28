@@ -59,9 +59,19 @@ class FakeClient:
         return SimpleNamespace(id=next(self._ids))
 
     async def get_messages(self, channel_id, message_id):
+        # Support both single int and list of ints (batch fetch)
+        if isinstance(message_id, list):
+            return [
+                SimpleNamespace(
+                    id=mid,
+                    video=SimpleNamespace(file_id=f"file{mid}", file_size=100),
+                    document=None, caption="cap"
+                ) for mid in message_id
+            ]
         return SimpleNamespace(
             video=SimpleNamespace(file_id=f"file{message_id}", file_size=100),
-            document=None, caption="cap")
+            document=None, caption="cap"
+        )
 
     async def send_cached_media(self, chat_id, file_id, caption=None, parse_mode=None):
         self.cached.append({"chat_id": chat_id, "file_id": file_id})

@@ -14,6 +14,7 @@ import aiofiles
 from datetime import datetime, timezone
 from pyrogram.types import Message
 from pyrogram.enums import ChatType
+from pyrogram.errors import FloodWait
 
 from .config import ADMINS, WATCHLIST_FREE_LIMIT, WATCHLIST_PREMIUM_LIMIT, \
     WATCHLIST_NOTIFY_COOLDOWN_SECONDS
@@ -659,6 +660,18 @@ async def notify_watchlist(entry: dict) -> int:
             # burn the user's window.
             _notify_cooldowns[(uid, identity)] = (time.monotonic(), 0)
             return True
+        except FloodWait as e:
+            print(f"⚠️ notify_watchlist FloodWait {e.value}s for user {uid}")
+            await asyncio.sleep(e.value)
+            # Retry once after waiting
+            try:
+                async with semaphore:
+                    await client.send_message(uid, text, reply_markup=reply_markup)
+                _notify_cooldowns[(uid, identity)] = (time.monotonic(), 0)
+                return True
+            except Exception as retry_e:
+                print(f"⚠️ notify_watchlist DM retry failed for {uid}: {retry_e}")
+                return False
         except Exception as e:
             print(f"⚠️ notify_watchlist DM failed for {uid}: {e}")
             return False

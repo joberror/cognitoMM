@@ -36,6 +36,38 @@ TITLE_STATUS_CACHE_TTL_MINUTES = 60
 MAX_TITLE_STATUS_CACHE_SIZE = 1000
 
 
+# TMDb API retry config
+TMDB_MAX_RETRIES = 3
+TMDB_BASE_DELAY = 1.0  # seconds
+
+async def tmdb_request_with_retry(session: aiohttp.ClientSession, url: str, params: dict,
+                                   max_retries: int = TMDB_MAX_RETRIES) -> dict | None:
+    """Execute TMDb API request with exponential backoff retry on 429/5xx."""
+    import random
+    for attempt in range(max_retries + 1):
+        try:
+            async with session.get(url, params=params, timeout=10) as response:
+                if response.status == 200:
+                    return await response.json()
+                if response.status in (429, 500, 502, 503, 504):
+                    if attempt < max_retries:
+                        delay = TMDB_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
+                        print(f"⚠️ TMDb {response.status}, retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(delay)
+                        continue
+                print(f"TMDb API error: {response.status}")
+                return None
+        except aiohttp.ClientError as e:
+            if attempt < max_retries:
+                delay = TMDB_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
+                print(f"⚠️ TMDb connection error: {e}, retrying in {delay:.1f}s")
+                await asyncio.sleep(delay)
+                continue
+            print(f"TMDb API connection error: {e}")
+            return None
+    return None
+
+
 def get_cached_trending(category: str) -> Optional[List[Dict]]:
     """Get cached trending data if valid"""
     cache = _trending_cache.get(category)
@@ -88,32 +120,29 @@ async def search_tmdb(title: str, year: str, content_type: str) -> List[Dict]:
     
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(search_url, params=params, timeout=10) as response:
-                if response.status != 200:
-                    print(f"TMDb API error: {response.status}")
-                    return []
+            data = await tmdb_request_with_retry(session, search_url, params)
+            if not data:
+                return []
+            results = data.get("results", [])
+            
+            # Process and format results
+            formatted_results = []
+            for item in results[:5]:  # Limit to top 5
+                # Get IMDB ID
+                imdb_id = await get_imdb_id(item.get("id"), endpoint)
                 
-                data = await response.json()
-                results = data.get("results", [])
+                # Extract relevant data
+                result = {
+                    "tmdb_id": item.get("id"),
+                    "title": item.get("title") if content_type == "Movie" else item.get("name"),
+                    "year": extract_year(item, content_type),
+                    "overview": item.get("overview", "No overview available")[:150],  # Truncate
+                    "imdb_id": imdb_id
+                }
                 
-                # Process and format results
-                formatted_results = []
-                for item in results[:5]:  # Limit to top 5
-                    # Get IMDB ID
-                    imdb_id = await get_imdb_id(item.get("id"), endpoint)
-                    
-                    # Extract relevant data
-                    result = {
-                        "tmdb_id": item.get("id"),
-                        "title": item.get("title") if content_type == "Movie" else item.get("name"),
-                        "year": extract_year(item, content_type),
-                        "overview": item.get("overview", "No overview available")[:150],  # Truncate
-                        "imdb_id": imdb_id
-                    }
-                    
-                    formatted_results.append(result)
-                
-                return formatted_results
+                formatted_results.append(result)
+            
+            return formatted_results
     
     except aiohttp.ClientError as e:
         print(f"TMDb API connection error: {e}")

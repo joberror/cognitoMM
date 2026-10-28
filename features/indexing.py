@@ -436,8 +436,10 @@ async def index_message(msg):
         # DIAGNOSTIC LOG: Track duplicate check race condition
         _diag(f"[DIAGNOSTIC] {timestamp} - Checking for duplicate of message {msg.id} in channel {msg.chat.id}")
         
-        # Avoid duplicates
-        existing = await movies_col.find_one({"channel_id": msg.chat.id, "message_id": msg.id})
+        # Avoid duplicates - use atomic upsert on unique _id to prevent race conditions
+        # The _id is constructed as "{channel_id}_{message_id}" which is unique per message
+        entry_id = f"{msg.chat.id}_{msg.id}"
+        existing = await movies_col.find_one({"_id": entry_id})
         if existing:
             _diag(f"[DIAGNOSTIC] {timestamp} - Message {msg.id} skipped: Already exists in database")
             return
@@ -459,6 +461,7 @@ async def index_message(msg):
         parsed = parse_metadata(caption, filename)
 
         entry = {
+            "_id": f"{msg.chat.id}_{msg.id}",
             "title": parsed.get("title") or (caption.split("\n")[0] if caption else filename or "Unknown"),
             "year": parsed.get("year"),
             "rip": parsed.get("rip"),
@@ -597,7 +600,10 @@ async def process_message_queue():
                         f"{batch_stats['skipped']} skipped - "
                         f"{batch_stats['error']} errors"
                      )
-                     logger.log(summary)
+                     try:
+                         logger.log(summary)
+                     except Exception as log_err:
+                         _diag(f"[DIAGNOSTIC] Logger error: {log_err}")
                      
                      # Reset stats
                      batch_stats = {

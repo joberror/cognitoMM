@@ -295,6 +295,7 @@ class Env:
         uc.bulk_downloads.clear()
         pm.premium_users_col = self._saved["pm.premium_users_col"]
         pm.ADMINS = self._saved["pm.ADMINS"]
+        pm.reset_admin_role_cache()
         config.client = self._saved["config.client"]
         return False
 

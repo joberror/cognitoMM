@@ -654,8 +654,7 @@ async def resolve_chat_ref(ref: str, client):
     # try numeric
     try:
         cid = int(r)
-        return await client.get_chat(cid)
-    except Exception:
-        pass
-    # try username or slug
-    return await client.get_chat(r)
+    except ValueError:
+        # not a numeric ID, try as username/slug
+        return await client.get_chat(r)
+    return await client.get_chat(cid)

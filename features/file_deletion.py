@@ -84,6 +84,10 @@ async def track_file_for_deletion(user_id, message_id, delete_at=None,
     file_id = str(uuid.uuid4())[:8]
 
     async with file_deletions_lock:
+        # Guard: if dict grows too large, trigger cleanup to prevent memory leak
+        # if cleanup task dies. Threshold: 50000 entries (~50k deliveries).
+        if len(file_deletions) >= 50000:
+            await cleanup_expired_file_deletions()
         file_deletions[file_id] = {
             'user_id': user_id,
             'message_id': message_id,

@@ -161,9 +161,6 @@ INDEX_EXTENSIONS = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m
 message_queue = deque(maxlen=100)
 queue_processor_task = None
 
-# DIAGNOSTIC: Track concurrent indexing operations
-active_indexing_threads = set()
-
 # User input waiting system (replacement for client.listen)
 user_input_events = {}
 
