@@ -9,6 +9,7 @@ and controlling premium features.
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Tuple
 import asyncio
+import time
 from pymongo import UpdateOne
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from .config import (ADMINS, FREE_DOWNLOAD_DAILY_LIMIT, PREMIUM_DOWNLOAD_DAILY_LIMIT,
@@ -58,20 +59,25 @@ async def initialize_premium_features():
         print(f"⚠️ Failed to initialize premium features: {e}")
 
 
+# Simple in-memory cache for admin role checks (TTL 5 min)
+_admin_role_cache: dict[int, tuple[bool, float]] = {}
+_ADMIN_ROLE_CACHE_TTL = 300  # 5 minutes
+
+def reset_admin_role_cache() -> None:
+    """Clear the admin role cache (for tests)."""
+    _admin_role_cache.clear()
+
 async def is_premium_user(user_id: int) -> bool:
     """
     Check if user has active premium status.
 
     Admin == premium: an admin always gets the premium tier (download quota,
     auto-delete retention, premium-only features) without holding a premium
-    record. Two fast paths keep this cheap:
+    record. Fast paths:
 
     1. Config ``ADMINS`` short-circuit with ZERO queries.
-    2. Only a user with NO active premium record pays the extra ``role``
-       lookup (``is_admin``) — a paying premium user still costs one read.
-
-    ``is_admin`` is imported lazily: ``user_management`` imports this module
-    from inside a function, so a top-level import would be circular.
+    2. Active premium record found — one query.
+    3. No active premium: check admin role with cached lookup.
 
     Args:
         user_id: User ID to check
@@ -103,10 +109,20 @@ async def is_premium_user(user_id: int) -> bool:
     if active:
         return True
 
-    # (2) No active premium record: a database admin is premium too.
+    # (3) No active premium record: check admin role with caching.
+    # Cache admin role lookups to avoid repeated DB queries for non-premium users.
+    now = time.time()
+    cached = _admin_role_cache.get(user_id)
+    if cached is not None:
+        is_admin_cached, cached_at = cached
+        if now - cached_at < _ADMIN_ROLE_CACHE_TTL:
+            return is_admin_cached
+
     from .user_management import is_admin
     try:
-        return bool(await is_admin(user_id))
+        admin_result = bool(await is_admin(user_id))
+        _admin_role_cache[user_id] = (admin_result, now)
+        return admin_result
     except Exception as e:
         print(f"⚠️ Admin premium fallback failed for user {user_id}: {e}")
         return False

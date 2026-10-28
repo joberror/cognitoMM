@@ -161,9 +161,10 @@ async def activate_payment(user_id: int, plan_key: str, charge_id: str = None,
     """Grant premium for a paid invoice (idempotent per Telegram charge id).
 
     Uses the unique index on charge_id as the source of truth: we attempt to
-    insert the payment record first (with status="pending"), and only grant
-    premium if the insert succeeds. This eliminates the race where a crash
-    between add_premium_user and insert_one would grant premium without a record.
+    insert the payment record with status="completed". If insert succeeds,
+    grant premium. If duplicate key error, payment was already processed.
+    This eliminates the race where a crash between add_premium_user and
+    insert_one would grant premium without a record, or leave a "pending" record.
     """
     plan = PREMIUM_PLANS.get(plan_key)
     if not plan:
@@ -173,7 +174,8 @@ async def activate_payment(user_id: int, plan_key: str, charge_id: str = None,
         return False, "missing_charge_id"
 
     # Atomic idempotency: try to insert payment record with unique charge_id.
-    # If duplicate key error, payment was already processed.
+    # Insert with status="completed" so a crash after insert still leaves a
+    # correct record. If duplicate, payment was already processed.
     payment_doc = {
         "user_id": user_id,
         "username": username,
@@ -184,7 +186,7 @@ async def activate_payment(user_id: int, plan_key: str, charge_id: str = None,
         "charge_id": charge_id,
         "provider_charge_id": provider_charge_id,
         "created_at": datetime.now(timezone.utc),
-        "status": "pending",
+        "status": "completed",
     }
     try:
         await premium_payments_col.insert_one(payment_doc)
@@ -198,18 +200,12 @@ async def activate_payment(user_id: int, plan_key: str, charge_id: str = None,
     ok, message = await add_premium_user(
         user_id, plan["days"], added_by=0, username=username)
     if not ok:
-        # Mark payment as failed but keep record for audit
+        # Premium grant failed - mark payment as failed for audit
         await premium_payments_col.update_one(
             {"charge_id": charge_id},
             {"$set": {"status": "failed", "error": message}}
         )
         return False, message
-
-    # Update payment status to completed
-    await premium_payments_col.update_one(
-        {"charge_id": charge_id},
-        {"$set": {"status": "completed"}}
-    )
 
     await log_action("premium_purchased", by=user_id, target=user_id, extra={
         "plan": plan_key, "days": plan["days"], "stars": plan["stars"],

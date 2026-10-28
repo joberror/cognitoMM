@@ -16,7 +16,7 @@ from .config import (
     API_ID, API_HASH, BOT_TOKEN, BOT_ID, MONGO_URI, MONGO_DB,
     ADMINS, LOG_CHANNEL, FUZZY_THRESHOLD, AUTO_INDEX_DEFAULT,
     bulk_downloads, file_deletions, file_deletions_lock, INDEX_EXTENSIONS,
-    message_queue, queue_processor_task, active_indexing_threads,
+    message_queue, queue_processor_task,
     user_input_events, TempData, temp_data, BOT_VERSION,
     client
 )

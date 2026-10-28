@@ -23,7 +23,8 @@ from .utils import format_file_size
 # as a module-level cache so stats endpoints (/metrics, /stat) never call
 # Telegram's get_me() on every request - that call is bound to the bot's
 # main event loop and is the most fragile part of the stats path.
-# Thread-safe: webapp may read from a different thread.
+# Thread-safe: webapp (sync thread) and bot (async) both access.
+# Lock is ONLY held for the brief dict copy - NEVER across await.
 import threading
 _bot_info_cache: dict = {}
 _bot_info_cache_lock = threading.Lock()
